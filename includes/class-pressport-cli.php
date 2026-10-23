@@ -19,7 +19,7 @@ defined( 'ABSPATH' ) || exit;
  *     wp pressport import csv --file=./pages.csv --post_type=page
  *
  *     # Import a JSON feed with a custom mapping file
- *     wp pressport import json --url=https://example.com/feed.json --map=./mapping.json
+ *     wp pressport import json --feed=https://example.com/feed.json --map=./mapping.json
  *
  *     # Pull posts from another WordPress site, updating existing ones
  *     wp pressport import wordpress --site_url=https://old.example.com --duplicate=update
@@ -48,7 +48,7 @@ class PressPort_CLI {
 	 * : csv, json, wordpress, drupal, ghost (or a custom registered source).
 	 *
 	 * [--<field>=<value>]
-	 * : Source settings, e.g. --file=posts.csv, --url=..., --site_url=..., --api_key=...
+	 * : Source settings, e.g. --file=posts.csv, --feed=... (JSON feed URL), --site_url=..., --api_key=...
 	 *
 	 * @param array $args  Args.
 	 * @param array $assoc Assoc args.
@@ -90,7 +90,7 @@ class PressPort_CLI {
 	 * : JSON mapping file: { "fields": { "post_title": "title", ... }, "meta": [{ "key": "...", "source": "..." }], "taxonomies": [{ "taxonomy": "...", "source": "..." }] }. Defaults to the suggested mapping.
 	 *
 	 * [--post_type=<type>]
-	 * : Destination post type. Default: post.
+	 * : Destination post type. Defaults to the PressPort setting.
 	 *
 	 * [--status=<status>]
 	 * : Default status: publish, draft, pending, private.
@@ -99,13 +99,13 @@ class PressPort_CLI {
 	 * : Default author.
 	 *
 	 * [--duplicate=<mode>]
-	 * : skip, update or create. Default: skip.
+	 * : skip, update or create. Defaults to the PressPort setting.
 	 *
 	 * [--batch_size=<n>]
-	 * : Records per batch. Default: 25.
+	 * : Records per batch. Defaults to the PressPort setting.
 	 *
 	 * [--[no-]featured-images]
-	 * : Download featured images. Default: yes.
+	 * : Download featured images. Defaults to the PressPort setting.
 	 *
 	 * [--content-images]
 	 * : Download images found inside content.
@@ -117,7 +117,7 @@ class PressPort_CLI {
 	 * : Show what would happen without saving.
 	 *
 	 * [--<field>=<value>]
-	 * : Source settings, e.g. --file=posts.csv, --url=..., --site_url=..., --bundle=article.
+	 * : Source settings, e.g. --file=posts.csv, --feed=... (JSON feed URL), --site_url=..., --bundle=article.
 	 *
 	 * @param array $args  Args.
 	 * @param array $assoc Assoc args.
@@ -155,7 +155,7 @@ class PressPort_CLI {
 			(array) $mapping
 		);
 
-		$options = array_merge( PressPort_Job::default_options(), array( 'batch_size' => 25 ), isset( $config['options'] ) ? (array) $config['options'] : array() );
+		$options = array_merge( PressPort_Job::default_options(), isset( $config['options'] ) ? (array) $config['options'] : array() );
 		$flags   = array(
 			'post_type'  => 'post_type',
 			'status'     => 'default_status',
@@ -326,6 +326,10 @@ class PressPort_CLI {
 		foreach ( $assoc as $key => $value ) {
 			if ( in_array( $key, $this->reserved, true ) ) {
 				continue;
+			}
+			// --url is taken by WP-CLI itself, so JSON feeds use --feed.
+			if ( 'feed' === $key ) {
+				$key = 'url';
 			}
 			if ( 'file' === $key ) {
 				$path = realpath( $value );
