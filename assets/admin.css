@@ -1,0 +1,109 @@
+.pressport-wrap { max-width: 1280px; }
+.pressport-intro { color: #50575e; font-size: 14px; max-width: 760px; }
+.pressport-tabs { margin-bottom: 16px; }
+
+.pressport-card {
+	background: #fff;
+	border: 1px solid #dcdcde;
+	border-radius: 6px;
+	padding: 16px 20px;
+	margin: 0 0 16px;
+	box-shadow: 0 1px 1px rgba(0, 0, 0, .03);
+}
+.pressport-card h2 { margin: 0 0 12px; font-size: 16px; }
+.pressport-card h3 { margin: 20px 0 8px; font-size: 14px; }
+.pressport-notice { margin: 0 0 16px !important; }
+.pressport-help { display: block; color: #646970; font-size: 12px; font-weight: 400; margin-top: 2px; }
+
+/* Stepper */
+.pressport-steps { display: flex; gap: 8px; list-style: none; margin: 0 0 16px; padding: 0; counter-reset: none; }
+.pressport-steps li {
+	margin: 0; padding: 6px 14px; border-radius: 999px;
+	background: #f0f0f1; color: #646970; font-weight: 600; font-size: 13px;
+}
+.pressport-steps li.is-current { background: #2271b1; color: #fff; }
+.pressport-steps li.is-done { background: #e7f5ea; color: #00692f; }
+
+/* Source picker */
+.pressport-source-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.pressport-source-card {
+	display: flex; align-items: center; gap: 10px;
+	background: #fff; border: 2px solid #dcdcde; border-radius: 6px;
+	padding: 14px; cursor: pointer; transition: border-color .15s, box-shadow .15s;
+}
+.pressport-source-card:hover { border-color: #8c8f94; }
+.pressport-source-card.is-selected { border-color: #2271b1; box-shadow: 0 0 0 1px #2271b1; }
+.pressport-source-card input { position: absolute; opacity: 0; pointer-events: none; }
+.pressport-source-card:focus-within { outline: 2px solid #2271b1; outline-offset: 2px; }
+.pressport-source-icon {
+	width: 32px; height: 32px; border-radius: 6px; flex: none;
+	display: inline-flex; align-items: center; justify-content: center;
+	font: 700 11px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #fff; background: #50575e;
+}
+.pressport-icon-csv::before { content: "CSV"; }
+.pressport-icon-csv { background: #1e8a46; }
+.pressport-icon-json::before { content: "{ }"; }
+.pressport-icon-json { background: #b26200; }
+.pressport-icon-wordpress::before { content: "WP"; }
+.pressport-icon-wordpress { background: #21759b; }
+.pressport-icon-drupal::before { content: "DR"; }
+.pressport-icon-drupal { background: #0678be; }
+.pressport-icon-ghost::before { content: "GH"; }
+.pressport-icon-ghost { background: #15171a; }
+
+/* Preview */
+.pressport-preview-scroll { overflow-x: auto; max-height: 340px; }
+.pressport-preview th, .pressport-preview td { white-space: nowrap; max-width: 260px; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
+.pressport-preview th { font-family: Menlo, Consolas, monospace; }
+
+/* Map + options layout */
+.pressport-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 1100px) { .pressport-grid { grid-template-columns: 1fr; } }
+.pressport-map-table th[scope="row"] { width: 32%; font-weight: 600; }
+.pressport-map-table td, .pressport-map-table th { vertical-align: middle; }
+.pressport-field-select { max-width: 100%; min-width: 180px; }
+.pressport-sample { color: #50575e; font-size: 12px; word-break: break-word; }
+.pressport-sub-table td { vertical-align: middle; }
+.pressport-remove { color: #b32d2e !important; }
+.pressport-options .pressport-opt label { display: block; }
+.pressport-opt-label { display: block; font-weight: 600; margin-bottom: 4px; }
+.pressport-options select, .pressport-options input[type="number"] { max-width: 100%; }
+.pressport-options select { width: 100%; }
+
+.pressport-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.button.pressport-danger { color: #b32d2e; border-color: #b32d2e; }
+.button.pressport-danger:hover { background: #b32d2e; color: #fff; border-color: #b32d2e; }
+
+/* Run */
+.pressport-progress { height: 14px; background: #f0f0f1; border-radius: 999px; overflow: hidden; }
+.pressport-progress span { display: block; height: 100%; background: linear-gradient(90deg, #2271b1, #3582c4); transition: width .3s ease; }
+.pressport-progress-text { color: #50575e; margin: 6px 0 12px; }
+.pressport-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0 0 12px; }
+.pressport-stats li { margin: 0; padding: 10px 12px; border-radius: 6px; background: #f6f7f7; }
+.pressport-stats strong { display: block; font-size: 22px; line-height: 1.2; }
+.pressport-stats span { color: #646970; font-size: 12px; }
+.pressport-stat-created strong { color: #00692f; }
+.pressport-stat-updated strong { color: #2271b1; }
+.pressport-stat-skipped strong { color: #646970; }
+.pressport-stat-failed strong { color: #b32d2e; }
+
+.pressport-log { margin: 0; padding: 0; list-style: none; max-height: 420px; overflow-y: auto; font: 12px/1.6 Menlo, Consolas, monospace; }
+.pressport-log li { margin: 0; padding: 3px 8px; border-left: 3px solid #dcdcde; }
+.pressport-log li:nth-child(odd) { background: #f9f9f9; }
+.pressport-log time { color: #8c8f94; }
+.pressport-log-success { border-left-color: #00a32a !important; }
+.pressport-log-warning { border-left-color: #dba617 !important; }
+.pressport-log-error { border-left-color: #d63638 !important; color: #8a2424; }
+
+/* History */
+.pressport-history td { vertical-align: middle; }
+.pressport-row-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.pressport-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: #f0f0f1; color: #50575e; text-transform: capitalize; }
+.pressport-badge-complete { background: #e7f5ea; color: #00692f; }
+.pressport-badge-running, .pressport-badge-ready { background: #e5f0fa; color: #135e96; }
+.pressport-badge-failed { background: #fcf0f1; color: #b32d2e; }
+.pressport-badge-rolled_back { background: #fcf9e8; color: #7a5c00; }
+
+@media (max-width: 782px) {
+	.pressport-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
