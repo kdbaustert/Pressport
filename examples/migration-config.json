@@ -1,0 +1,33 @@
+{
+	"source": "json",
+	"settings": {
+		"url": "https://example.com/feed.json",
+		"records_path": "items"
+	},
+	"mapping": {
+		"fields": {
+			"source_id": "id",
+			"post_title": "title",
+			"post_content": "content_html",
+			"post_excerpt": "summary",
+			"post_date": "date_published",
+			"post_author": "authors.0.name",
+			"tags": "tags",
+			"featured_image": "image"
+		},
+		"meta": [
+			{ "key": "original_url", "source": "url" }
+		],
+		"taxonomies": []
+	},
+	"options": {
+		"post_type": "post",
+		"default_status": "publish",
+		"duplicate": "update",
+		"batch_size": 25,
+		"import_featured_image": 1,
+		"import_content_images": 1,
+		"create_terms": 1,
+		"create_authors": 0
+	}
+}

@@ -1,0 +1,6 @@
+id,title,content,excerpt,date,status,author,categories,tags,image,subtitle
+101,"Welcome to the new site","<p>We moved! This post was imported from a <strong>CSV file</strong>.</p>","A quick hello from the new site.",2024-03-01 09:30,published,admin,"News > Announcements","migration|welcome",,Hello world
+102,"Five tips for a smooth migration","<p>1. Back up first.</p>
+<p>2. Run a dry run.</p>
+<p>3. Map your fields carefully.</p>","Lessons learned moving content.",2024-03-15T14:00:00Z,draft,admin,Guides,"migration, tips",,"Multi-line cells are fine"
+103,"Quarterly update","<p>Numbers are up across the board.</p>","",1712000000,1,admin,News,,,
