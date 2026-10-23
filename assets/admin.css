@@ -1,6 +1,5 @@
 .pressport-wrap { max-width: 1280px; }
 .pressport-intro { color: #50575e; font-size: 14px; max-width: 760px; }
-.pressport-tabs { margin-bottom: 16px; }
 
 .pressport-card {
 	background: #fff;
@@ -107,3 +106,18 @@
 @media (max-width: 782px) {
 	.pressport-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* Settings */
+.pressport-defaults-note { margin: -6px 0 12px; }
+.pressport-settings-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; margin-top: 12px; }
+@media (max-width: 1100px) { .pressport-settings-layout { grid-template-columns: 1fr; } }
+.pressport-settings form.pressport-card h2 { margin-top: 8px; padding-top: 16px; border-top: 1px solid #f0f0f1; }
+.pressport-settings form.pressport-card h2:first-of-type { border-top: 0; padding-top: 0; }
+.pressport-settings .form-table th { width: 200px; }
+.pressport-status-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+.pressport-status-table th, .pressport-status-table td { text-align: left; padding: 6px 0; border-bottom: 1px solid #f0f0f1; font-size: 13px; }
+.pressport-status-table th { font-weight: 500; color: #50575e; }
+.pressport-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+.pressport-dot.is-ok { background: #00a32a; }
+.pressport-dot.is-warn { background: #dba617; }
+.pressport-status code { font-size: 12px; }

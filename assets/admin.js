@@ -9,7 +9,7 @@
 	}
 
 	const state = {
-		tab: 'new',
+		tab: D.view === 'history' ? 'history' : 'new',
 		step: 'source',
 		sourceId: D.sources[ 0 ] ? D.sources[ 0 ].id : '',
 		job: null,
@@ -123,24 +123,14 @@
 		return new Date( ts * 1000 ).toLocaleString();
 	}
 
-	// Tabs
-
-	document.querySelectorAll( '.pressport-tabs .nav-tab' ).forEach( ( a ) => {
-		a.addEventListener( 'click', ( e ) => {
-			e.preventDefault();
-			if ( state.running ) {
-				return;
-			}
-			state.tab = a.dataset.tab;
-			document.querySelectorAll( '.pressport-tabs .nav-tab' ).forEach( ( b ) => b.classList.toggle( 'nav-tab-active', b === a ) );
-			render();
-		} );
-	} );
-
-	function setTab( tab ) {
-		state.tab = tab;
-		document.querySelectorAll( '.pressport-tabs .nav-tab' ).forEach( ( b ) => b.classList.toggle( 'nav-tab-active', b.dataset.tab === tab ) );
-	}
+	const STATUS_LABELS = {
+		draft: 'not started',
+		ready: 'ready',
+		running: 'running',
+		complete: 'complete',
+		failed: 'failed',
+		rolled_back: 'rolled back',
+	};
 
 	// Render
 
@@ -372,6 +362,11 @@
 
 		return el( 'div', { class: 'pressport-card pressport-options' }, [
 			el( 'h2', { text: 'Import options' } ),
+			D.settingsUrl ? el( 'p', { class: 'pressport-help pressport-defaults-note' }, [
+				'Starting values come from ',
+				el( 'a', { href: D.settingsUrl, text: 'Settings' } ),
+				'.',
+			] ) : null,
 			row( 'Import as', el( 'select', { onchange: ( e ) => {
 				o.post_type = e.target.value;
 				render();
@@ -528,7 +523,10 @@
 		state.options = Object.assign( {}, D.defaults );
 		state.error = '';
 		state.paused = false;
-		setTab( 'new' );
+		if ( state.tab !== 'new' ) {
+			window.location.href = D.importUrl;
+			return;
+		}
 		render();
 	}
 
@@ -564,11 +562,10 @@
 
 	function renderHistory() {
 		root.innerHTML = '';
-		const wrap = el( 'div', { class: 'pressport-card' }, [ el( 'h2', { text: 'Import history' } ), el( 'p', { text: 'Loading…' } ) ] );
+		const wrap = el( 'div', { class: 'pressport-card' }, el( 'p', { text: 'Loading…' } ) );
 		root.appendChild( wrap );
 		api( 'jobs', {} ).then( ( data ) => {
 			wrap.innerHTML = '';
-			wrap.appendChild( el( 'h2', { text: 'Import history' } ) );
 			if ( ! data.jobs.length ) {
 				wrap.appendChild( el( 'p', { text: 'No imports yet.' } ) );
 				return;
@@ -603,7 +600,7 @@
 					el( 'td', { text: formatDate( job.created ) } ),
 					el( 'td', {}, [ el( 'strong', { text: job.label } ), el( 'br' ), el( 'span', { class: 'pressport-help', text: job.settings.site_url || job.settings.url || '' } ) ] ),
 					el( 'td', { text: job.options.post_type } ),
-					el( 'td', {}, el( 'span', { class: 'pressport-badge pressport-badge-' + job.status, text: ( dry ? 'dry run · ' : '' ) + job.status.replace( '_', ' ' ) } ) ),
+					el( 'td', {}, el( 'span', { class: 'pressport-badge pressport-badge-' + job.status, text: ( dry ? 'dry run · ' : '' ) + ( STATUS_LABELS[ job.status ] || job.status ) } ) ),
 					el( 'td', { text: s.created + ' / ' + s.updated + ' / ' + s.skipped + ' / ' + s.failed } ),
 					el( 'td', {}, actions ),
 				] ) );
@@ -618,12 +615,15 @@
 	}
 
 	function openJob( id, resume ) {
+		if ( state.tab !== 'new' ) {
+			window.location.href = D.importUrl + '&job=' + encodeURIComponent( id ) + ( resume ? '&resume=1' : '' );
+			return;
+		}
 		api( 'job', { job: id } ).then( ( data ) => {
 			state.job = data.job;
 			state.step = 'run';
 			state.error = '';
 			state.paused = ! resume;
-			setTab( 'new' );
 			render();
 			if ( resume ) {
 				runLoop();
@@ -639,4 +639,7 @@
 	} );
 
 	render();
+	if ( D.openJob && state.tab === 'new' ) {
+		openJob( D.openJob, D.resume );
+	}
 }() );

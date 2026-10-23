@@ -22,16 +22,17 @@ class PressPort_Job {
 	 * @return array
 	 */
 	public static function default_options() {
+		$s = PressPort_Settings::get();
 		return array(
-			'post_type'             => 'post',
-			'default_status'        => 'publish',
-			'default_author'        => get_current_user_id(),
-			'duplicate'             => 'skip',
-			'batch_size'            => 10,
-			'import_featured_image' => 1,
-			'import_content_images' => 0,
-			'create_terms'          => 1,
-			'create_authors'        => 0,
+			'post_type'             => post_type_exists( $s['post_type'] ) ? $s['post_type'] : 'post',
+			'default_status'        => $s['default_status'],
+			'default_author'        => $s['default_author'] ? (int) $s['default_author'] : get_current_user_id(),
+			'duplicate'             => $s['duplicate'],
+			'batch_size'            => (int) $s['batch_size'],
+			'import_featured_image' => (int) $s['import_featured_image'],
+			'import_content_images' => (int) $s['import_content_images'],
+			'create_terms'          => (int) $s['create_terms'],
+			'create_authors'        => (int) $s['create_authors'],
 			'dry_run'               => 0,
 		);
 	}
