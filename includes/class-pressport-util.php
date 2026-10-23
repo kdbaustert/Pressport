@@ -13,6 +13,42 @@ defined( 'ABSPATH' ) || exit;
 class PressPort_Util {
 
 	/**
+	 * True while PressPort is making an outbound request.
+	 *
+	 * @var bool
+	 */
+	public static $in_request = false;
+
+	/**
+	 * @param bool   $external Whether WordPress considers the host external.
+	 * @param string $host     Host.
+	 * @param string $url      URL.
+	 * @return bool
+	 */
+	public static function allow_local_host( $external, $host, $url ) {
+		if ( self::$in_request && PressPort_Settings::get( 'allow_local_sources' ) ) {
+			return true;
+		}
+		return $external;
+	}
+
+	/**
+	 * @param int[]  $ports Allowed ports.
+	 * @param string $host  Host.
+	 * @param string $url   URL.
+	 * @return int[]
+	 */
+	public static function allow_local_port( $ports, $host = '', $url = '' ) {
+		if ( self::$in_request && PressPort_Settings::get( 'allow_local_sources' ) && $url ) {
+			$port = wp_parse_url( $url, PHP_URL_PORT );
+			if ( $port ) {
+				$ports[] = (int) $port;
+			}
+		}
+		return $ports;
+	}
+
+	/**
 	 * Private storage directory for uploaded / cached source files.
 	 *
 	 * @return string Absolute path with trailing slash.
@@ -159,15 +195,17 @@ class PressPort_Util {
 	 * @return array|WP_Error { body: mixed, headers: array }
 	 */
 	public static function get_json( $url, $headers = array() ) {
-		$response = wp_safe_remote_get(
+		self::$in_request = true;
+		$response         = wp_safe_remote_get(
 			$url,
 			array(
-				'timeout'     => 30,
+				'timeout'     => (int) PressPort_Settings::get( 'request_timeout' ),
 				'redirection' => 3,
 				'headers'     => array_merge( array( 'Accept' => 'application/json, application/vnd.api+json, application/feed+json' ), $headers ),
 				'user-agent'  => 'PressPort/' . PRESSPORT_VERSION . '; ' . home_url(),
 			)
 		);
+		self::$in_request = false;
 		if ( is_wp_error( $response ) ) {
 			return $response;
 		}

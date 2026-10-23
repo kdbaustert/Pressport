@@ -91,7 +91,9 @@ class PressPort_Media {
 		}
 
 		self::load_deps();
-		$tmp = download_url( $url, 60 );
+		PressPort_Util::$in_request = true;
+		$tmp                        = download_url( $url, max( 60, (int) PressPort_Settings::get( 'request_timeout' ) ) );
+		PressPort_Util::$in_request = false;
 		if ( is_wp_error( $tmp ) ) {
 			return $tmp;
 		}

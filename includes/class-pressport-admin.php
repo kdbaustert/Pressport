@@ -7,12 +7,10 @@
 
 defined( 'ABSPATH' ) || exit;
 
-/**
- * Tools → PressPort.
- */
 class PressPort_Admin {
 
-	const SLUG = 'pressport';
+	const SLUG         = 'pressport';
+	const HISTORY_SLUG = 'pressport-history';
 
 	public static function init() {
 		add_action( 'admin_menu', array( __CLASS__, 'menu' ) );
@@ -30,17 +28,33 @@ class PressPort_Admin {
 	 * @return string
 	 */
 	public static function capability() {
-		return (string) apply_filters( 'pressport_capability', 'manage_options' );
+		return (string) apply_filters( 'pressport_capability', PressPort_Settings::get( 'capability' ) );
 	}
 
 	public static function menu() {
-		add_management_page(
+		add_menu_page(
 			__( 'PressPort', 'pressport' ),
 			__( 'PressPort', 'pressport' ),
 			self::capability(),
 			self::SLUG,
-			array( __CLASS__, 'render' )
+			array( __CLASS__, 'render_import' ),
+			'dashicons-migrate',
+			76
 		);
+		add_submenu_page( self::SLUG, __( 'New Import', 'pressport' ), __( 'New Import', 'pressport' ), self::capability(), self::SLUG, array( __CLASS__, 'render_import' ) );
+		add_submenu_page( self::SLUG, __( 'Import History', 'pressport' ), __( 'History', 'pressport' ), self::capability(), self::HISTORY_SLUG, array( __CLASS__, 'render_history' ) );
+		add_submenu_page( self::SLUG, __( 'PressPort Settings', 'pressport' ), __( 'Settings', 'pressport' ), 'manage_options', PressPort_Settings::PAGE, array( 'PressPort_Settings', 'render' ) );
+	}
+
+	/**
+	 * Admin URL for one of our pages.
+	 *
+	 * @param string $page Page slug.
+	 * @param array  $args Extra query args.
+	 * @return string
+	 */
+	public static function url( $page = self::SLUG, $args = array() ) {
+		return add_query_arg( array_merge( array( 'page' => $page ), $args ), admin_url( 'admin.php' ) );
 	}
 
 	/**
@@ -48,7 +62,11 @@ class PressPort_Admin {
 	 * @return array
 	 */
 	public static function action_links( $links ) {
-		array_unshift( $links, '<a href="' . esc_url( admin_url( 'tools.php?page=' . self::SLUG ) ) . '">' . esc_html__( 'Import content', 'pressport' ) . '</a>' );
+		array_unshift(
+			$links,
+			'<a href="' . esc_url( self::url() ) . '">' . esc_html__( 'Import', 'pressport' ) . '</a>',
+			'<a href="' . esc_url( self::url( PressPort_Settings::PAGE ) ) . '">' . esc_html__( 'Settings', 'pressport' ) . '</a>'
+		);
 		return $links;
 	}
 
@@ -56,20 +74,25 @@ class PressPort_Admin {
 	 * @param string $hook Hook suffix.
 	 */
 	public static function assets( $hook ) {
-		if ( 'tools_page_' . self::SLUG !== $hook ) {
+		$page = isset( $_GET['page'] ) ? sanitize_key( wp_unslash( $_GET['page'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification
+		if ( ! in_array( $page, array( self::SLUG, self::HISTORY_SLUG, PressPort_Settings::PAGE ), true ) ) {
 			return;
 		}
 		wp_enqueue_style( 'pressport', PRESSPORT_URL . 'assets/admin.css', array(), PRESSPORT_VERSION );
+		if ( PressPort_Settings::PAGE === $page ) {
+			return;
+		}
 		wp_enqueue_script( 'pressport', PRESSPORT_URL . 'assets/admin.js', array(), PRESSPORT_VERSION, true );
-		wp_localize_script( 'pressport', 'PRESSPORT_DATA', self::bootstrap_data() );
+		wp_localize_script( 'pressport', 'PRESSPORT_DATA', self::bootstrap_data( self::HISTORY_SLUG === $page ? 'history' : 'new' ) );
 	}
 
 	/**
 	 * Data passed to the JS app.
 	 *
+	 * @param string $view new|history.
 	 * @return array
 	 */
-	protected static function bootstrap_data() {
+	protected static function bootstrap_data( $view ) {
 		$sources = array();
 		foreach ( PressPort_Sources::all() as $id => $class ) {
 			if ( class_exists( $class ) ) {
@@ -126,30 +149,53 @@ class PressPort_Admin {
 		}
 
 		return array(
-			'ajaxUrl'   => admin_url( 'admin-ajax.php' ),
-			'nonce'     => wp_create_nonce( 'pressport_admin' ),
-			'adminUrl'  => admin_url(),
-			'sources'   => $sources,
-			'postTypes' => $post_types,
-			'users'     => $users,
-			'targets'   => $targets,
-			'defaults'  => PressPort_Job::default_options(),
-			'maxUpload' => size_format( wp_max_upload_size() ),
+			'ajaxUrl'     => admin_url( 'admin-ajax.php' ),
+			'nonce'       => wp_create_nonce( 'pressport_admin' ),
+			'adminUrl'    => admin_url(),
+			'view'        => $view,
+			'importUrl'   => self::url(),
+			'historyUrl'  => self::url( self::HISTORY_SLUG ),
+			'settingsUrl' => current_user_can( 'manage_options' ) ? self::url( PressPort_Settings::PAGE ) : '',
+			'openJob'     => isset( $_GET['job'] ) ? sanitize_key( wp_unslash( $_GET['job'] ) ) : '', // phpcs:ignore WordPress.Security.NonceVerification
+			'resume'      => ! empty( $_GET['resume'] ), // phpcs:ignore WordPress.Security.NonceVerification
+			'sources'     => $sources,
+			'postTypes'   => $post_types,
+			'users'       => $users,
+			'targets'     => $targets,
+			'defaults'    => PressPort_Job::default_options(),
+			'maxUpload'   => size_format( wp_max_upload_size() ),
+		);
+	}
+
+	public static function render_import() {
+		self::render_shell(
+			__( 'Import Content', 'pressport' ),
+			__( 'Bring posts and pages in from a CSV file, a JSON feed, or another CMS. Map the fields, try a dry run, then import in batches. Every import can be rolled back.', 'pressport' )
+		);
+	}
+
+	public static function render_history() {
+		self::render_shell(
+			__( 'Import History', 'pressport' ),
+			__( 'Every import you have run. Resume one that stopped, run it again to pick up new content, or roll it back.', 'pressport' )
 		);
 	}
 
 	/**
-	 * Render the page shell; the UI is built by assets/admin.js.
+	 * Page wrapper; the UI itself is built by assets/admin.js.
+	 *
+	 * @param string $title Title.
+	 * @param string $intro Intro text.
 	 */
-	public static function render() {
+	protected static function render_shell( $title, $intro ) {
 		?>
 		<div class="wrap pressport-wrap">
-			<h1><?php esc_html_e( 'PressPort', 'pressport' ); ?></h1>
-			<p class="pressport-intro"><?php esc_html_e( 'Import content from a CSV file, a JSON feed, or another CMS. Map fields, preview, run in safe batches, and roll back if needed.', 'pressport' ); ?></p>
-			<nav class="nav-tab-wrapper pressport-tabs">
-				<a href="#new" class="nav-tab nav-tab-active" data-tab="new"><?php esc_html_e( 'New import', 'pressport' ); ?></a>
-				<a href="#history" class="nav-tab" data-tab="history"><?php esc_html_e( 'History', 'pressport' ); ?></a>
-			</nav>
+			<h1 class="wp-heading-inline"><?php echo esc_html( $title ); ?></h1>
+			<?php if ( current_user_can( 'manage_options' ) ) : ?>
+				<a href="<?php echo esc_url( self::url( PressPort_Settings::PAGE ) ); ?>" class="page-title-action"><?php esc_html_e( 'Settings', 'pressport' ); ?></a>
+			<?php endif; ?>
+			<hr class="wp-header-end">
+			<p class="pressport-intro"><?php echo esc_html( $intro ); ?></p>
 			<div id="pressport-app"><p><?php esc_html_e( 'Loading…', 'pressport' ); ?></p></div>
 			<noscript><div class="notice notice-error"><p><?php esc_html_e( 'JavaScript is required for the importer.', 'pressport' ); ?></p></div></noscript>
 		</div>
