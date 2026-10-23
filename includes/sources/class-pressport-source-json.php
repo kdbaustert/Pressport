@@ -126,7 +126,12 @@ class PressPort_Source_JSON extends PressPort_Source_Base {
 
 		$this->settings['cache_file'] = $cache;
 		$this->settings['total']      = count( $records );
-		$this->settings['fields']     = array_keys( PressPort_Util::flatten( isset( $records[0] ) ? $records[0] : array() ) );
+		// Collect field names from the first few records; optional fields may be missing from the first one.
+		$fields = array();
+		foreach ( array_slice( $records, 0, 25 ) as $record ) {
+			$fields += array_flip( array_keys( PressPort_Util::flatten( $record ) ) );
+		}
+		$this->settings['fields'] = array_keys( $fields );
 		return $this->settings;
 	}
 
