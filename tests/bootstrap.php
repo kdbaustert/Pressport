@@ -35,6 +35,9 @@ tests_add_filter(
 			return;
 		}
 		WC_Install::install();
+		// install() leaves out the order tables, so WooCommerce would create them inside a test, where the suite
+		// makes them temporary, and MySQL can't use a temporary table twice in one query ("Can't reopen table").
+		wc_get_container()->get( Automattic\WooCommerce\Internal\DataStores\Orders\DataSynchronizer::class )->create_database_tables();
 		$GLOBALS['wp_roles'] = null; // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- reload the roles WooCommerce just added.
 		wp_roles();
 	}
