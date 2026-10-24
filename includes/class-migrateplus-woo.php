@@ -2,7 +2,7 @@
 /**
  * WooCommerce product integration.
  *
- * @package PressPort
+ * @package MigratePlus
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -13,12 +13,12 @@ defined( 'ABSPATH' ) || exit;
  * downloads, variations) rather than as raw protected meta.
  *
  * A product exports under the item's "woo" key. On import the same payload is
- * read back with PressPort_ACF::read() (it reconstructs nested data from the
+ * read back with MigratePlus_ACF::read() (it reconstructs nested data from the
  * flattened record) and applied to a WC_Product. Images and files travel as
  * URLs; related products (up-sells, cross-sells, grouped children) travel as
  * SKUs and source ids; attribute options travel as term names.
  */
-class PressPort_Woo {
+class MigratePlus_Woo {
 
 	/**
 	 * Meta key prefix for a related product that was not on this site yet. The
@@ -29,7 +29,7 @@ class PressPort_Woo {
 	 *
 	 * @var string
 	 */
-	const PENDING_META = '_pressport_pending_';
+	const PENDING_META = '_migrateplus_pending_';
 
 	/**
 	 * Core product fields read and written through WC getters/setters.
@@ -393,7 +393,7 @@ class PressPort_Woo {
 		$expires = time() + DAY_IN_SECONDS;
 		return add_query_arg(
 			array(
-				'action'  => 'pressport_file',
+				'action'  => 'migrateplus_file',
 				'file'    => rawurlencode( $file ),
 				'expires' => $expires,
 				'sig'     => self::file_signature( $file, $expires ),
@@ -453,11 +453,11 @@ class PressPort_Woo {
 		// phpcs:enable
 
 		if ( $expires < time() || ! hash_equals( self::file_signature( $file, $expires ), $sig ) ) {
-			wp_die( esc_html__( 'This file link has expired or is not valid. Export again for a new one.', 'pressport' ), '', array( 'response' => 403 ) );
+			wp_die( esc_html__( 'This file link has expired or is not valid. Export again for a new one.', 'migrateplus' ), '', array( 'response' => 403 ) );
 		}
 		$path = self::local_file_path( $file );
 		if ( '' === $path ) {
-			wp_die( esc_html__( 'File not found.', 'pressport' ), '', array( 'response' => 404 ) );
+			wp_die( esc_html__( 'File not found.', 'migrateplus' ), '', array( 'response' => 404 ) );
 		}
 		$type = wp_check_filetype( $path );
 		nocache_headers();
@@ -474,27 +474,27 @@ class PressPort_Woo {
 	/**
 	 * Apply an exported WooCommerce payload to a post.
 	 *
-	 * @param int           $post_id  Post id.
-	 * @param array         $record   Flat record.
-	 * @param PressPort_Job $job      Job.
-	 * @param array         $opts     Job options.
-	 * @param string        $base     Base URL for relative media.
-	 * @param string[]      $warnings Warnings (by reference).
+	 * @param int             $post_id  Post id.
+	 * @param array           $record   Flat record.
+	 * @param MigratePlus_Job $job      Job.
+	 * @param array           $opts     Job options.
+	 * @param string          $base     Base URL for relative media.
+	 * @param string[]        $warnings Warnings (by reference).
 	 */
-	public static function import( $post_id, array $record, PressPort_Job $job, array $opts, $base, array &$warnings ) {
+	public static function import( $post_id, array $record, MigratePlus_Job $job, array $opts, $base, array &$warnings ) {
 		$woo = self::read_payload( $record );
 		if ( null === $woo ) {
 			return;
 		}
 		if ( ! self::active() ) {
-			$warnings[] = __( 'WooCommerce product data was skipped because WooCommerce is not active on this site.', 'pressport' );
+			$warnings[] = __( 'WooCommerce product data was skipped because WooCommerce is not active on this site.', 'migrateplus' );
 			return;
 		}
 
 		$type    = isset( $woo['type'] ) ? sanitize_key( $woo['type'] ) : 'simple';
 		$product = self::product_for( (int) $post_id, $type, $warnings );
 		if ( ! $product ) {
-			$warnings[] = __( 'Could not build the WooCommerce product.', 'pressport' );
+			$warnings[] = __( 'Could not build the WooCommerce product.', 'migrateplus' );
 			return;
 		}
 
@@ -504,7 +504,7 @@ class PressPort_Woo {
 			'job_id'       => $job->data['id'],
 			'create_terms' => ! empty( $opts['create_terms'] ),
 			'images'       => ! empty( $opts['import_featured_image'] ),
-			// Related products are matched by PressPort_Importer::uid( job, source id ).
+			// Related products are matched by MigratePlus_Importer::uid( job, source id ).
 			'job'          => $job,
 			// Attribute taxonomy => custom attribute key, for attributes whose taxonomy is missing here.
 			'custom_keys'  => array(),
@@ -521,7 +521,7 @@ class PressPort_Woo {
 			self::apply_relations( $product, $woo, $ctx, $warnings );
 			self::apply_type_extras( $product, $woo, $ctx, $warnings );
 		} catch ( Exception $e ) {
-			$warnings[] = __( 'WooCommerce: ', 'pressport' ) . $e->getMessage();
+			$warnings[] = __( 'WooCommerce: ', 'migrateplus' ) . $e->getMessage();
 		}
 
 		if ( $ctx['images'] && ! empty( $woo['gallery'] ) ) {
@@ -531,7 +531,7 @@ class PressPort_Woo {
 		try {
 			$product->save();
 		} catch ( Exception $e ) {
-			$warnings[] = __( 'WooCommerce: ', 'pressport' ) . $e->getMessage();
+			$warnings[] = __( 'WooCommerce: ', 'migrateplus' ) . $e->getMessage();
 			return;
 		}
 		self::link_pending( $product, $warnings );
@@ -549,7 +549,7 @@ class PressPort_Woo {
 	 * @return array|null
 	 */
 	protected static function read_payload( array $record ) {
-		$raw = PressPort_ACF::read( $record, 'woo' );
+		$raw = MigratePlus_ACF::read( $record, 'woo' );
 		if ( is_string( $raw ) ) {
 			$decoded = json_decode( $raw, true );
 			$raw     = is_array( $decoded ) ? $decoded : null;
@@ -570,7 +570,7 @@ class PressPort_Woo {
 		$class = class_exists( 'WC_Product_Factory' ) ? WC_Product_Factory::get_product_classname( $post_id, $type ) : 'WC_Product_Simple';
 		if ( 'WC_Product_Simple' === $class && 'simple' !== $type ) {
 			/* translators: %s: product type */
-			$warnings[] = sprintf( __( 'Product type "%s" is not available on this site (is the extension that adds it active?), so the product was imported as a simple product.', 'pressport' ), $type );
+			$warnings[] = sprintf( __( 'Product type "%s" is not available on this site (is the extension that adds it active?), so the product was imported as a simple product.', 'migrateplus' ), $type );
 		}
 		try {
 			return new $class( $post_id );
@@ -663,7 +663,7 @@ class PressPort_Woo {
 				}
 				if ( ! $term_ids ) {
 					/* translators: %s: attribute name */
-					$warnings[] = sprintf( __( 'Attribute "%s" was left off: none of its values match a term on this site. Turn on "Create missing categories and terms" to create them.', 'pressport' ), '' !== $name ? $name : $resolved_tax );
+					$warnings[] = sprintf( __( 'Attribute "%s" was left off: none of its values match a term on this site. Turn on "Create missing categories and terms" to create them.', 'migrateplus' ), '' !== $name ? $name : $resolved_tax );
 					continue;
 				}
 				$object->set_id( function_exists( 'wc_attribute_taxonomy_id_by_name' ) ? wc_attribute_taxonomy_id_by_name( $resolved_tax ) : 0 );
@@ -678,7 +678,7 @@ class PressPort_Woo {
 					// WooCommerce keys a custom attribute's variation values by sanitize_title( name ).
 					$custom_keys[ $taxonomy ] = sanitize_title( $object->get_name() );
 					/* translators: 1: attribute name, 2: attribute taxonomy */
-					$warnings[] = sprintf( __( 'Attribute "%1$s" was added as a custom attribute because the global attribute "%2$s" does not exist on this site.', 'pressport' ), $object->get_name(), $taxonomy );
+					$warnings[] = sprintf( __( 'Attribute "%1$s" was added as a custom attribute because the global attribute "%2$s" does not exist on this site.', 'migrateplus' ), $object->get_name(), $taxonomy );
 				}
 			}
 			$objects[] = $object;
@@ -747,7 +747,7 @@ class PressPort_Woo {
 			$product->set_downloads( $downloads );
 		} catch ( Exception $e ) {
 			// E.g. a file type WooCommerce does not allow, or approved directories that exclude woocommerce_uploads.
-			$warnings[] = __( 'Downloadable files were not added: ', 'pressport' ) . $e->getMessage();
+			$warnings[] = __( 'Downloadable files were not added: ', 'migrateplus' ) . $e->getMessage();
 		}
 		if ( isset( $woo['download_limit'] ) && is_numeric( $woo['download_limit'] ) ) {
 			$product->set_download_limit( (int) $woo['download_limit'] );
@@ -789,7 +789,7 @@ class PressPort_Woo {
 				'posts_per_page'   => 1,
 				'fields'           => 'ids',
 				'suppress_filters' => true,
-				'meta_key'         => '_pressport_download_source', // phpcs:ignore WordPress.DB.SlowDBQuery
+				'meta_key'         => '_migrateplus_download_source', // phpcs:ignore WordPress.DB.SlowDBQuery
 				'meta_value'       => $url, // phpcs:ignore WordPress.DB.SlowDBQuery
 			)
 		);
@@ -797,18 +797,18 @@ class PressPort_Woo {
 			return (string) wp_get_attachment_url( $found[0] );
 		}
 
-		PressPort_Media::load_deps();
-		$tmp = PressPort_Media::download( $fetch ); // Applies the media size limit in Settings.
+		MigratePlus_Media::load_deps();
+		$tmp = MigratePlus_Media::download( $fetch ); // Applies the media size limit in Settings.
 		if ( is_wp_error( $tmp ) ) {
 			$data = $tmp->get_error_data();
 			// Current exports sign every file in woocommerce_uploads, so a refused one without a link is from an older export.
 			if ( $fetch === $url && is_array( $data ) && isset( $data['code'] ) && 403 === (int) $data['code'] && false !== strpos( $url, '/woocommerce_uploads/' ) ) {
 				/* translators: %s: file name */
-				$warnings[] = sprintf( __( 'Downloadable file "%s" could not be copied: the old site keeps it in a protected folder, and this export was made by an older version of PressPort that could not reach it. Export again on the old site and import the new file.', 'pressport' ), wp_basename( $url ) );
+				$warnings[] = sprintf( __( 'Downloadable file "%s" could not be copied: the old site keeps it in a protected folder, and this export was made by an older version of MigratePlus that could not reach it. Export again on the old site and import the new file.', 'migrateplus' ), wp_basename( $url ) );
 				return '';
 			}
 			/* translators: 1: file name, 2: error message */
-			$warnings[] = sprintf( __( 'Downloadable file "%1$s" could not be copied: %2$s', 'pressport' ), wp_basename( $url ), $tmp->get_error_message() );
+			$warnings[] = sprintf( __( 'Downloadable file "%1$s" could not be copied: %2$s', 'migrateplus' ), wp_basename( $url ), $tmp->get_error_message() );
 			return '';
 		}
 
@@ -836,11 +836,11 @@ class PressPort_Woo {
 				wp_delete_file( $tmp );
 			}
 			/* translators: 1: file name, 2: error message */
-			$warnings[] = sprintf( __( 'Downloadable file "%1$s" could not be copied: %2$s', 'pressport' ), wp_basename( $url ), $id->get_error_message() );
+			$warnings[] = sprintf( __( 'Downloadable file "%1$s" could not be copied: %2$s', 'migrateplus' ), wp_basename( $url ), $id->get_error_message() );
 			return '';
 		}
-		update_post_meta( $id, '_pressport_download_source', $url );
-		update_post_meta( $id, '_pressport_job_id', $ctx['job_id'] );
+		update_post_meta( $id, '_migrateplus_download_source', $url );
+		update_post_meta( $id, '_migrateplus_job_id', $ctx['job_id'] );
 		return (string) wp_get_attachment_url( $id );
 	}
 
@@ -910,8 +910,8 @@ class PressPort_Woo {
 		foreach ( $refs as $ref ) {
 			$source_id = isset( $ref['id'] ) ? (string) $ref['id'] : '';
 			$sku       = isset( $ref['sku'] ) ? (string) $ref['sku'] : '';
-			$uid       = PressPort_Importer::uid( $ctx['job'], $source_id );
-			$id        = '' !== $uid ? PressPort_Importer::find_by_uid( $uid, 'product' ) : 0;
+			$uid       = MigratePlus_Importer::uid( $ctx['job'], $source_id );
+			$id        = '' !== $uid ? MigratePlus_Importer::find_by_uid( $uid, 'product' ) : 0;
 			if ( ! $id && '' !== $sku && function_exists( 'wc_get_product_id_by_sku' ) ) {
 				$id = (int) wc_get_product_id_by_sku( $sku );
 			}
@@ -924,7 +924,7 @@ class PressPort_Woo {
 			}
 			add_post_meta( $post_id, self::PENDING_META . md5( '' !== $uid ? 'uid:' . $uid : 'sku:' . $sku ), $field );
 			/* translators: %s: SKU or source product id */
-			$warnings[] = sprintf( __( 'Related product %s (up-sell, cross-sell or grouped) is not on this site yet. It will be linked when it is imported.', 'pressport' ), '' !== $sku ? '"' . $sku . '"' : '#' . $source_id );
+			$warnings[] = sprintf( __( 'Related product %s (up-sell, cross-sell or grouped) is not on this site yet. It will be linked when it is imported.', 'migrateplus' ), '' !== $sku ? '"' . $sku . '"' : '#' . $source_id );
 		}
 		return array_values( array_unique( $ids ) );
 	}
@@ -938,7 +938,7 @@ class PressPort_Woo {
 	 */
 	protected static function link_pending( WC_Product $product, array &$warnings ) {
 		$keys = array();
-		$uid  = (string) get_post_meta( $product->get_id(), '_pressport_source_uid', true );
+		$uid  = (string) get_post_meta( $product->get_id(), '_migrateplus_source_uid', true );
 		if ( '' !== $uid ) {
 			$keys[] = 'uid:' . $uid;
 		}
@@ -977,7 +977,7 @@ class PressPort_Woo {
 				try {
 					$other->save();
 				} catch ( Exception $e ) {
-					$warnings[] = __( 'WooCommerce: ', 'pressport' ) . $e->getMessage();
+					$warnings[] = __( 'WooCommerce: ', 'migrateplus' ) . $e->getMessage();
 				}
 			}
 		}
@@ -1087,7 +1087,7 @@ class PressPort_Woo {
 				}
 				$variation->save();
 			} catch ( Exception $e ) {
-				$warnings[] = __( 'WooCommerce variation: ', 'pressport' ) . $e->getMessage();
+				$warnings[] = __( 'WooCommerce variation: ', 'migrateplus' ) . $e->getMessage();
 			}
 		}
 
@@ -1257,9 +1257,9 @@ class PressPort_Woo {
 		if ( '' === $url ) {
 			return 0;
 		}
-		$id = PressPort_Media::sideload( $url, $ctx['post_id'], '', $ctx['base'], $ctx['job_id'] );
+		$id = MigratePlus_Media::sideload( $url, $ctx['post_id'], '', $ctx['base'], $ctx['job_id'] );
 		if ( is_wp_error( $id ) ) {
-			$warnings[] = __( 'WooCommerce image: ', 'pressport' ) . $id->get_error_message();
+			$warnings[] = __( 'WooCommerce image: ', 'migrateplus' ) . $id->get_error_message();
 			return 0;
 		}
 		return (int) $id;
@@ -1280,7 +1280,7 @@ class PressPort_Woo {
 		try {
 			$object->$method( $value );
 		} catch ( Exception $e ) {
-			$warnings[] = __( 'WooCommerce: ', 'pressport' ) . $e->getMessage();
+			$warnings[] = __( 'WooCommerce: ', 'migrateplus' ) . $e->getMessage();
 		}
 	}
 

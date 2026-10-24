@@ -31,11 +31,11 @@ jobs:
         id: version
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          header=$(sed -n 's/^ \* Version: *//p' pressport.php | tr -d '[:space:]')
-          constant=$(sed -n "s/^define( 'PRESSPORT_VERSION', '\(.*\)' );/\1/p" pressport.php)
+          header=$(sed -n 's/^ \* Version: *//p' migrateplus.php | tr -d '[:space:]')
+          constant=$(sed -n "s/^define( 'MIGRATEPLUS_VERSION', '\(.*\)' );/\1/p" migrateplus.php)
           echo "tag=$tag header=$header constant=$constant"
           if [ "$tag" != "$header" ] || [ "$tag" != "$constant" ]; then
-            echo "::error::Tag v$tag does not match the plugin header ($header) and PRESSPORT_VERSION ($constant) in pressport.php."
+            echo "::error::Tag v$tag does not match the plugin header ($header) and MIGRATEPLUS_VERSION ($constant) in migrateplus.php."
             exit 1
           fi
           echo "version=$tag" >> "$GITHUB_OUTPUT"
@@ -43,17 +43,17 @@ jobs:
       - name: Build the plugin zip
         run: |
           # .gitattributes marks the development files export-ignore, so only the plugin ships.
-          git archive --format=zip --prefix=pressport/ -o "pressport-${{ steps.version.outputs.version }}.zip" HEAD
-          unzip -l "pressport-${{ steps.version.outputs.version }}.zip"
+          git archive --format=zip --prefix=migrateplus/ -o "migrateplus-${{ steps.version.outputs.version }}.zip" HEAD
+          unzip -l "migrateplus-${{ steps.version.outputs.version }}.zip"
 
       - name: Check the zip
         run: |
-          zip="pressport-${{ steps.version.outputs.version }}.zip"
+          zip="migrateplus-${{ steps.version.outputs.version }}.zip"
           list=$(unzip -Z1 "$zip")
-          for required in pressport/pressport.php pressport/uninstall.php pressport/readme.txt pressport/assets/admin.js pressport/includes/class-pressport-importer.php; do
+          for required in migrateplus/migrateplus.php migrateplus/uninstall.php migrateplus/readme.txt migrateplus/assets/admin.js migrateplus/includes/class-migrateplus-importer.php; do
             echo "$list" | grep -qx "$required" || { echo "::error::$required is missing from the zip."; exit 1; }
           done
-          if echo "$list" | grep -E '^pressport/(tests|vendor|\.github)/|^pressport/(composer\.(json|lock)|phpcs\.xml\.dist|phpunit\.xml\.dist)$'; then
+          if echo "$list" | grep -E '^migrateplus/(tests|vendor|\.github)/|^migrateplus/(composer\.(json|lock)|phpcs\.xml\.dist|phpunit\.xml\.dist)$'; then
             echo "::error::Development files ended up in the zip (listed above)."
             exit 1
           fi
@@ -64,5 +64,5 @@ jobs:
         # Published as the Latest release, not a pre-release: GitHub only lists the
         # Latest release in the repository sidebar. Beta builds say so in the version.
         run: |
-          gh release create "$GITHUB_REF_NAME" "pressport-${{ steps.version.outputs.version }}.zip" \
-            --title "PressPort ${{ steps.version.outputs.version }}" --generate-notes --verify-tag --latest
+          gh release create "$GITHUB_REF_NAME" "migrateplus-${{ steps.version.outputs.version }}.zip" \
+            --title "MigratePlus ${{ steps.version.outputs.version }}" --generate-notes --verify-tag --latest

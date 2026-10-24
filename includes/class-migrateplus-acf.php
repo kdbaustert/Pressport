@@ -2,7 +2,7 @@
 /**
  * Advanced Custom Fields integration.
  *
- * @package PressPort
+ * @package MigratePlus
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -15,14 +15,14 @@ defined( 'ABSPATH' ) || exit;
  *
  * Mapping format (job mapping "acf"): { "<field key or name>": "<source field>" }.
  */
-class PressPort_ACF {
+class MigratePlus_ACF {
 
 	/**
 	 * Post meta holding relationship links that wait for a later post.
 	 *
 	 * @var string
 	 */
-	const PENDING_META = '_pressport_acf_pending';
+	const PENDING_META = '_migrateplus_acf_pending';
 
 	/**
 	 * Field types that hold no data.
@@ -238,27 +238,27 @@ class PressPort_ACF {
 			// A single object (e.g. { url: ... }) is one item, not a list of fields.
 			return array_keys( $value ) === range( 0, count( $value ) - 1 ) ? $value : array( $value );
 		}
-		return PressPort_Util::to_list( $value );
+		return MigratePlus_Util::to_list( $value );
 	}
 
 	/**
 	 * Save all mapped ACF fields for a post.
 	 *
-	 * @param int           $post_id  Post id.
-	 * @param array         $record   Flat record.
-	 * @param array         $map      field key/name => source field.
-	 * @param PressPort_Job $job      Job.
-	 * @param array         $opts     Job options.
-	 * @param string        $base     Base URL for relative media.
-	 * @param string[]      $warnings Warnings (by reference).
+	 * @param int             $post_id  Post id.
+	 * @param array           $record   Flat record.
+	 * @param array           $map      field key/name => source field.
+	 * @param MigratePlus_Job $job      Job.
+	 * @param array           $opts     Job options.
+	 * @param string          $base     Base URL for relative media.
+	 * @param string[]        $warnings Warnings (by reference).
 	 * @return int Number of fields saved.
 	 */
-	public static function import( $post_id, array $record, array $map, PressPort_Job $job, array $opts, $base, array &$warnings ) {
+	public static function import( $post_id, array $record, array $map, MigratePlus_Job $job, array $opts, $base, array &$warnings ) {
 		if ( ! $map ) {
 			return 0;
 		}
 		if ( ! self::active() ) {
-			$warnings[] = __( 'ACF fields are mapped but Advanced Custom Fields is not active.', 'pressport' );
+			$warnings[] = __( 'ACF fields are mapped but Advanced Custom Fields is not active.', 'migrateplus' );
 			return 0;
 		}
 		$ctx   = array(
@@ -281,7 +281,7 @@ class PressPort_ACF {
 			$field = self::get_field_object( (string) $selector, $post_id );
 			if ( ! $field ) {
 				/* translators: %s: field key or name */
-				$warnings[] = sprintf( __( 'ACF field "%s" was not found.', 'pressport' ), $selector );
+				$warnings[] = sprintf( __( 'ACF field "%s" was not found.', 'migrateplus' ), $selector );
 				continue;
 			}
 			// Only top-level relationship fields wait for posts later in the file; a row inside a
@@ -289,7 +289,7 @@ class PressPort_ACF {
 			$ctx['defer']   = in_array( $field['type'], array( 'post_object', 'relationship' ), true );
 			$ctx['pending'] = array();
 			$value          = self::convert( $field, $raw, $ctx );
-			$value          = apply_filters( 'pressport_acf_value', $value, $field, $raw, $post_id, $job );
+			$value          = apply_filters( 'migrateplus_acf_value', $value, $field, $raw, $post_id, $job );
 			if ( update_field( $field['key'], $value, $post_id ) || null !== $value ) {
 				++$saved;
 			}
@@ -317,12 +317,12 @@ class PressPort_ACF {
 		switch ( $type ) {
 			case 'number':
 			case 'range':
-				$s = trim( PressPort_Util::stringify( $value ) );
+				$s = trim( MigratePlus_Util::stringify( $value ) );
 				$s = str_replace( array( ',', ' ' ), array( '', '' ), $s );
 				return is_numeric( $s ) ? $s + 0 : '';
 
 			case 'true_false':
-				$s = strtolower( trim( PressPort_Util::stringify( $value ) ) );
+				$s = strtolower( trim( MigratePlus_Util::stringify( $value ) ) );
 				return in_array( $s, array( '1', 'true', 'yes', 'y', 'on', 'checked' ), true ) ? 1 : 0;
 
 			case 'select':
@@ -332,7 +332,7 @@ class PressPort_ACF {
 				$choices = isset( $field['choices'] ) ? (array) $field['choices'] : array();
 				$picked  = array();
 				foreach ( self::items( $value ) as $item ) {
-					$picked[] = self::match_choice( PressPort_Util::stringify( $item ), $choices );
+					$picked[] = self::match_choice( MigratePlus_Util::stringify( $item ), $choices );
 				}
 				$picked = array_values( array_unique( array_filter( $picked, 'strlen' ) ) );
 				if ( 'checkbox' === $type || ( 'select' === $type && $multi ) ) {
@@ -375,10 +375,10 @@ class PressPort_ACF {
 						$ids[] = $item; // Page links may store plain URLs.
 					} elseif ( ! empty( $ctx['defer'] ) && is_array( $item ) && ! empty( $item['id'] ) ) {
 						// An exported post later in the file: linked when it is imported.
-						$ctx['pending'][] = PressPort_Importer::uid( $ctx['job'], $item['id'] );
+						$ctx['pending'][] = MigratePlus_Importer::uid( $ctx['job'], $item['id'] );
 					} else {
 						/* translators: 1: field label, 2: value */
-						$ctx['warnings'][] = sprintf( __( 'ACF "%1$s": no post found for "%2$s".', 'pressport' ), $label, PressPort_Util::stringify( $item ) );
+						$ctx['warnings'][] = sprintf( __( 'ACF "%1$s": no post found for "%2$s".', 'migrateplus' ), $label, MigratePlus_Util::stringify( $item ) );
 					}
 				}
 				$ids = array_values( array_unique( $ids ) );
@@ -404,7 +404,7 @@ class PressPort_ACF {
 				}
 				if ( $names ) {
 					$create = $ctx['create_terms'] && ! empty( $field['add_term'] );
-					$ids    = array_merge( $ids, PressPort_Importer::resolve_terms( $tax, $names, $create, $ctx['warnings'] ) );
+					$ids    = array_merge( $ids, MigratePlus_Importer::resolve_terms( $tax, $names, $create, $ctx['warnings'] ) );
 				}
 				$ids = array_values( array_unique( $ids ) );
 				$one = isset( $field['field_type'] ) && in_array( $field['field_type'], array( 'radio', 'select' ), true ) && empty( $field['multiple'] );
@@ -418,7 +418,7 @@ class PressPort_ACF {
 						$ids[] = $id;
 					} else {
 						/* translators: 1: field label, 2: user */
-						$ctx['warnings'][] = sprintf( __( 'ACF "%1$s": no user found for "%2$s".', 'pressport' ), $label, is_array( $item ) ? implode( ', ', array_filter( array_map( 'strval', $item ) ) ) : PressPort_Util::stringify( $item ) );
+						$ctx['warnings'][] = sprintf( __( 'ACF "%1$s": no user found for "%2$s".', 'migrateplus' ), $label, is_array( $item ) ? implode( ', ', array_filter( array_map( 'strval', $item ) ) ) : MigratePlus_Util::stringify( $item ) );
 					}
 				}
 				$ids = array_values( array_unique( $ids ) );
@@ -483,7 +483,7 @@ class PressPort_ACF {
 					$name = is_array( $row ) ? ( isset( $row['acf_fc_layout'] ) ? $row['acf_fc_layout'] : ( isset( $row['layout'] ) ? $row['layout'] : '' ) ) : '';
 					if ( ! isset( $layouts[ $name ] ) ) {
 						/* translators: 1: field label, 2: layout name */
-						$ctx['warnings'][] = sprintf( __( 'ACF "%1$s": unknown layout "%2$s".', 'pressport' ), $label, $name );
+						$ctx['warnings'][] = sprintf( __( 'ACF "%1$s": unknown layout "%2$s".', 'migrateplus' ), $label, $name );
 						continue;
 					}
 					$out[] = array( 'acf_fc_layout' => $name ) + self::convert_row( (array) $layouts[ $name ]['sub_fields'], $row, $ctx );
@@ -502,7 +502,7 @@ class PressPort_ACF {
 				if ( is_array( $value ) && ! in_array( $type, array( 'text', 'textarea', 'wysiwyg', 'email', 'url', 'password', 'oembed', 'color_picker' ), true ) ) {
 					return $value; // Unknown / third-party field type: pass structured data through.
 				}
-				return PressPort_Util::stringify( $value );
+				return MigratePlus_Util::stringify( $value );
 		}
 	}
 
@@ -570,7 +570,7 @@ class PressPort_ACF {
 	 * @return string
 	 */
 	protected static function format_date( $value, $format ) {
-		$s = trim( PressPort_Util::stringify( $value ) );
+		$s = trim( MigratePlus_Util::stringify( $value ) );
 		if ( '' === $s ) {
 			return '';
 		}
@@ -581,7 +581,7 @@ class PressPort_ACF {
 			$t = strtotime( '1970-01-01 ' . $s . ' UTC' );
 			return false === $t ? $s : gmdate( 'H:i:s', $t );
 		}
-		$date = PressPort_Importer::parse_date( $s );
+		$date = MigratePlus_Importer::parse_date( $s );
 		return $date ? $date->setTimezone( wp_timezone() )->format( $format ) : '';
 	}
 
@@ -615,13 +615,13 @@ class PressPort_ACF {
 				return (int) $value;
 			}
 			/* translators: 1: field label, 2: id */
-			$ctx['warnings'][] = sprintf( __( 'ACF "%1$s": attachment #%2$s does not exist on this site. Map a file URL instead.', 'pressport' ), $label, $value );
+			$ctx['warnings'][] = sprintf( __( 'ACF "%1$s": attachment #%2$s does not exist on this site. Map a file URL instead.', 'migrateplus' ), $label, $value );
 			return 0;
 		}
-		$id = PressPort_Media::sideload( $value, $ctx['post_id'], '', $ctx['base'], $ctx['job_id'] );
+		$id = MigratePlus_Media::sideload( $value, $ctx['post_id'], '', $ctx['base'], $ctx['job_id'] );
 		if ( is_wp_error( $id ) ) {
 			/* translators: 1: field label, 2: error */
-			$ctx['warnings'][] = sprintf( __( 'ACF "%1$s": %2$s', 'pressport' ), $label, $id->get_error_message() );
+			$ctx['warnings'][] = sprintf( __( 'ACF "%1$s": %2$s', 'migrateplus' ), $label, $id->get_error_message() );
 			return 0;
 		}
 		return (int) $id;
@@ -633,7 +633,7 @@ class PressPort_ACF {
 	 *
 	 * @param int      $post_id    Post id.
 	 * @param string   $field_key  ACF field key.
-	 * @param string[] $source_ids Source uids (PressPort_Importer::uid()) not imported yet.
+	 * @param string[] $source_ids Source uids (MigratePlus_Importer::uid()) not imported yet.
 	 */
 	protected static function set_pending( $post_id, $field_key, array $source_ids ) {
 		foreach ( (array) get_post_meta( $post_id, self::PENDING_META, false ) as $row ) {
@@ -650,7 +650,7 @@ class PressPort_ACF {
 	 * A post has just been imported: add it to the relationship fields that were waiting for it.
 	 *
 	 * @param int    $post_id   The imported post.
-	 * @param string $source_id Its source uid (PressPort_Importer::uid()), so only references from the same source match.
+	 * @param string $source_id Its source uid (MigratePlus_Importer::uid()), so only references from the same source match.
 	 */
 	public static function link_pending( $post_id, $source_id ) {
 		global $wpdb;
@@ -710,16 +710,16 @@ class PressPort_ACF {
 		if ( is_numeric( $item ) && get_userdata( (int) $item ) ) {
 			return (int) $item;
 		}
-		return (int) PressPort_Importer::resolve_author( (string) $item, false );
+		return (int) MigratePlus_Importer::resolve_author( (string) $item, false );
 	}
 
 	/**
-	 * Resolve a related post: a source ID from an earlier PressPort import, a local
+	 * Resolve a related post: a source ID from an earlier MigratePlus import, a local
 	 * post id, a slug or a title.
 	 *
-	 * @param mixed              $value Value.
-	 * @param string[]           $types Allowed post types (empty = any).
-	 * @param PressPort_Job|null $job   The import: source ids match the posts it imported from the same source.
+	 * @param mixed                $value Value.
+	 * @param string[]             $types Allowed post types (empty = any).
+	 * @param MigratePlus_Job|null $job   The import: source ids match the posts it imported from the same source.
 	 * @return int
 	 */
 	public static function resolve_post( $value, array $types, $job = null ) {
@@ -740,10 +740,10 @@ class PressPort_ACF {
 			if ( ! empty( $ref['id'] ) ) {
 				$ids = get_posts(
 					$common + ( $job ? array(
-						'meta_key'   => '_pressport_source_uid', // phpcs:ignore WordPress.DB.SlowDBQuery
-						'meta_value' => PressPort_Importer::uid( $job, $ref['id'] ), // phpcs:ignore WordPress.DB.SlowDBQuery
+						'meta_key'   => '_migrateplus_source_uid', // phpcs:ignore WordPress.DB.SlowDBQuery
+						'meta_value' => MigratePlus_Importer::uid( $job, $ref['id'] ), // phpcs:ignore WordPress.DB.SlowDBQuery
 					) : array(
-						'meta_key'   => '_pressport_source_id', // phpcs:ignore WordPress.DB.SlowDBQuery
+						'meta_key'   => '_migrateplus_source_id', // phpcs:ignore WordPress.DB.SlowDBQuery
 						'meta_value' => (string) $ref['id'], // phpcs:ignore WordPress.DB.SlowDBQuery
 					) )
 				);
@@ -766,15 +766,15 @@ class PressPort_ACF {
 			return 0;
 		}
 
-		// 1. Imported earlier by PressPort (source IDs survive the migration): from this
+		// 1. Imported earlier by MigratePlus (source IDs survive the migration): from this
 		// import's source first, then from any source, before this site's own ids. Data
 		// that names related posts by id almost always uses the old system's ids, and a
 		// local post with the same number nearly always exists.
 		if ( $job ) {
 			$ids = get_posts(
 				$common + array(
-					'meta_key'   => '_pressport_source_uid', // phpcs:ignore WordPress.DB.SlowDBQuery
-					'meta_value' => PressPort_Importer::uid( $job, $value ), // phpcs:ignore WordPress.DB.SlowDBQuery
+					'meta_key'   => '_migrateplus_source_uid', // phpcs:ignore WordPress.DB.SlowDBQuery
+					'meta_value' => MigratePlus_Importer::uid( $job, $value ), // phpcs:ignore WordPress.DB.SlowDBQuery
 				)
 			);
 			if ( $ids ) {
@@ -783,7 +783,7 @@ class PressPort_ACF {
 		}
 		$ids = get_posts(
 			$common + array(
-				'meta_key'   => '_pressport_source_id', // phpcs:ignore WordPress.DB.SlowDBQuery
+				'meta_key'   => '_migrateplus_source_id', // phpcs:ignore WordPress.DB.SlowDBQuery
 				'meta_value' => $value, // phpcs:ignore WordPress.DB.SlowDBQuery
 			)
 		);
@@ -798,7 +798,7 @@ class PressPort_ACF {
 			}
 		}
 		// 3. Slug (a URL or path uses its last segment), then title.
-		$slug = PressPort_Importer::slug_from( $value );
+		$slug = MigratePlus_Importer::slug_from( $value );
 		$ids  = '' !== $slug ? get_posts( $common + array( 'name' => $slug ) ) : array();
 		if ( $ids ) {
 			return (int) $ids[0];

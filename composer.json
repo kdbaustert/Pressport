@@ -1,5 +1,5 @@
 {
-	"name": "kdbaustert/pressport",
+	"name": "kdbaustert/migrateplus",
 	"description": "Move content between WordPress sites as JSON.",
 	"type": "wordpress-plugin",
 	"license": "GPL-3.0-or-later",

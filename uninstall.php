@@ -3,37 +3,43 @@
  * Uninstall: remove settings, import history and cached source files.
  * Imported content is always kept.
  *
- * @package PressPort
+ * @package MigratePlus
  */
 
 defined( 'WP_UNINSTALL_PLUGIN' ) || exit;
 
-$pressport_settings = (array) get_option( 'pressport_settings', array() );
+$migrateplus_settings = (array) get_option( 'migrateplus_settings', array() );
 
-foreach ( (array) get_option( 'pressport_job_ids', array() ) as $pressport_id ) {
-	delete_option( 'pressport_job_' . sanitize_key( $pressport_id ) );
+foreach ( (array) get_option( 'migrateplus_job_ids', array() ) as $migrateplus_id ) {
+	delete_option( 'migrateplus_job_' . sanitize_key( $migrateplus_id ) );
 }
-delete_option( 'pressport_job_ids' );
-delete_option( 'pressport_settings' );
+delete_option( 'migrateplus_job_ids' );
+delete_option( 'migrateplus_settings' );
+delete_option( 'migrateplus_mappings' );
+delete_option( 'migrateplus_renamed' );
 global $wpdb;
-$wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE 'pressport\\_job\\_%' OR option_name LIKE 'pressport\\_export\\_%' OR option_name LIKE 'pressport\\_exportlog\\_%' OR option_name LIKE 'pressport\\_replace\\_%' OR option_name LIKE 'pressport\\_replacelog\\_%' OR option_name LIKE 'pressport\\_lock\\_%'" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
-wp_clear_scheduled_hook( 'pressport_cleanup' );
+$wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE 'migrateplus\\_job\\_%' OR option_name LIKE 'migrateplus\\_export\\_%' OR option_name LIKE 'migrateplus\\_exportlog\\_%' OR option_name LIKE 'migrateplus\\_replace\\_%' OR option_name LIKE 'migrateplus\\_replacelog\\_%' OR option_name LIKE 'migrateplus\\_lock\\_%'" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+wp_clear_scheduled_hook( 'migrateplus_cleanup' );
 
-if ( ! empty( $pressport_settings['remove_meta_on_uninstall'] ) ) {
-	foreach ( array( '_pressport_job_id', '_pressport_source_uid', '_pressport_source_id', '_pressport_source_url', '_pressport_download_source', '_pressport_parent_uid', '_pressport_acf_pending' ) as $pressport_key ) {
-		delete_post_meta_by_key( $pressport_key );
+if ( ! empty( $migrateplus_settings['remove_meta_on_uninstall'] ) ) {
+	foreach ( array( '_migrateplus_job_id', '_migrateplus_source_uid', '_migrateplus_source_id', '_migrateplus_source_url', '_migrateplus_download_source', '_migrateplus_parent_uid', '_migrateplus_acf_pending' ) as $migrateplus_key ) {
+		delete_post_meta_by_key( $migrateplus_key );
 	}
+	foreach ( array( '_migrateplus_job_id', '_migrateplus_source_comment_uid' ) as $migrateplus_key ) {
+		delete_metadata( 'comment', 0, $migrateplus_key, '', true );
+	}
+	delete_metadata( 'term', 0, '_migrateplus_job_id', '', true ); // Menus an import created.
 	// Product links waiting for a related product to be imported.
-	$wpdb->query( "DELETE FROM {$wpdb->postmeta} WHERE meta_key LIKE '\\_pressport\\_pending\\_%'" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+	$wpdb->query( "DELETE FROM {$wpdb->postmeta} WHERE meta_key LIKE '\\_migrateplus\\_pending\\_%'" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 }
 
-$pressport_uploads = wp_upload_dir( null, false );
-$pressport_dir     = trailingslashit( $pressport_uploads['basedir'] ) . 'pressport/';
-if ( is_dir( $pressport_dir ) ) {
-	foreach ( (array) scandir( $pressport_dir ) as $pressport_file ) {
-		if ( is_file( $pressport_dir . $pressport_file ) ) {
-			wp_delete_file( $pressport_dir . $pressport_file );
+$migrateplus_uploads = wp_upload_dir( null, false );
+$migrateplus_dir     = trailingslashit( $migrateplus_uploads['basedir'] ) . 'migrateplus/';
+if ( is_dir( $migrateplus_dir ) ) {
+	foreach ( (array) scandir( $migrateplus_dir ) as $migrateplus_file ) {
+		if ( is_file( $migrateplus_dir . $migrateplus_file ) ) {
+			wp_delete_file( $migrateplus_dir . $migrateplus_file );
 		}
 	}
-	@rmdir( $pressport_dir ); // phpcs:ignore
+	@rmdir( $migrateplus_dir ); // phpcs:ignore
 }

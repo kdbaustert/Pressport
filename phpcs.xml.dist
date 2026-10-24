@@ -1,5 +1,5 @@
 <?xml version="1.0"?>
-<ruleset name="PressPort">
+<ruleset name="MigratePlus">
 	<description>WordPress Coding Standards, plus PHP 7.4+ compatibility.</description>
 
 	<file>.</file>
@@ -35,22 +35,22 @@
 
 	<rule ref="WordPress.WP.I18n">
 		<properties>
-			<property name="text_domain" type="array" value="pressport"/>
+			<property name="text_domain" type="array" value="migrateplus"/>
 		</properties>
 	</rule>
 
 	<rule ref="WordPress.NamingConventions.PrefixAllGlobals">
 		<properties>
-			<property name="prefixes" type="array" value="pressport,PressPort"/>
+			<property name="prefixes" type="array" value="migrateplus,MigratePlus"/>
 		</properties>
 	</rule>
 
 	<!-- The source interface file also holds the abstract base class sources extend. -->
 	<rule ref="Generic.Files.OneObjectStructurePerFile.MultipleFound">
-		<exclude-pattern>/includes/sources/interface-pressport-source.php</exclude-pattern>
+		<exclude-pattern>/includes/sources/interface-migrateplus-source.php</exclude-pattern>
 	</rule>
 	<rule ref="WordPress.Files.FileName.InvalidClassFileName">
-		<exclude-pattern>/includes/sources/interface-pressport-source.php</exclude-pattern>
+		<exclude-pattern>/includes/sources/interface-migrateplus-source.php</exclude-pattern>
 		<exclude-pattern>/tests/*</exclude-pattern>
 	</rule>
 

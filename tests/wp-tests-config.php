@@ -3,12 +3,12 @@
  * WordPress test suite config. The suite empties every table in this database,
  * so point it at a database used for nothing else.
  *
- * @package PressPort
+ * @package MigratePlus
  */
 
 define( 'ABSPATH', dirname( __DIR__ ) . '/vendor/roots/wordpress-no-content/' );
 
-define( 'DB_NAME', getenv( 'WP_TESTS_DB_NAME' ) ? getenv( 'WP_TESTS_DB_NAME' ) : 'pressport_tests' );
+define( 'DB_NAME', getenv( 'WP_TESTS_DB_NAME' ) ? getenv( 'WP_TESTS_DB_NAME' ) : 'migrateplus_tests' );
 define( 'DB_USER', getenv( 'WP_TESTS_DB_USER' ) ? getenv( 'WP_TESTS_DB_USER' ) : 'root' );
 define( 'DB_PASSWORD', false !== getenv( 'WP_TESTS_DB_PASSWORD' ) ? getenv( 'WP_TESTS_DB_PASSWORD' ) : 'root' );
 define( 'DB_HOST', getenv( 'WP_TESTS_DB_HOST' ) ? getenv( 'WP_TESTS_DB_HOST' ) : '127.0.0.1' );
@@ -19,7 +19,7 @@ $table_prefix = 'wptests_'; // phpcs:ignore WordPress.WP.GlobalVariablesOverride
 
 define( 'WP_TESTS_DOMAIN', 'example.org' );
 define( 'WP_TESTS_EMAIL', 'admin@example.org' );
-define( 'WP_TESTS_TITLE', 'PressPort Tests' );
+define( 'WP_TESTS_TITLE', 'MigratePlus Tests' );
 define( 'WP_PHP_BINARY', 'php' );
 define( 'WPLANG', '' );
 define( 'WP_DEBUG', true );

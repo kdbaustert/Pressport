@@ -2,17 +2,17 @@
 /**
  * Find and replace across database tables, safe for serialized data.
  *
- * @package PressPort
+ * @package MigratePlus
  */
 
 defined( 'ABSPATH' ) || exit;
 
-class PressPort_Replace {
+class MigratePlus_Replace {
 
-	const STATE_PREFIX = 'pressport_replace_';
+	const STATE_PREFIX = 'migrateplus_replace_';
 	// Not under STATE_PREFIX: cleanup() deletes everything there after a day.
-	const LOG_PREFIX = 'pressport_replacelog_';
-	const LOG_INDEX  = 'pressport_replacelog_ids';
+	const LOG_PREFIX = 'migrateplus_replacelog_';
+	const LOG_INDEX  = 'migrateplus_replacelog_ids';
 	const PAGE_SIZE  = 500;
 	const SAMPLES    = 20; // Example changes kept per table.
 	// A run whose last batch started longer ago than this has nobody driving it: it can be resumed or rolled back.
@@ -46,15 +46,15 @@ class PressPort_Replace {
 		$search  = isset( $raw['search'] ) ? (string) $raw['search'] : '';
 		$replace = isset( $raw['replace'] ) ? (string) $raw['replace'] : '';
 		if ( '' === $search ) {
-			return new WP_Error( 'pressport_replace_search', __( 'Enter the text to search for.', 'pressport' ) );
+			return new WP_Error( 'migrateplus_replace_search', __( 'Enter the text to search for.', 'migrateplus' ) );
 		}
 		if ( $search === $replace ) {
-			return new WP_Error( 'pressport_replace_same', __( 'The replacement is the same as the search text.', 'pressport' ) );
+			return new WP_Error( 'migrateplus_replace_same', __( 'The replacement is the same as the search text.', 'migrateplus' ) );
 		}
 		$all    = wp_list_pluck( self::tables(), 'rows', 'name' );
 		$tables = array_values( array_intersect( array_keys( $all ), isset( $raw['tables'] ) ? (array) $raw['tables'] : array() ) );
 		if ( ! $tables ) {
-			return new WP_Error( 'pressport_replace_tables', __( 'Choose at least one table.', 'pressport' ) );
+			return new WP_Error( 'migrateplus_replace_tables', __( 'Choose at least one table.', 'migrateplus' ) );
 		}
 
 		$state = array(
@@ -81,9 +81,9 @@ class PressPort_Replace {
 		);
 		if ( ! $state['args']['dry_run'] ) {
 			// Original values of every changed cell go here, so the run can be rolled back.
-			$state['backup'] = PressPort_Util::ensure_storage_dir() . 'replace-' . $state['id'] . '-' . wp_generate_password( 16, false ) . '.jsonl';
+			$state['backup'] = MigratePlus_Util::ensure_storage_dir() . 'replace-' . $state['id'] . '-' . wp_generate_password( 16, false ) . '.jsonl';
 			if ( false === file_put_contents( $state['backup'], '' ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
-				return new WP_Error( 'pressport_replace_backup', __( 'Could not write the rollback file to the uploads folder, so nothing was replaced.', 'pressport' ) );
+				return new WP_Error( 'migrateplus_replace_backup', __( 'Could not write the rollback file to the uploads folder, so nothing was replaced.', 'migrateplus' ) );
 			}
 			self::log_start( $state );
 		}
@@ -151,7 +151,7 @@ class PressPort_Replace {
 			if ( ! is_array( $rows ) || $wpdb->last_error ) {
 				// A failed query returns no rows: don't mistake it for the end of the table.
 				/* translators: %s: database error */
-				$state['error']    = sprintf( __( 'Could not read the table (%s), so the run stopped.', 'pressport' ), $wpdb->last_error );
+				$state['error']    = sprintf( __( 'Could not read the table (%s), so the run stopped.', 'migrateplus' ), $wpdb->last_error );
 				$state['complete'] = true;
 				break;
 			}
@@ -188,7 +188,7 @@ class PressPort_Replace {
 					$undo_at = file_exists( $state['backup'] ) ? filesize( $state['backup'] ) : 0;
 					// A key wp_json_encode can't write (invalid UTF-8) leaves a blank line, so the row would have no way back.
 					if ( "\n" === $line || false === file_put_contents( $state['backup'], $line, FILE_APPEND ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
-						$state['error']    = __( 'Could not write to the rollback file, so the run stopped.', 'pressport' );
+						$state['error']    = __( 'Could not write to the rollback file, so the run stopped.', 'migrateplus' );
 						$state['complete'] = true;
 						break 2;
 					}
@@ -202,7 +202,7 @@ class PressPort_Replace {
 						}
 						if ( $wpdb->last_error ) {
 							/* translators: %s: database error */
-							$state['error']    = sprintf( __( 'The database refused an update (%s), so the run stopped.', 'pressport' ), $wpdb->last_error );
+							$state['error']    = sprintf( __( 'The database refused an update (%s), so the run stopped.', 'migrateplus' ), $wpdb->last_error );
 							$state['complete'] = true;
 							break 2;
 						}
@@ -227,7 +227,7 @@ class PressPort_Replace {
 		unset( $result );
 		if ( $state['complete'] && ! empty( $state['failed'] ) && empty( $state['error'] ) ) {
 			/* translators: %d: number of rows */
-			$state['error'] = sprintf( _n( '%d row could not be updated.', '%d rows could not be updated.', $state['failed'], 'pressport' ), $state['failed'] );
+			$state['error'] = sprintf( _n( '%d row could not be updated.', '%d rows could not be updated.', $state['failed'], 'migrateplus' ), $state['failed'] );
 		}
 		if ( ! $args['dry_run'] ) {
 			self::log_progress( $state );
@@ -382,11 +382,11 @@ class PressPort_Replace {
 		global $wpdb;
 		$entry = self::history_entry( $id );
 		if ( ! $entry || ! is_readable( $entry['backup'] ) ) {
-			return new WP_Error( 'pressport_replace_undo', __( 'This replacement can no longer be rolled back.', 'pressport' ) );
+			return new WP_Error( 'migrateplus_replace_undo', __( 'This replacement can no longer be rolled back.', 'migrateplus' ) );
 		}
 		$state = 'running' === $entry['status'] ? self::load_state( $id ) : null;
 		if ( $state && ! self::idle( $state ) ) {
-			return new WP_Error( 'pressport_replace_undo', __( 'This replacement is still running.', 'pressport' ) );
+			return new WP_Error( 'migrateplus_replace_undo', __( 'This replacement is still running.', 'migrateplus' ) );
 		}
 		if ( $state ) {
 			self::delete( $id ); // Stopped part way: once rolling back, it can't be resumed.
@@ -447,10 +447,10 @@ class PressPort_Replace {
 			update_option( self::LOG_PREFIX . $entry['id'], $entry, false );
 			wp_cache_flush();
 			return new WP_Error(
-				'pressport_replace_undo',
+				'migrateplus_replace_undo',
 				sprintf(
 					/* translators: 1: number of values, 2: database error */
-					_n( '%1$d value could not be restored because the database refused it (%2$s). The rollback file is kept: roll back again to retry.', '%1$d values could not be restored because the database refused them (%2$s). The rollback file is kept: roll back again to retry.', $entry['failed'], 'pressport' ),
+					_n( '%1$d value could not be restored because the database refused it (%2$s). The rollback file is kept: roll back again to retry.', '%1$d values could not be restored because the database refused them (%2$s). The rollback file is kept: roll back again to retry.', $entry['failed'], 'migrateplus' ),
 					$entry['failed'],
 					$entry['db_error']
 				)
@@ -501,13 +501,13 @@ class PressPort_Replace {
 			'samples' => array(),
 			'unsafe'  => 0, // Values left as they are: they hold objects that cannot be rewritten safely.
 			// A table with no text columns has nothing to replace; only a missing key is worth reporting.
-			'skipped' => $pk || ! $columns ? '' : __( 'No primary key, so rows cannot be updated safely.', 'pressport' ),
+			'skipped' => $pk || ! $columns ? '' : __( 'No primary key, so rows cannot be updated safely.', 'migrateplus' ),
 			'empty'   => ! $columns,
 		);
 	}
 
 	/**
-	 * PressPort's own records stay as they are: its history and tracking data
+	 * MigratePlus's own records stay as they are: its history and tracking data
 	 * hold source URLs that must match the files they came from.
 	 *
 	 * @param string $table Table.
@@ -517,10 +517,10 @@ class PressPort_Replace {
 	protected static function protected_row( $table, array $row ) {
 		global $wpdb;
 		if ( $table === $wpdb->options && isset( $row['option_name'] ) ) {
-			return 0 === strpos( $row['option_name'], 'pressport_' );
+			return 0 === strpos( $row['option_name'], 'migrateplus_' );
 		}
 		if ( $table === $wpdb->postmeta && isset( $row['meta_key'] ) ) {
-			return 0 === strpos( $row['meta_key'], '_pressport_' );
+			return 0 === strpos( $row['meta_key'], '_migrateplus_' );
 		}
 		return false;
 	}

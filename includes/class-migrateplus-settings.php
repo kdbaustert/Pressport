@@ -1,0 +1,513 @@
+<?php
+/**
+ * Plugin settings (MigratePlus → Settings).
+ *
+ * @package MigratePlus
+ */
+
+defined( 'ABSPATH' ) || exit;
+
+class MigratePlus_Settings {
+
+	const OPTION = 'migrateplus_settings';
+	const GROUP  = 'migrateplus_settings_group';
+	const PAGE   = 'migrateplus-settings';
+
+	/**
+	 * Cached merged settings for the request.
+	 *
+	 * @var array|null
+	 */
+	protected static $cache = null;
+
+	/**
+	 * @return array
+	 */
+	public static function defaults() {
+		return array(
+			// Import defaults.
+			'post_type'                => 'post',
+			'default_status'           => 'publish',
+			'force_status'             => '', // '' = keep each record's status.
+			'default_author'           => 0, // 0 = whoever runs the import.
+			'duplicate'                => 'skip',
+			'batch_size'               => 10,
+			'import_featured_image'    => 1,
+			'import_content_images'    => 0,
+			'create_terms'             => 1,
+			'create_authors'           => 0,
+			'rewrite_links'            => 1,
+			'import_comments'          => 1,
+			'import_menus'             => 1,
+			// Export defaults.
+			'export_statuses'          => array( 'publish' ),
+			'export_include_terms'     => 1,
+			'export_include_image'     => 1,
+			'export_include_meta'      => 1,
+			'export_include_acf'       => 1,
+			'export_include_woo'       => 1,
+			'export_include_comments'  => 0,
+			'export_include_menus'     => 0,
+			'export_gzip'              => 0,
+			'export_exclude_meta'      => '',
+			// Access.
+			'capability'               => 'manage_options',
+			// Downloads.
+			'request_timeout'          => 30,
+			'allow_local_sources'      => 0,
+			'max_remote_size'          => 100, // MB.
+			'max_media_size'           => 0, // MB, 0 = no limit.
+			// Housekeeping.
+			'job_retention_days'       => 0,
+			'remove_meta_on_uninstall' => 0,
+		);
+	}
+
+	/**
+	 * All settings, or one key.
+	 *
+	 * @param string|null $key Key.
+	 * @return mixed
+	 */
+	public static function get( $key = null ) {
+		if ( null === self::$cache ) {
+			self::$cache = array_merge( self::defaults(), (array) get_option( self::OPTION, array() ) );
+		}
+		if ( null === $key ) {
+			return self::$cache;
+		}
+		return isset( self::$cache[ $key ] ) ? self::$cache[ $key ] : null;
+	}
+
+	public static function flush_cache() {
+		self::$cache = null;
+	}
+
+	/**
+	 * Roles that can be given access, keyed by capability.
+	 *
+	 * @return array
+	 */
+	public static function access_levels() {
+		return array(
+			'manage_options'    => __( 'Administrators only', 'migrateplus' ),
+			'edit_others_posts' => __( 'Editors and Administrators', 'migrateplus' ),
+		);
+	}
+
+	public static function init() {
+		add_action( 'admin_init', array( __CLASS__, 'register' ) );
+		add_action( 'update_option_' . self::OPTION, array( __CLASS__, 'flush_cache' ) );
+		add_filter( 'option_page_capability_' . self::GROUP, array( __CLASS__, 'settings_capability' ) );
+	}
+
+	/**
+	 * Only admins can change who has access, whatever the access level is set to.
+	 *
+	 * @return string
+	 */
+	public static function settings_capability() {
+		return 'manage_options';
+	}
+
+	public static function register() {
+		register_setting(
+			self::GROUP,
+			self::OPTION,
+			array(
+				'type'              => 'array',
+				'sanitize_callback' => array( __CLASS__, 'sanitize' ),
+				'default'           => self::defaults(),
+			)
+		);
+
+		add_settings_section( 'migrateplus_defaults', __( 'Import defaults', 'migrateplus' ), array( __CLASS__, 'section_defaults' ), self::PAGE );
+		add_settings_section( 'migrateplus_export', __( 'Export defaults', 'migrateplus' ), array( __CLASS__, 'section_export' ), self::PAGE );
+		add_settings_section( 'migrateplus_access', __( 'Access', 'migrateplus' ), '__return_false', self::PAGE );
+		add_settings_section( 'migrateplus_connections', __( 'Downloads', 'migrateplus' ), array( __CLASS__, 'section_downloads' ), self::PAGE );
+		add_settings_section( 'migrateplus_housekeeping', __( 'Housekeeping', 'migrateplus' ), '__return_false', self::PAGE );
+
+		$post_types = array();
+		foreach ( get_post_types( array( 'show_ui' => true ), 'objects' ) as $pt ) {
+			if ( ! in_array( $pt->name, array( 'attachment', 'wp_block', 'wp_navigation', 'wp_template', 'wp_template_part' ), true ) ) {
+				$post_types[ $pt->name ] = $pt->labels->singular_name;
+			}
+		}
+
+		$authors = array( 0 => __( 'The person running the import', 'migrateplus' ) );
+		foreach ( get_users(
+			array(
+				'capability' => array( 'edit_posts' ),
+				'number'     => 200,
+				'fields'     => array( 'ID', 'display_name' ),
+			)
+		) as $user ) {
+			$authors[ $user->ID ] = $user->display_name;
+		}
+
+		$fields = array(
+			'migrateplus_defaults'     => array(
+				'post_type'             => array( 'select', __( 'Import as', 'migrateplus' ), $post_types ),
+				'default_status'        => array(
+					'select',
+					__( 'Default status', 'migrateplus' ),
+					array(
+						'publish' => __( 'Published', 'migrateplus' ),
+						'draft'   => __( 'Draft', 'migrateplus' ),
+						'pending' => __( 'Pending review', 'migrateplus' ),
+						'private' => __( 'Private', 'migrateplus' ),
+					),
+					__( 'Used when a record has no status, or one MigratePlus does not recognise.', 'migrateplus' ),
+				),
+				'force_status'          => array(
+					'select',
+					__( 'Status for every item', 'migrateplus' ),
+					array(
+						''        => __( 'Keep each record\'s status', 'migrateplus' ),
+						'publish' => __( 'Published', 'migrateplus' ),
+						'draft'   => __( 'Draft', 'migrateplus' ),
+						'pending' => __( 'Pending review', 'migrateplus' ),
+						'private' => __( 'Private', 'migrateplus' ),
+					),
+					__( 'Overrides the status in the file, also for posts an import updates. Draft is useful for reviewing an import on staging. Published posts with a future date are scheduled for that date.', 'migrateplus' ),
+				),
+				'default_author'        => array( 'select', __( 'Default author', 'migrateplus' ), $authors ),
+				'duplicate'             => array(
+					'select',
+					__( 'Records imported before', 'migrateplus' ),
+					array(
+						'skip'   => __( 'Skip them', 'migrateplus' ),
+						'update' => __( 'Update them', 'migrateplus' ),
+						'create' => __( 'Create duplicates', 'migrateplus' ),
+					),
+					__( 'Matched by the Source ID field.', 'migrateplus' ),
+				),
+				'batch_size'            => array( 'number', __( 'Batch size', 'migrateplus' ), array( 1, 100 ), __( 'Records per request. Lower this if imports with lots of images time out.', 'migrateplus' ) ),
+				'import_featured_image' => array( 'checkbox', __( 'Featured images', 'migrateplus' ), __( 'Download featured images into the Media Library', 'migrateplus' ) ),
+				'import_content_images' => array( 'checkbox', __( 'Images in content', 'migrateplus' ), __( 'Download images found inside post content and rewrite their URLs', 'migrateplus' ) ),
+				'create_terms'          => array( 'checkbox', __( 'Terms', 'migrateplus' ), __( 'Create categories, tags and terms that don\'t exist yet', 'migrateplus' ) ),
+				'create_authors'        => array( 'checkbox', __( 'Authors', 'migrateplus' ), __( 'Create users for authors that don\'t exist yet (Author role, random password)', 'migrateplus' ) ),
+				'rewrite_links'         => array( 'checkbox', __( 'Links', 'migrateplus' ), __( 'Point links to the old site at this one', 'migrateplus' ), __( 'MigratePlus exports only. Changes links in post content; images and files in wp-content still point at the old site unless "Images in content" copies them.', 'migrateplus' ) ),
+				'import_comments'       => array( 'checkbox', __( 'Comments', 'migrateplus' ), __( 'Add the comments a MigratePlus export carries to the imported posts', 'migrateplus' ), __( 'Importing the same file again updates the comments it added before instead of adding them twice.', 'migrateplus' ) ),
+				'import_menus'          => array( 'checkbox', __( 'Menus', 'migrateplus' ), __( 'Import the navigation menus a MigratePlus export carries', 'migrateplus' ), __( 'After all posts. A menu with the same slug is filled rather than copied, and theme locations are only set when this theme has them.', 'migrateplus' ) ),
+			),
+			'migrateplus_export'       => array(
+				'export_statuses'         => array( 'checkboxes', __( 'Status', 'migrateplus' ), self::export_statuses() ),
+				'export_include_terms'    => array( 'checkbox', __( 'Terms', 'migrateplus' ), __( 'Categories, tags and terms', 'migrateplus' ) ),
+				'export_include_image'    => array( 'checkbox', __( 'Featured images', 'migrateplus' ), __( 'Featured image URLs', 'migrateplus' ) ),
+				'export_include_meta'     => array( 'checkbox', __( 'Custom fields', 'migrateplus' ), __( 'Public post meta', 'migrateplus' ) ),
+				'export_include_acf'      => array( 'checkbox', __( 'ACF fields', 'migrateplus' ), __( 'Advanced Custom Fields values', 'migrateplus' ) ),
+				'export_include_woo'      => array( 'checkbox', __( 'WooCommerce', 'migrateplus' ), __( 'Product data (prices, stock, attributes, variations)', 'migrateplus' ) ),
+				'export_include_comments' => array( 'checkbox', __( 'Comments', 'migrateplus' ), __( 'Approved comments and replies', 'migrateplus' ), __( 'Pending, spam and trashed comments are left out.', 'migrateplus' ) ),
+				'export_include_menus'    => array( 'checkbox', __( 'Menus', 'migrateplus' ), __( 'Navigation menus, their items and theme locations', 'migrateplus' ), __( 'Menu items point at posts and terms, so export the content they link to in the same file.', 'migrateplus' ) ),
+				'export_gzip'             => array( 'checkbox', __( 'Compression', 'migrateplus' ), __( 'Compress the file (.json.gz)', 'migrateplus' ), __( 'Much smaller, for a site whose upload limit is lower than the export. MigratePlus imports it as it is.', 'migrateplus' ) ),
+				'export_exclude_meta'     => array( 'textarea', __( 'Leave out these custom fields', 'migrateplus' ), null, __( 'One meta key per line. End a line with * to leave out every key that starts with it, e.g. rank_math_*. Keys starting with "_" are always left out.', 'migrateplus' ) ),
+			),
+			'migrateplus_access'       => array(
+				'capability' => array( 'select', __( 'Who can run imports', 'migrateplus' ), self::access_levels(), __( 'Only administrators can change these settings.', 'migrateplus' ) ),
+			),
+			'migrateplus_connections'  => array(
+				'request_timeout'     => array( 'number', __( 'Download timeout', 'migrateplus' ), array( 5, 300 ), __( 'Seconds to wait for each file MigratePlus downloads. Values under 60 count as 60.', 'migrateplus' ), __( 'seconds', 'migrateplus' ) ),
+				'max_remote_size'     => array( 'number', __( 'Remote file size limit', 'migrateplus' ), array( 1, 2048 ), __( 'Only for custom sources added with the migrateplus_sources filter that read their file from a URL: the largest file they may download. Uploaded JSON files are limited by the server\'s upload size instead.', 'migrateplus' ), __( 'MB', 'migrateplus' ) ),
+				'max_media_size'      => array( 'number', __( 'Image and media size limit', 'migrateplus' ), array( 0, 2048 ), __( 'Skip images and media files larger than this when importing. 0 means no limit.', 'migrateplus' ), __( 'MB', 'migrateplus' ) ),
+				'allow_local_sources' => array( 'checkbox', __( 'Local sources', 'migrateplus' ), __( 'Allow downloads from localhost, private network addresses and non-standard ports', 'migrateplus' ), __( 'Turn this on to migrate from a local dev site (for example http://oldsite.test:8888). WordPress blocks these addresses by default; this only relaxes the rule for MigratePlus\'s own requests.', 'migrateplus' ) ),
+			),
+			'migrateplus_housekeeping' => array(
+				'job_retention_days'       => array( 'number', __( 'Keep import history', 'migrateplus' ), array( 0, 3650 ), __( 'Delete history entries older than this. 0 keeps them forever. Imported content is never touched, but a deleted entry can no longer be rolled back.', 'migrateplus' ), __( 'days', 'migrateplus' ) ),
+				'remove_meta_on_uninstall' => array( 'checkbox', __( 'On uninstall', 'migrateplus' ), __( 'Also remove MigratePlus\'s tracking data from imported posts', 'migrateplus' ), __( 'History and settings are always removed on uninstall. The tracking data is what lets a reinstall skip or update posts it already imported.', 'migrateplus' ) ),
+			),
+		);
+		if ( ! MigratePlus_Util::zlib_available() ) {
+			unset( $fields['migrateplus_export']['export_gzip'] ); // Nothing to choose: compressed exports need zlib.
+		}
+
+		foreach ( $fields as $section => $items ) {
+			foreach ( $items as $key => $def ) {
+				add_settings_field(
+					'migrateplus_' . $key,
+					$def[1],
+					array( __CLASS__, 'field_' . $def[0] ),
+					self::PAGE,
+					$section,
+					array(
+						'key'       => $key,
+						'label_for' => in_array( $def[0], array( 'checkbox', 'checkboxes' ), true ) ? null : 'migrateplus_' . $key,
+						'choices'   => isset( $def[2] ) ? $def[2] : null,
+						'help'      => isset( $def[3] ) ? $def[3] : '',
+						'suffix'    => isset( $def[4] ) ? $def[4] : '',
+					)
+				);
+			}
+		}
+	}
+
+	public static function section_defaults() {
+		echo '<p>' . esc_html__( 'Starting values for new imports. You can still change them on the mapping screen for each import.', 'migrateplus' ) . '</p>';
+	}
+
+	public static function section_downloads() {
+		echo '<p>' . esc_html__( 'While importing, MigratePlus downloads files from the old site: featured images, images in post content, Media Library files and WooCommerce download files. These limits apply to those downloads.', 'migrateplus' ) . '</p>';
+	}
+
+	public static function section_export() {
+		echo '<p>' . esc_html__( 'Starting values for the Export screen and wp migrateplus export. You can still change them for each export.', 'migrateplus' ) . '</p>';
+	}
+
+	/**
+	 * Statuses an export can include.
+	 *
+	 * @return array
+	 */
+	public static function export_statuses() {
+		return array(
+			'publish' => __( 'Published', 'migrateplus' ),
+			'draft'   => __( 'Draft', 'migrateplus' ),
+			'pending' => __( 'Pending review', 'migrateplus' ),
+			'private' => __( 'Private', 'migrateplus' ),
+			'future'  => __( 'Scheduled', 'migrateplus' ),
+		);
+	}
+
+	/**
+	 * @param array $args Field args.
+	 */
+	public static function field_select( $args ) {
+		$value = self::get( $args['key'] );
+		printf( '<select id="migrateplus_%1$s" name="%2$s[%1$s]">', esc_attr( $args['key'] ), esc_attr( self::OPTION ) );
+		foreach ( $args['choices'] as $option => $label ) {
+			printf( '<option value="%s"%s>%s</option>', esc_attr( $option ), selected( (string) $value, (string) $option, false ), esc_html( $label ) );
+		}
+		echo '</select>';
+		self::help( $args );
+	}
+
+	/**
+	 * @param array $args Field args.
+	 */
+	public static function field_number( $args ) {
+		printf(
+			'<input type="number" class="small-text" id="migrateplus_%1$s" name="%2$s[%1$s]" value="%3$d" min="%4$d" max="%5$d"> %6$s',
+			esc_attr( $args['key'] ),
+			esc_attr( self::OPTION ),
+			(int) self::get( $args['key'] ),
+			(int) $args['choices'][0],
+			(int) $args['choices'][1],
+			esc_html( $args['suffix'] )
+		);
+		self::help( $args );
+	}
+
+	/**
+	 * @param array $args Field args.
+	 */
+	public static function field_checkbox( $args ) {
+		printf(
+			'<label><input type="checkbox" name="%2$s[%1$s]" value="1"%3$s> %4$s</label>',
+			esc_attr( $args['key'] ),
+			esc_attr( self::OPTION ),
+			checked( (int) self::get( $args['key'] ), 1, false ),
+			esc_html( $args['choices'] )
+		);
+		self::help( $args );
+	}
+
+	/**
+	 * @param array $args Field args.
+	 */
+	public static function field_checkboxes( $args ) {
+		$value = (array) self::get( $args['key'] );
+		echo '<fieldset>';
+		foreach ( $args['choices'] as $option => $label ) {
+			printf(
+				'<label><input type="checkbox" name="%2$s[%1$s][]" value="%3$s"%4$s> %5$s</label><br>',
+				esc_attr( $args['key'] ),
+				esc_attr( self::OPTION ),
+				esc_attr( $option ),
+				checked( in_array( $option, $value, true ), true, false ),
+				esc_html( $label )
+			);
+		}
+		echo '</fieldset>';
+		self::help( $args );
+	}
+
+	/**
+	 * @param array $args Field args.
+	 */
+	public static function field_textarea( $args ) {
+		printf(
+			'<textarea id="migrateplus_%1$s" name="%2$s[%1$s]" rows="4" cols="40" class="code">%3$s</textarea>',
+			esc_attr( $args['key'] ),
+			esc_attr( self::OPTION ),
+			esc_textarea( (string) self::get( $args['key'] ) )
+		);
+		self::help( $args );
+	}
+
+	/**
+	 * @param array $args Field args.
+	 */
+	protected static function help( $args ) {
+		if ( $args['help'] ) {
+			echo '<p class="description">' . esc_html( $args['help'] ) . '</p>';
+		}
+	}
+
+	/**
+	 * @param mixed $input Submitted values.
+	 * @return array
+	 */
+	public static function sanitize( $input ) {
+		$input    = is_array( $input ) ? $input : array();
+		$defaults = self::defaults();
+		$out      = array();
+
+		$post_type        = isset( $input['post_type'] ) ? sanitize_key( $input['post_type'] ) : $defaults['post_type'];
+		$out['post_type'] = post_type_exists( $post_type ) ? $post_type : $defaults['post_type'];
+
+		$out['default_status'] = isset( $input['default_status'] ) && in_array( $input['default_status'], array( 'publish', 'draft', 'pending', 'private' ), true ) ? $input['default_status'] : $defaults['default_status'];
+		$out['force_status']   = isset( $input['force_status'] ) && in_array( $input['force_status'], array( 'publish', 'draft', 'pending', 'private' ), true ) ? $input['force_status'] : '';
+		$out['duplicate']      = isset( $input['duplicate'] ) && in_array( $input['duplicate'], array( 'skip', 'update', 'create' ), true ) ? $input['duplicate'] : $defaults['duplicate'];
+		$out['capability']     = isset( $input['capability'] ) && array_key_exists( $input['capability'], self::access_levels() ) ? $input['capability'] : $defaults['capability'];
+
+		$author                = isset( $input['default_author'] ) ? absint( $input['default_author'] ) : 0;
+		$out['default_author'] = $author && get_userdata( $author ) ? $author : 0;
+
+		$ranges = array(
+			'batch_size'         => array( 1, 100 ),
+			'request_timeout'    => array( 5, 300 ),
+			'max_remote_size'    => array( 1, 2048 ),
+			'max_media_size'     => array( 0, 2048 ),
+			'job_retention_days' => array( 0, 3650 ),
+		);
+		foreach ( $ranges as $key => $range ) {
+			$value       = isset( $input[ $key ] ) && '' !== $input[ $key ] ? (int) $input[ $key ] : $defaults[ $key ];
+			$out[ $key ] = max( $range[0], min( $range[1], $value ) );
+		}
+
+		foreach ( array( 'import_featured_image', 'import_content_images', 'create_terms', 'create_authors', 'rewrite_links', 'import_comments', 'import_menus', 'export_include_terms', 'export_include_image', 'export_include_meta', 'export_include_acf', 'export_include_woo', 'export_include_comments', 'export_include_menus', 'export_gzip', 'allow_local_sources', 'remove_meta_on_uninstall' ) as $key ) {
+			$out[ $key ] = empty( $input[ $key ] ) ? 0 : 1;
+		}
+
+		$statuses               = isset( $input['export_statuses'] ) ? array_map( 'sanitize_key', (array) $input['export_statuses'] ) : array();
+		$statuses               = array_values( array_intersect( $statuses, array_keys( self::export_statuses() ) ) );
+		$out['export_statuses'] = $statuses ? $statuses : $defaults['export_statuses'];
+
+		$out['export_exclude_meta'] = isset( $input['export_exclude_meta'] ) ? implode( "\n", MigratePlus_Exporter::meta_patterns( $input['export_exclude_meta'] ) ) : '';
+
+		self::flush_cache();
+		return $out;
+	}
+
+	/**
+	 * Render the settings page.
+	 */
+	public static function render() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( esc_html__( 'Only administrators can change MigratePlus settings.', 'migrateplus' ) );
+		}
+		?>
+		<div class="wrap migrateplus-wrap migrateplus-settings">
+			<h1><?php esc_html_e( 'MigratePlus Settings', 'migrateplus' ); ?></h1>
+			<?php settings_errors(); ?>
+			<div class="migrateplus-settings-layout">
+				<form action="options.php" method="post" class="migrateplus-card">
+					<?php
+					settings_fields( self::GROUP );
+					do_settings_sections( self::PAGE );
+					submit_button();
+					?>
+				</form>
+				<aside class="migrateplus-card migrateplus-status">
+					<h2><?php esc_html_e( 'Server check', 'migrateplus' ); ?></h2>
+					<?php self::render_status(); ?>
+				</aside>
+			</div>
+		</div>
+		<?php
+	}
+
+	/**
+	 * A few environment facts that explain most failed imports.
+	 */
+	protected static function render_status() {
+		$dir      = MigratePlus_Util::storage_dir();
+		$writable = wp_is_writable( is_dir( $dir ) ? $dir : dirname( $dir ) );
+		$time     = (int) ini_get( 'max_execution_time' );
+		$memory   = ini_get( 'memory_limit' );
+		$zlib     = MigratePlus_Util::zlib_available();
+		$rows     = array(
+			array(
+				__( 'Upload folder', 'migrateplus' ),
+				$writable ? __( 'Writable', 'migrateplus' ) : __( 'Not writable', 'migrateplus' ),
+				$writable,
+			),
+			array(
+				__( 'Max upload size', 'migrateplus' ),
+				size_format( wp_max_upload_size() ),
+				true,
+				$zlib ? __( 'Too small for an export? Export it compressed (.json.gz).', 'migrateplus' ) : '',
+			),
+			array(
+				__( 'PHP time limit', 'migrateplus' ),
+				/* translators: %d: seconds */
+				0 === $time ? __( 'None', 'migrateplus' ) : sprintf( __( '%d seconds', 'migrateplus' ), $time ),
+				0 === $time || $time >= 30,
+			),
+			array(
+				__( 'PHP memory limit', 'migrateplus' ),
+				'-1' === (string) $memory ? __( 'Unlimited', 'migrateplus' ) : $memory,
+				'-1' === (string) $memory || wp_convert_hr_to_bytes( $memory ) >= 128 * MB_IN_BYTES,
+			),
+			array(
+				__( 'Image processing', 'migrateplus' ),
+				wp_image_editor_supports() ? __( 'Available', 'migrateplus' ) : __( 'Missing (GD or Imagick)', 'migrateplus' ),
+				wp_image_editor_supports(),
+			),
+			array(
+				__( 'Compression (zlib)', 'migrateplus' ),
+				$zlib ? __( 'Available', 'migrateplus' ) : __( 'Missing: no .json.gz exports or imports', 'migrateplus' ),
+				$zlib,
+			),
+		);
+		echo '<table class="migrateplus-status-table"><tbody>';
+		foreach ( $rows as $row ) {
+			printf(
+				'<tr><th scope="row">%s</th><td><span class="migrateplus-dot %s" aria-hidden="true"></span>%s%s</td></tr>',
+				esc_html( $row[0] ),
+				$row[2] ? 'is-ok' : 'is-warn',
+				esc_html( $row[1] ),
+				empty( $row[3] ) ? '' : '<br><span class="description">' . esc_html( $row[3] ) . '</span>'
+			);
+		}
+		echo '</tbody></table>';
+		echo '<p class="description">' . esc_html__( 'Large files or slow servers? Run imports from the command line instead:', 'migrateplus' ) . '</p>';
+		echo '<p><code>wp migrateplus import json --file=export.json</code></p>';
+	}
+
+	/**
+	 * Daily cleanup of old history entries.
+	 */
+	public static function cleanup() {
+		$days = (int) self::get( 'job_retention_days' );
+		if ( $days < 1 ) {
+			return;
+		}
+		$cutoff = time() - $days * DAY_IN_SECONDS;
+		foreach ( MigratePlus_Job::all() as $job ) {
+			if ( 'running' !== $job->data['status'] && (int) $job->data['updated'] < $cutoff ) {
+				$job->delete();
+			}
+		}
+		foreach ( MigratePlus_Exporter::history() as $entry ) {
+			if ( (int) $entry['created'] < $cutoff ) {
+				MigratePlus_Exporter::forget( $entry['id'] );
+			}
+		}
+		foreach ( MigratePlus_Replace::history() as $entry ) {
+			if ( (int) $entry['created'] < $cutoff && 'rolling_back' !== $entry['status'] ) {
+				MigratePlus_Replace::forget( $entry['id'] );
+			}
+		}
+	}
+}

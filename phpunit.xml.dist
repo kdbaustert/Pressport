@@ -10,7 +10,7 @@
 	convertDeprecationsToExceptions="true"
 >
 	<testsuites>
-		<testsuite name="PressPort">
+		<testsuite name="MigratePlus">
 			<directory prefix="test-" suffix=".php">./tests/</directory>
 		</testsuite>
 	</testsuites>

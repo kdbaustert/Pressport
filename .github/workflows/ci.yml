@@ -50,7 +50,7 @@ jobs:
         image: mysql:8.0
         env:
           MYSQL_ROOT_PASSWORD: root
-          MYSQL_DATABASE: pressport_tests
+          MYSQL_DATABASE: migrateplus_tests
         ports:
           - 3306:3306
         options: >-
@@ -78,6 +78,6 @@ jobs:
         run: vendor/bin/phpunit
         env:
           WP_TESTS_DB_HOST: 127.0.0.1:3306
-          WP_TESTS_DB_NAME: pressport_tests
+          WP_TESTS_DB_NAME: migrateplus_tests
           WP_TESTS_DB_USER: root
           WP_TESTS_DB_PASSWORD: root

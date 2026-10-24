@@ -2,7 +2,7 @@
 /**
  * Source contract + shared base class.
  *
- * @package PressPort
+ * @package MigratePlus
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -10,7 +10,7 @@ defined( 'ABSPATH' ) || exit;
 /**
  * A content source yields pages of flat records (dot-notation keys).
  */
-interface PressPort_Source {
+interface MigratePlus_Source {
 
 	/**
 	 * @return string
@@ -57,7 +57,7 @@ interface PressPort_Source {
 	public function suggested_mapping();
 }
 
-abstract class PressPort_Source_Base implements PressPort_Source {
+abstract class MigratePlus_Source_Base implements MigratePlus_Source {
 
 	protected $settings;
 
@@ -95,10 +95,10 @@ abstract class PressPort_Source_Base implements PressPort_Source {
 			if ( ! empty( $field['required'] ) && '' === trim( (string) $this->get( $field['key'] ) ) ) {
 				if ( 'file' === $field['type'] && self::allows_remote( $field ) ) {
 					/* translators: %s: field label */
-					return new WP_Error( 'pressport_required', sprintf( __( '%s is required: upload a file or enter its URL.', 'pressport' ), $field['label'] ) );
+					return new WP_Error( 'migrateplus_required', sprintf( __( '%s is required: upload a file or enter its URL.', 'migrateplus' ), $field['label'] ) );
 				}
 				/* translators: %s: field label */
-				return new WP_Error( 'pressport_required', sprintf( __( '%s is required.', 'pressport' ), $field['label'] ) );
+				return new WP_Error( 'migrateplus_required', sprintf( __( '%s is required.', 'migrateplus' ), $field['label'] ) );
 			}
 		}
 		return $this->settings;
@@ -154,12 +154,12 @@ abstract class PressPort_Source_Base implements PressPort_Source {
 				continue;
 			}
 			$old  = (string) $this->get( $key );
-			$path = PressPort_Util::download_to_storage( $url, self::accepted_extensions( $field ), $this->remote_headers() );
+			$path = MigratePlus_Util::download_to_storage( $url, self::accepted_extensions( $field ), $this->remote_headers() );
 			if ( is_wp_error( $path ) ) {
 				return $path;
 			}
 			// Remove the previous download (only ever inside our storage dir).
-			if ( $old && $old !== $path && 0 === strpos( wp_normalize_path( $old ), wp_normalize_path( PressPort_Util::storage_dir() ) ) && file_exists( $old ) ) {
+			if ( $old && $old !== $path && 0 === strpos( wp_normalize_path( $old ), wp_normalize_path( MigratePlus_Util::storage_dir() ) ) && file_exists( $old ) ) {
 				wp_delete_file( $old );
 			}
 			$this->settings[ $key ]          = $path;

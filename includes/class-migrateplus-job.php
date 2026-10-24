@@ -2,7 +2,7 @@
 /**
  * Import job persistence.
  *
- * @package PressPort
+ * @package MigratePlus
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -11,9 +11,9 @@ defined( 'ABSPATH' ) || exit;
  * An import job: source config, field mapping, options, progress and log.
  * Stored as a non-autoloaded option so it survives across AJAX/CLI batches.
  */
-class PressPort_Job {
+class MigratePlus_Job {
 
-	const INDEX_OPTION = 'pressport_job_ids';
+	const INDEX_OPTION = 'migrateplus_job_ids';
 	const MAX_LOG      = 500;
 
 	public $data;
@@ -22,10 +22,11 @@ class PressPort_Job {
 	 * @return array
 	 */
 	public static function default_options() {
-		$s = PressPort_Settings::get();
+		$s = MigratePlus_Settings::get();
 		return array(
 			'post_type'             => post_type_exists( $s['post_type'] ) ? $s['post_type'] : 'post',
 			'default_status'        => $s['default_status'],
+			'force_status'          => $s['force_status'], // '' keeps each record's status; otherwise every post gets this one.
 			'default_author'        => $s['default_author'] ? (int) $s['default_author'] : get_current_user_id(),
 			'duplicate'             => $s['duplicate'],
 			'skip_existing'         => 0, // Also skip records matching content already here by slug, SKU or file name.
@@ -38,6 +39,8 @@ class PressPort_Job {
 			'create_terms'          => (int) $s['create_terms'],
 			'create_authors'        => (int) $s['create_authors'],
 			'rewrite_links'         => (int) $s['rewrite_links'],
+			'import_comments'       => (int) $s['import_comments'],
+			'import_menus'          => (int) $s['import_menus'],
 			'dry_run'               => 0,
 		);
 	}
@@ -76,7 +79,27 @@ class PressPort_Job {
 			$data
 		);
 		// Posts created across every run: "Run again" resets stats, but the earlier posts can still be rolled back.
-		$this->data += array( 'created_total' => 0 );
+		// Comments added to posts the import only updated count too: rollback removes them.
+		// sections: the post types (and menus) of a MigratePlus export, with how many of each are done.
+		// stage: "menus" once the records are done and the file's menus are next.
+		// menu_locations: theme location => [ menu before, menu the import set ], for rollback.
+		$this->data += array(
+			'created_total'  => 0,
+			'comments_total' => 0,
+			'sections'       => array(),
+			'stage'          => 'records',
+			'menu_locations' => array(),
+		);
+	}
+
+	/**
+	 * Start the sections over, for a run from the first record.
+	 */
+	public function reset_sections() {
+		$this->data['stage'] = 'records';
+		foreach ( $this->data['sections'] as $i => $section ) {
+			$this->data['sections'][ $i ]['done'] = 0;
+		}
 	}
 
 	/**
@@ -84,7 +107,7 @@ class PressPort_Job {
 	 *
 	 * @param string $source   Source id.
 	 * @param array  $settings Prepared settings.
-	 * @return PressPort_Job
+	 * @return MigratePlus_Job
 	 */
 	public static function create( $source, array $settings ) {
 		$job = new self(
@@ -104,18 +127,18 @@ class PressPort_Job {
 
 	/**
 	 * @param string $id Job id.
-	 * @return PressPort_Job|null
+	 * @return MigratePlus_Job|null
 	 */
 	public static function load( $id ) {
 		$id   = sanitize_key( $id );
-		$data = $id ? get_option( 'pressport_job_' . $id ) : false;
+		$data = $id ? get_option( 'migrateplus_job_' . $id ) : false;
 		return is_array( $data ) ? new self( $data ) : null;
 	}
 
 	/**
 	 * All jobs, newest first.
 	 *
-	 * @return PressPort_Job[]
+	 * @return MigratePlus_Job[]
 	 */
 	public static function all() {
 		$jobs = array();
@@ -136,20 +159,20 @@ class PressPort_Job {
 
 	public function save() {
 		$this->data['updated'] = time();
-		update_option( 'pressport_job_' . $this->data['id'], $this->data, false );
+		update_option( 'migrateplus_job_' . $this->data['id'], $this->data, false );
 	}
 
 	/**
 	 * Delete the job record and any cached source files.
 	 */
 	public function delete() {
-		foreach ( array( 'file', 'cache_file' ) as $key ) {
+		foreach ( array( 'file', 'cache_file', 'menus_file' ) as $key ) {
 			$path = isset( $this->data['settings'][ $key ] ) ? $this->data['settings'][ $key ] : '';
-			if ( $path && 0 === strpos( wp_normalize_path( $path ), wp_normalize_path( PressPort_Util::storage_dir() ) ) && file_exists( $path ) ) {
+			if ( $path && 0 === strpos( wp_normalize_path( $path ), wp_normalize_path( MigratePlus_Util::storage_dir() ) ) && file_exists( $path ) ) {
 				wp_delete_file( $path );
 			}
 		}
-		delete_option( 'pressport_job_' . $this->data['id'] );
+		delete_option( 'migrateplus_job_' . $this->data['id'] );
 		$ids = array_diff( (array) get_option( self::INDEX_OPTION, array() ), array( $this->data['id'] ) );
 		update_option( self::INDEX_OPTION, array_values( $ids ), false );
 	}
@@ -157,10 +180,10 @@ class PressPort_Job {
 	/**
 	 * Instantiate the job's source.
 	 *
-	 * @return PressPort_Source|WP_Error
+	 * @return MigratePlus_Source|WP_Error
 	 */
 	public function source() {
-		return PressPort_Sources::create( $this->data['source'], (array) $this->data['settings'] );
+		return MigratePlus_Sources::create( $this->data['source'], (array) $this->data['settings'] );
 	}
 
 	/**
@@ -181,12 +204,56 @@ class PressPort_Job {
 	}
 
 	/**
-	 * Number of posts currently tagged with this job.
+	 * Number of posts (menu items included), comments and menus currently tagged with this job.
 	 *
 	 * @return int
 	 */
 	public function imported_count() {
-		return (int) $this->imported_query( 1 )->found_posts;
+		return (int) $this->imported_query( 1 )->found_posts + (int) $this->imported_comments( 0, 0, true ) + count( $this->imported_menus() );
+	}
+
+	/**
+	 * IDs of the nav menus this job created.
+	 *
+	 * @return int[]
+	 */
+	public function imported_menus() {
+		$ids = get_terms(
+			array(
+				'taxonomy'   => 'nav_menu',
+				'hide_empty' => false,
+				'fields'     => 'ids',
+				'meta_key'   => '_migrateplus_job_id', // phpcs:ignore WordPress.DB.SlowDBQuery
+				'meta_value' => $this->data['id'], // phpcs:ignore WordPress.DB.SlowDBQuery
+			)
+		);
+		return is_array( $ids ) ? array_map( 'intval', $ids ) : array();
+	}
+
+	/**
+	 * IDs of comments tagged with this job, of every type and status.
+	 *
+	 * @param int  $limit  Comments per page (0 = all).
+	 * @param int  $offset Comments to skip.
+	 * @param bool $count  Return the number of comments instead.
+	 * @return int[]|int
+	 */
+	public function imported_comments( $limit, $offset = 0, $count = false ) {
+		return get_comments(
+			array(
+				'meta_key'                  => '_migrateplus_job_id', // phpcs:ignore WordPress.DB.SlowDBQuery
+				'meta_value'                => $this->data['id'], // phpcs:ignore WordPress.DB.SlowDBQuery
+				'status'                    => 'any',
+				'type'                      => 'all',
+				'fields'                    => 'ids',
+				'number'                    => $limit,
+				'offset'                    => $offset,
+				'orderby'                   => 'comment_ID',
+				'order'                     => 'ASC',
+				'count'                     => $count,
+				'update_comment_meta_cache' => false,
+			)
+		);
 	}
 
 	/**
@@ -203,7 +270,7 @@ class PressPort_Job {
 			array(
 				'post_type'        => array_keys( get_post_types() ),
 				'post_status'      => array_keys( get_post_stati() ),
-				'meta_key'         => '_pressport_job_id', // phpcs:ignore WordPress.DB.SlowDBQuery
+				'meta_key'         => '_migrateplus_job_id', // phpcs:ignore WordPress.DB.SlowDBQuery
 				'meta_value'       => $this->data['id'], // phpcs:ignore WordPress.DB.SlowDBQuery
 				'fields'           => 'ids',
 				'posts_per_page'   => $limit,
@@ -223,7 +290,7 @@ class PressPort_Job {
 		$data     = $this->data;
 		$settings = array();
 		foreach ( (array) $data['settings'] as $key => $value ) {
-			if ( in_array( $key, array( 'password', 'app_password', 'api_key', 'headers', 'file', 'cache_file', 'api_base' ), true ) ) {
+			if ( in_array( $key, array( 'password', 'app_password', 'api_key', 'headers', 'file', 'cache_file', 'menus_file', 'api_base' ), true ) ) {
 				continue;
 			}
 			$settings[ $key ] = is_scalar( $value ) ? $value : '';

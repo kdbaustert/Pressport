@@ -2,7 +2,7 @@
 /**
  * WP-CLI commands.
  *
- * @package PressPort
+ * @package MigratePlus
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -12,32 +12,38 @@ defined( 'ABSPATH' ) || exit;
  *
  * ## EXAMPLES
  *
- *     # Preview a PressPort export and see the mapping it carries
- *     wp pressport preview json --file=./pressport-product.json
+ *     # Preview a MigratePlus export and see the mapping it carries
+ *     wp migrateplus preview json --file=./migrateplus-product.json
  *
- *     # Import a PressPort export, updating anything imported before
- *     wp pressport import json --file=./pressport-product.json --duplicate=update
+ *     # Import a MigratePlus export, updating anything imported before
+ *     wp migrateplus import json --file=./migrateplus-product.json --duplicate=update
  *
  *     # Import any JSON file with a custom mapping file
- *     wp pressport import json --file=./feed.json --map=./mapping.json
+ *     wp migrateplus import json --file=./feed.json --map=./mapping.json
  *
  *     # Run everything from one config file
- *     wp pressport import --config=./migration.json
+ *     wp migrateplus import --config=./migration.json
+ *
+ *     # Import another file from the same feed with a mapping saved on the mapping screen
+ *     wp migrateplus import json --file=./feed.json --mapping="Books feed"
  *
  *     # Undo an import
- *     wp pressport rollback abc123defg --yes
+ *     wp migrateplus rollback abc123defg --yes
  *
  *     # Export pages with ACF fields, to import on another site
- *     wp pressport export page --output=./pages.json
+ *     wp migrateplus export page --output=./pages.json
+ *
+ *     # Media, pages and posts in one file, with the menus
+ *     wp migrateplus export attachment,page,post --menus --output=./site.json
  */
-class PressPort_CLI {
+class MigratePlus_CLI {
 
 	/**
 	 * Option flags that are not source settings.
 	 *
 	 * @var string[]
 	 */
-	protected $reserved = array( 'config', 'map', 'post_type', 'status', 'author', 'duplicate', 'batch_size', 'featured-images', 'content-images', 'create-authors', 'create-terms', 'rewrite-links', 'dry-run' );
+	protected $reserved = array( 'config', 'map', 'mapping', 'post_type', 'status', 'author', 'duplicate', 'batch_size', 'featured-images', 'content-images', 'create-authors', 'create-terms', 'rewrite-links', 'force-status', 'comments', 'menus', 'dry-run' );
 
 	/**
 	 * Show the fields, suggested mapping and first record from a source.
@@ -54,7 +60,7 @@ class PressPort_CLI {
 	 * @param array $assoc Assoc args.
 	 */
 	public function preview( $args, $assoc ) {
-		$preview = PressPort_Runner::preview( $args[0], $this->settings_from( $assoc, $args[0] ), 3 );
+		$preview = MigratePlus_Runner::preview( $args[0], $this->settings_from( $assoc, $args[0] ), 3 );
 		if ( is_wp_error( $preview ) ) {
 			WP_CLI::error( $preview->get_error_message() );
 		}
@@ -68,7 +74,7 @@ class PressPort_CLI {
 		foreach ( $preview['records'][0] as $k => $v ) {
 			$rows[] = array(
 				'field' => $k,
-				'value' => mb_strimwidth( PressPort_Util::stringify( $v ), 0, 90, '…' ),
+				'value' => mb_strimwidth( MigratePlus_Util::stringify( $v ), 0, 90, '…' ),
 			);
 		}
 		WP_CLI\Utils\format_items( 'table', $rows, array( 'field', 'value' ) );
@@ -89,26 +95,32 @@ class PressPort_CLI {
 	 * [--map=<file>]
 	 * : JSON mapping file: { "fields": { "post_title": "title", ... }, "meta": [{ "key": "...", "source": "..." }], "taxonomies": [{ "taxonomy": "...", "source": "..." }], "acf": { "field_name_or_key": "source_field" } }. Defaults to the suggested mapping.
 	 *
+	 * [--mapping=<name>]
+	 * : A saved mapping (see wp migrateplus mapping list): its field mapping and import options. Not for MigratePlus exports, which carry their own. Mapping and options in --config, --map and the flags below take precedence.
+	 *
 	 * [--post_type=<type>]
-	 * : Destination post type. Defaults to the PressPort setting.
+	 * : Destination post type. Defaults to the MigratePlus setting.
 	 *
 	 * [--status=<status>]
 	 * : Default status: publish, draft, pending, private.
+	 *
+	 * [--force-status=<status>]
+	 * : Give every imported post this status (publish, draft, pending or private), also posts it updates. Pass "keep" to use each record's own status. Defaults to the MigratePlus setting.
 	 *
 	 * [--author=<id|login|email>]
 	 * : Default author.
 	 *
 	 * [--duplicate=<mode>]
-	 * : skip, update or create. Defaults to the PressPort setting.
+	 * : skip, update or create. Defaults to the MigratePlus setting.
 	 *
 	 * [--duplicates=<choice>]
-	 * : What to do with records already on this site (imported before, or the same slug, SKU or media file name): skip, import (as copies), or update (the posts and pages whose title, content, excerpt, status, date, slug or author differ; the rest are skipped). Asks when left out; skips without asking when there is no terminal to ask in.
+	 * : What to do with records already on this site (imported before, or the same slug, SKU or media file name): skip, import (as copies), or update (the posts and pages whose title, content, excerpt, status, date, slug or author differ; the rest are skipped). Asks when left out; skips without asking in a dry run or when there is no terminal to ask in.
 	 *
 	 * [--batch_size=<n>]
-	 * : Records per batch. Defaults to the PressPort setting.
+	 * : Records per batch. Defaults to the MigratePlus setting.
 	 *
 	 * [--[no-]featured-images]
-	 * : Download featured images. Defaults to the PressPort setting.
+	 * : Download featured images. Defaults to the MigratePlus setting.
 	 *
 	 * [--content-images]
 	 * : Download images found inside content.
@@ -117,10 +129,16 @@ class PressPort_CLI {
 	 * : Create users for unknown authors.
 	 *
 	 * [--[no-]create-terms]
-	 * : Create missing categories and terms. Defaults to the PressPort setting.
+	 * : Create missing categories and terms. Defaults to the MigratePlus setting.
 	 *
 	 * [--[no-]rewrite-links]
-	 * : Point links to the old site at this one (PressPort exports only). Defaults to the PressPort setting.
+	 * : Point links to the old site at this one (MigratePlus exports only). Defaults to the MigratePlus setting.
+	 *
+	 * [--[no-]comments]
+	 * : Add the comments a MigratePlus export carries. Defaults to the MigratePlus setting.
+	 *
+	 * [--[no-]menus]
+	 * : Import the navigation menus a MigratePlus export carries, after its posts. Defaults to the MigratePlus setting.
 	 *
 	 * [--dry-run]
 	 * : Show what would happen without saving.
@@ -143,13 +161,28 @@ class PressPort_CLI {
 		if ( '' === $source ) {
 			WP_CLI::error( 'Specify a source (json) or --config.' );
 		}
+		$saved = null;
+		if ( isset( $assoc['mapping'] ) ) {
+			$saved = MigratePlus_Mappings::get( $assoc['mapping'] );
+			if ( ! $saved ) {
+				WP_CLI::error( sprintf( 'No saved mapping called "%s". See: wp migrateplus mapping list', $assoc['mapping'] ) );
+			}
+			$config += array(
+				'mapping' => $saved['mapping'],
+				'options' => $saved['options'],
+			);
+		}
 		$settings = array_merge( isset( $config['settings'] ) ? (array) $config['settings'] : array(), $this->settings_from( $assoc, $source ) );
 
-		$preview = PressPort_Runner::preview( $source, $settings, 1 );
+		$preview = MigratePlus_Runner::preview( $source, $settings, 1 );
 		if ( is_wp_error( $preview ) ) {
 			WP_CLI::error( $preview->get_error_message() );
 		}
 		$job = $preview['job'];
+		if ( $saved && isset( $job->data['settings']['migrateplus_mapping'] ) ) {
+			$job->delete();
+			WP_CLI::error( 'This file is a MigratePlus export: it carries its own mapping, so it is imported without --mapping.' );
+		}
 
 		$mapping = $job->data['mapping'];
 		if ( ! empty( $config['mapping'] ) ) {
@@ -168,7 +201,7 @@ class PressPort_CLI {
 			(array) $mapping
 		);
 
-		// The previewed job's options: the defaults, plus the post type a PressPort export came from.
+		// The previewed job's options: the defaults, plus the post type a MigratePlus export came from.
 		$options = array_merge( $job->data['options'], isset( $config['options'] ) ? (array) $config['options'] : array() );
 		$flags   = array(
 			'post_type'  => 'post_type',
@@ -186,6 +219,12 @@ class PressPort_CLI {
 		}
 		if ( ! in_array( $options['duplicate'], array( 'skip', 'update', 'create' ), true ) ) {
 			WP_CLI::error( '--duplicate must be skip, update or create.' );
+		}
+		if ( isset( $assoc['force-status'] ) ) {
+			$options['force_status'] = 'keep' === $assoc['force-status'] ? '' : $assoc['force-status'];
+		}
+		if ( ! empty( $options['force_status'] ) && ! in_array( $options['force_status'], array( 'publish', 'draft', 'pending', 'private' ), true ) ) {
+			WP_CLI::error( '--force-status must be publish, draft, pending, private or keep.' );
 		}
 		if ( isset( $assoc['author'] ) ) {
 			$user = is_numeric( $assoc['author'] ) ? get_userdata( (int) $assoc['author'] ) : ( get_user_by( 'login', $assoc['author'] ) ? get_user_by( 'login', $assoc['author'] ) : get_user_by( 'email', $assoc['author'] ) );
@@ -209,19 +248,22 @@ class PressPort_CLI {
 		$options['create_authors']        = (int) WP_CLI\Utils\get_flag_value( $assoc, 'create-authors', ! empty( $options['create_authors'] ) );
 		$options['create_terms']          = (int) WP_CLI\Utils\get_flag_value( $assoc, 'create-terms', ! empty( $options['create_terms'] ) );
 		$options['rewrite_links']         = (int) WP_CLI\Utils\get_flag_value( $assoc, 'rewrite-links', ! empty( $options['rewrite_links'] ) );
+		$options['import_comments']       = (int) WP_CLI\Utils\get_flag_value( $assoc, 'comments', ! empty( $options['import_comments'] ) );
+		$options['import_menus']          = (int) WP_CLI\Utils\get_flag_value( $assoc, 'menus', ! empty( $options['import_menus'] ) );
 		$options['dry_run']               = (int) WP_CLI\Utils\get_flag_value( $assoc, 'dry-run', ! empty( $options['dry_run'] ) );
 
 		if ( ! post_type_exists( $options['post_type'] ) ) {
 			WP_CLI::error( sprintf( 'Post type "%s" does not exist.', $options['post_type'] ) );
 		}
 		$job->data['options'] = $options;
-		if ( empty( $options['dry_run'] ) ) {
-			$job->data['options'] = $this->ask_duplicates( $job, isset( $assoc['duplicates'] ) ? $assoc['duplicates'] : '' );
-		}
-		$job->data['status'] = 'ready';
+		// A dry run checks for duplicates too, so its counts match the real run's, but never asks: it skips them unless --duplicates says otherwise.
+		$choice               = isset( $assoc['duplicates'] ) ? $assoc['duplicates'] : ( empty( $options['dry_run'] ) ? '' : 'skip' );
+		$job->data['options'] = $this->ask_duplicates( $job, $choice );
+		$job->data['status']  = 'ready';
 		$job->save();
 
-		WP_CLI::log( sprintf( 'Job %s: importing into "%s"%s', $job->data['id'], $job->data['options']['post_type'], $job->data['options']['dry_run'] ? ' (dry run)' : '' ) );
+		$types = isset( $job->data['settings']['migrateplus_post_types'] ) && false !== strpos( (string) $job->data['settings']['migrateplus_post_types'], ',' ) ? str_replace( ',', ', ', $job->data['settings']['migrateplus_post_types'] ) : $job->data['options']['post_type'];
+		WP_CLI::log( sprintf( 'Job %s: importing into "%s"%s', $job->data['id'], $types, $job->data['options']['dry_run'] ? ' (dry run)' : '' ) );
 		WP_CLI::log( 'Mapping: ' . wp_json_encode( $job->data['mapping']['fields'] ) );
 		$this->run( $job );
 	}
@@ -229,13 +271,13 @@ class PressPort_CLI {
 	/**
 	 * Report records already on this site and settle whether to skip them.
 	 *
-	 * @param PressPort_Job $job    Job with the options it will run with.
-	 * @param string        $choice "skip", "import", "update", or '' to ask.
+	 * @param MigratePlus_Job $job    Job with the options it will run with.
+	 * @param string          $choice "skip", "import", "update", or '' to ask.
 	 * @return array Options.
 	 */
-	protected function ask_duplicates( PressPort_Job $job, $choice ) {
+	protected function ask_duplicates( MigratePlus_Job $job, $choice ) {
 		$options = $job->data['options'];
-		$found   = PressPort_Runner::find_duplicates( $job );
+		$found   = MigratePlus_Runner::find_duplicates( $job );
 		if ( is_wp_error( $found ) ) {
 			WP_CLI::error( $found->get_error_message() );
 		}
@@ -287,7 +329,7 @@ class PressPort_CLI {
 	 * @param array $args Args.
 	 */
 	public function resume( $args ) {
-		$job = PressPort_Job::load( $args[0] );
+		$job = MigratePlus_Job::load( $args[0] );
 		if ( ! $job ) {
 			WP_CLI::error( 'Job not found.' );
 		}
@@ -295,12 +337,12 @@ class PressPort_CLI {
 	}
 
 	/**
-	 * Export content to a JSON file that PressPort (on this or another site) can import.
+	 * Export content to a JSON file that MigratePlus (on this or another site) can import.
 	 *
 	 * ## OPTIONS
 	 *
 	 * [<post_type>]
-	 * : Post type to export. Default: post.
+	 * : Post type to export, or several separated by commas (e.g. attachment,page,post). Media is always written first, so the import downloads each file once. Default: post.
 	 *
 	 * [--status=<statuses>]
 	 * : Comma separated statuses, or "any". Default: the export defaults in Settings (Published).
@@ -329,48 +371,62 @@ class PressPort_CLI {
 	 * [--[no-]woo]
 	 * : Include WooCommerce product data (prices, stock, attributes, variations). Defaults to the export defaults in Settings; --no-woo leaves them out.
 	 *
+	 * [--[no-]comments]
+	 * : Include approved comments and replies. Defaults to the export defaults in Settings (off); --no-comments leaves them out.
+	 *
+	 * [--[no-]menus]
+	 * : Include the navigation menus, their items and theme locations. Defaults to the export defaults in Settings (off). With menus, a file can hold menus alone when no content matches.
+	 *
+	 * [--[no-]gzip]
+	 * : Compress the file (.json.gz), for a site whose upload limit is lower than the export. Needs PHP's zlib extension. Defaults to the export defaults in Settings (off).
+	 *
 	 * [--output=<file>]
-	 * : Where to write the file. Default: pressport-<post_type>-<date>.json in the current directory.
+	 * : Where to write the file. Default: migrateplus-<post_type>-<date>.json (.json.gz when compressed) in the current directory.
 	 *
 	 * ## EXAMPLES
 	 *
-	 *     wp pressport export post --status=publish,draft --output=posts.json
-	 *     wp pressport export product --after=2024-01-01
+	 *     wp migrateplus export post --status=publish,draft --output=posts.json
+	 *     wp migrateplus export product --after=2024-01-01
+	 *     wp migrateplus export attachment,page,post --menus
+	 *     wp migrateplus export product --gzip
 	 *
 	 * @param array $args  Args.
 	 * @param array $assoc Assoc args.
 	 */
 	public function export( $args, $assoc ) {
-		$defaults = PressPort_Exporter::defaults();
-		$export   = PressPort_Exporter::sanitize_args(
+		$defaults = MigratePlus_Exporter::defaults();
+		$export   = MigratePlus_Exporter::sanitize_args(
 			array(
-				'post_type'     => isset( $args[0] ) ? $args[0] : 'post',
-				'statuses'      => isset( $assoc['status'] ) ? $assoc['status'] : $defaults['statuses'],
-				'after'         => isset( $assoc['after'] ) ? $assoc['after'] : '',
-				'before'        => isset( $assoc['before'] ) ? $assoc['before'] : '',
-				'include_acf'   => WP_CLI\Utils\get_flag_value( $assoc, 'acf', ! empty( $defaults['include_acf'] ) ),
-				'include_meta'  => WP_CLI\Utils\get_flag_value( $assoc, 'meta', ! empty( $defaults['include_meta'] ) ),
-				'include_terms' => WP_CLI\Utils\get_flag_value( $assoc, 'terms', ! empty( $defaults['include_terms'] ) ),
-				'include_image' => WP_CLI\Utils\get_flag_value( $assoc, 'featured-images', ! empty( $defaults['include_image'] ) ),
-				'include_woo'   => WP_CLI\Utils\get_flag_value( $assoc, 'woo', ! empty( $defaults['include_woo'] ) ),
-				'exclude_meta'  => isset( $assoc['exclude-meta'] ) ? $assoc['exclude-meta'] : $defaults['exclude_meta'],
+				'post_type'        => isset( $args[0] ) ? $args[0] : 'post',
+				'statuses'         => isset( $assoc['status'] ) ? $assoc['status'] : $defaults['statuses'],
+				'after'            => isset( $assoc['after'] ) ? $assoc['after'] : '',
+				'before'           => isset( $assoc['before'] ) ? $assoc['before'] : '',
+				'include_acf'      => WP_CLI\Utils\get_flag_value( $assoc, 'acf', ! empty( $defaults['include_acf'] ) ),
+				'include_meta'     => WP_CLI\Utils\get_flag_value( $assoc, 'meta', ! empty( $defaults['include_meta'] ) ),
+				'include_terms'    => WP_CLI\Utils\get_flag_value( $assoc, 'terms', ! empty( $defaults['include_terms'] ) ),
+				'include_image'    => WP_CLI\Utils\get_flag_value( $assoc, 'featured-images', ! empty( $defaults['include_image'] ) ),
+				'include_woo'      => WP_CLI\Utils\get_flag_value( $assoc, 'woo', ! empty( $defaults['include_woo'] ) ),
+				'include_comments' => WP_CLI\Utils\get_flag_value( $assoc, 'comments', ! empty( $defaults['include_comments'] ) ),
+				'include_menus'    => WP_CLI\Utils\get_flag_value( $assoc, 'menus', ! empty( $defaults['include_menus'] ) ),
+				'exclude_meta'     => isset( $assoc['exclude-meta'] ) ? $assoc['exclude-meta'] : $defaults['exclude_meta'],
+				'gzip'             => WP_CLI\Utils\get_flag_value( $assoc, 'gzip', ! empty( $defaults['gzip'] ) ),
 			)
 		);
 		if ( is_wp_error( $export ) ) {
 			WP_CLI::error( $export->get_error_message() );
 		}
-		$state = PressPort_Exporter::start( $export );
+		$state = MigratePlus_Exporter::start( $export );
 		if ( is_wp_error( $state ) ) {
 			WP_CLI::error( $state->get_error_message() );
 		}
-		if ( ! $state['total'] ) {
-			PressPort_Exporter::forget( $state['id'] );
+		if ( ! $state['total'] && ! ( $export['include_menus'] && wp_get_nav_menus() ) ) {
+			MigratePlus_Exporter::forget( $state['id'] );
 			WP_CLI::error( 'Nothing to export with these filters.' );
 		}
-		$progress = WP_CLI\Utils\make_progress_bar( sprintf( 'Exporting %d %s', $state['total'], $export['post_type'] ), $state['total'] );
+		$progress = WP_CLI\Utils\make_progress_bar( sprintf( 'Exporting %d %s', $state['total'], implode( ', ', $export['post_types'] ) ), max( 1, $state['total'] ) );
 		while ( empty( $state['complete'] ) ) {
 			$before = $state['done'];
-			PressPort_Exporter::run_batch( $state, 100 );
+			MigratePlus_Exporter::run_batch( $state, 100 );
 			$progress->tick( $state['done'] - $before );
 			if ( function_exists( 'wp_cache_flush_runtime' ) ) {
 				wp_cache_flush_runtime();
@@ -382,12 +438,102 @@ class PressPort_CLI {
 		if ( ! copy( $state['file'], $output ) ) {
 			WP_CLI::error( sprintf( 'Could not write %s', $output ) );
 		}
-		PressPort_Exporter::delete( $state );
-		WP_CLI::success( sprintf( 'Exported %d items (%d ACF fields, %d custom fields) to %s', $state['done'], count( $state['acf_names'] ), count( $state['meta_keys'] ), $output ) );
+		MigratePlus_Exporter::delete( $state );
+		WP_CLI::success( sprintf( 'Exported %d items%s (%d ACF fields, %d custom fields) to %s', $state['done'], $state['menus'] ? sprintf( ' and %d menus', $state['menus'] ) : '', count( $state['acf_names'] ), count( $state['meta_keys'] ), $output ) );
 	}
 
 	/**
-	 * Delete all posts and media created by a job.
+	 * List, export, import or delete saved mappings.
+	 *
+	 * Mappings are saved on the mapping screen of an import. An exported mapping is
+	 * a --config file for wp migrateplus import (pass the JSON file with --file); import
+	 * reads such a file back in as a saved mapping, for example on another site.
+	 *
+	 * ## OPTIONS
+	 *
+	 * <action>
+	 * : list, export, import or delete.
+	 *
+	 * [<name-or-file>]
+	 * : The mapping's name (export, delete) or the file to read (import).
+	 *
+	 * [--output=<file>]
+	 * : export: where to write the file. Default: migrateplus-mapping-<name>.json in the current directory.
+	 *
+	 * [--name=<name>]
+	 * : import: the name to save it under. Default: the name in the file, or the file name.
+	 *
+	 * [--format=<format>]
+	 * : list: table, json, csv. Default: table.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp migrateplus mapping list
+	 *     wp migrateplus mapping export "Books feed" --output=books.json
+	 *     wp migrateplus import --config=books.json --file=./feed.json
+	 *     wp migrateplus mapping import books.json
+	 *     wp migrateplus mapping delete "Books feed"
+	 *
+	 * @param array $args  Args.
+	 * @param array $assoc Assoc args.
+	 */
+	public function mapping( $args, $assoc ) {
+		$action = $args[0];
+		$target = isset( $args[1] ) ? $args[1] : '';
+		if ( 'list' === $action ) {
+			$rows = array();
+			foreach ( MigratePlus_Mappings::all() as $entry ) {
+				$rows[] = array(
+					'name'      => $entry['name'],
+					'post_type' => isset( $entry['options']['post_type'] ) ? $entry['options']['post_type'] : MigratePlus_Job::default_options()['post_type'],
+					'mapped'    => count( $entry['mapping']['fields'] ) + count( $entry['mapping']['meta'] ) + count( $entry['mapping']['taxonomies'] ) + count( $entry['mapping']['acf'] ),
+					'fields'    => count( $entry['fields'] ),
+					'updated'   => wp_date( 'Y-m-d H:i', $entry['updated'] ),
+				);
+			}
+			WP_CLI\Utils\format_items( isset( $assoc['format'] ) ? $assoc['format'] : 'table', $rows, array( 'name', 'post_type', 'mapped', 'fields', 'updated' ) );
+			return;
+		}
+		if ( '' === $target ) {
+			WP_CLI::error( 'export and delete need the mapping\'s name; import needs a file.' );
+		}
+		if ( 'export' === $action ) {
+			$entry = MigratePlus_Mappings::get( $target );
+			if ( ! $entry ) {
+				WP_CLI::error( sprintf( 'No saved mapping called "%s".', $target ) );
+			}
+			$output = isset( $assoc['output'] ) ? $assoc['output'] : 'migrateplus-mapping-' . sanitize_title( $entry['name'] ) . '.json';
+			if ( false === file_put_contents( $output, wp_json_encode( MigratePlus_Mappings::to_config( $entry ), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) . "\n" ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
+				WP_CLI::error( sprintf( 'Could not write %s', $output ) );
+			}
+			WP_CLI::success( sprintf( 'Wrote "%s" to %s. Import with it: wp migrateplus import --config=%s --file=<file.json>', $entry['name'], $output, $output ) );
+			return;
+		}
+		if ( 'import' === $action ) {
+			$config = $this->read_json( $target );
+			if ( empty( $config['mapping'] ) || ! is_array( $config['mapping'] ) ) {
+				WP_CLI::error( sprintf( '%s has no "mapping".', $target ) );
+			}
+			$name  = isset( $assoc['name'] ) ? $assoc['name'] : ( isset( $config['name'] ) ? (string) $config['name'] : pathinfo( $target, PATHINFO_FILENAME ) );
+			$saved = MigratePlus_Mappings::save( $name, $config['mapping'], isset( $config['options'] ) ? (array) $config['options'] : array(), isset( $config['fields'] ) ? (array) $config['fields'] : array() );
+			if ( is_wp_error( $saved ) ) {
+				WP_CLI::error( $saved->get_error_message() );
+			}
+			WP_CLI::success( sprintf( 'Saved mapping "%s".', $saved['name'] ) );
+			return;
+		}
+		if ( 'delete' === $action ) {
+			if ( ! MigratePlus_Mappings::delete( $target ) ) {
+				WP_CLI::error( sprintf( 'No saved mapping called "%s".', $target ) );
+			}
+			WP_CLI::success( sprintf( 'Deleted mapping "%s".', $target ) );
+			return;
+		}
+		WP_CLI::error( 'The action must be list, export, import or delete.' );
+	}
+
+	/**
+	 * Delete all posts, media, comments and menus created by a job.
 	 *
 	 * ## OPTIONS
 	 *
@@ -401,7 +547,7 @@ class PressPort_CLI {
 	 * @param array $assoc Assoc args.
 	 */
 	public function rollback( $args, $assoc ) {
-		$job = PressPort_Job::load( $args[0] );
+		$job = MigratePlus_Job::load( $args[0] );
 		if ( ! $job ) {
 			WP_CLI::error( 'Job not found.' );
 		}
@@ -409,7 +555,7 @@ class PressPort_CLI {
 		WP_CLI::confirm( sprintf( 'Permanently delete %d items created by job %s?', $count, $job->data['id'] ), $assoc );
 		$deleted = 0;
 		do {
-			$result   = PressPort_Runner::rollback_batch( $job, 100 );
+			$result   = MigratePlus_Runner::rollback_batch( $job, 100 );
 			$deleted += $result['deleted'];
 			if ( ! empty( $result['error'] ) ) {
 				WP_CLI::error( sprintf( '%s (%d items deleted before it stopped.)', $result['error'], $deleted ) );
@@ -430,13 +576,13 @@ class PressPort_CLI {
 	 */
 	public function jobs( $args, $assoc ) {
 		$rows = array();
-		foreach ( PressPort_Job::all() as $job ) {
+		foreach ( MigratePlus_Job::all() as $job ) {
 			$d      = $job->data;
 			$rows[] = array(
 				'id'        => $d['id'],
 				'created'   => wp_date( 'Y-m-d H:i', $d['created'] ),
 				'source'    => $d['source'],
-				'post_type' => $d['options']['post_type'],
+				'post_type' => ! empty( $d['settings']['migrateplus_post_types'] ) && false !== strpos( (string) $d['settings']['migrateplus_post_types'], ',' ) ? $d['settings']['migrateplus_post_types'] : $d['options']['post_type'],
 				'status'    => $d['status'] . ( ! empty( $d['options']['dry_run'] ) ? ' (dry)' : '' ),
 				'created_n' => $d['stats']['created'],
 				'updated'   => $d['stats']['updated'],
@@ -448,28 +594,29 @@ class PressPort_CLI {
 	}
 
 	/**
-	 * @param PressPort_Job $job Job.
+	 * @param MigratePlus_Job $job Job.
 	 */
-	protected function run( PressPort_Job $job ) {
+	protected function run( MigratePlus_Job $job ) {
 		$total    = $job->data['total'] ? (int) $job->data['total'] : 0;
 		$progress = $total ? WP_CLI\Utils\make_progress_bar( 'Importing', max( 0, $total - (int) $job->data['stats']['processed'] ) ) : null;
 		do {
-			$result = PressPort_Runner::run_batch( $job );
+			$result = MigratePlus_Runner::run_batch( $job );
 			if ( is_wp_error( $result ) ) {
 				if ( $progress ) {
 					$progress->finish();
 				}
-				WP_CLI::error( $result->get_error_message() . sprintf( ' Resume with: wp pressport resume %s', $job->data['id'] ) );
+				WP_CLI::error( $result->get_error_message() . sprintf( ' Resume with: wp migrateplus resume %s', $job->data['id'] ) );
 			}
 			foreach ( $result['results'] as $r ) {
 				if ( 'failed' === $r['action'] ) {
 					WP_CLI::warning( $r['message'] );
 				} elseif ( ! empty( $r['warning'] ) ) {
 					WP_CLI::warning( $r['message'] );
-				} elseif ( ! $progress ) {
+				} elseif ( ! $progress || ! empty( $r['menu'] ) ) {
 					WP_CLI::log( $r['message'] );
 				}
-				if ( $progress ) {
+				// Menus come after the records the bar counts.
+				if ( $progress && empty( $r['menu'] ) ) {
 					$progress->tick();
 				}
 			}
@@ -525,13 +672,13 @@ class PressPort_CLI {
 	 * @return bool
 	 */
 	protected function remote_file_allowed( $source ) {
-		$all = PressPort_Sources::all();
+		$all = MigratePlus_Sources::all();
 		if ( empty( $all[ $source ] ) || ! class_exists( $all[ $source ] ) ) {
 			return true; // Unknown source: preview() reports that.
 		}
 		foreach ( call_user_func( array( $all[ $source ], 'settings_schema' ) ) as $field ) {
 			if ( 'file' === $field['key'] ) {
-				return PressPort_Source_Base::allows_remote( $field );
+				return MigratePlus_Source_Base::allows_remote( $field );
 			}
 		}
 		return true;

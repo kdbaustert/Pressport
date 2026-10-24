@@ -2,25 +2,25 @@
 /**
  * Admin screen + AJAX endpoints.
  *
- * @package PressPort
+ * @package MigratePlus
  */
 
 defined( 'ABSPATH' ) || exit;
 
-class PressPort_Admin {
+class MigratePlus_Admin {
 
-	const SLUG         = 'pressport';
-	const HISTORY_SLUG = 'pressport-history';
-	const EXPORT_SLUG  = 'pressport-export';
-	const REPLACE_SLUG = 'pressport-replace';
+	const SLUG         = 'migrateplus';
+	const HISTORY_SLUG = 'migrateplus-history';
+	const EXPORT_SLUG  = 'migrateplus-export';
+	const REPLACE_SLUG = 'migrateplus-replace';
 
 	public static function init() {
 		add_action( 'admin_menu', array( __CLASS__, 'menu' ) );
 		add_action( 'admin_enqueue_scripts', array( __CLASS__, 'assets' ) );
-		add_filter( 'plugin_action_links_' . plugin_basename( PRESSPORT_FILE ), array( __CLASS__, 'action_links' ) );
+		add_filter( 'plugin_action_links_' . plugin_basename( MIGRATEPLUS_FILE ), array( __CLASS__, 'action_links' ) );
 
-		foreach ( array( 'preview', 'duplicates', 'media_preview', 'save', 'run', 'rollback', 'delete', 'jobs', 'job', 'restart', 'export_count', 'export_start', 'export_run', 'export_download', 'exports', 'export_log', 'export_forget', 'replace_start', 'replace_run', 'replace_history', 'replace_rollback', 'replace_forget' ) as $action ) {
-			add_action( 'wp_ajax_pressport_' . $action, array( __CLASS__, 'ajax_' . $action ) );
+		foreach ( array( 'preview', 'duplicates', 'media_preview', 'save', 'run', 'rollback', 'delete', 'history_delete', 'jobs', 'job', 'restart', 'export_count', 'export_start', 'export_run', 'export_download', 'exports', 'export_log', 'export_forget', 'replace_start', 'replace_run', 'replace_history', 'replace_rollback', 'replace_forget', 'mapping_save', 'mapping_rename', 'mapping_delete' ) as $action ) {
+			add_action( 'wp_ajax_migrateplus_' . $action, array( __CLASS__, 'ajax_' . $action ) );
 		}
 	}
 
@@ -30,24 +30,24 @@ class PressPort_Admin {
 	 * @return string
 	 */
 	public static function capability() {
-		return (string) apply_filters( 'pressport_capability', PressPort_Settings::get( 'capability' ) );
+		return (string) apply_filters( 'migrateplus_capability', MigratePlus_Settings::get( 'capability' ) );
 	}
 
 	public static function menu() {
 		add_menu_page(
-			__( 'PressPort', 'pressport' ),
-			__( 'PressPort', 'pressport' ),
+			__( 'MigratePlus', 'migrateplus' ),
+			__( 'MigratePlus', 'migrateplus' ),
 			self::capability(),
 			self::SLUG,
 			array( __CLASS__, 'render_import' ),
 			'dashicons-migrate',
 			76
 		);
-		add_submenu_page( self::SLUG, __( 'Import', 'pressport' ), __( 'Import', 'pressport' ), self::capability(), self::SLUG, array( __CLASS__, 'render_import' ) );
-		add_submenu_page( self::SLUG, __( 'Export Content', 'pressport' ), __( 'Export', 'pressport' ), self::capability(), self::EXPORT_SLUG, array( __CLASS__, 'render_export' ) );
-		add_submenu_page( self::SLUG, __( 'History', 'pressport' ), __( 'History', 'pressport' ), self::capability(), self::HISTORY_SLUG, array( __CLASS__, 'render_history' ) );
-		add_submenu_page( self::SLUG, __( 'Find & Replace', 'pressport' ), __( 'Find & Replace', 'pressport' ), 'manage_options', self::REPLACE_SLUG, array( __CLASS__, 'render_replace' ) );
-		add_submenu_page( self::SLUG, __( 'PressPort Settings', 'pressport' ), __( 'Settings', 'pressport' ), 'manage_options', PressPort_Settings::PAGE, array( 'PressPort_Settings', 'render' ) );
+		add_submenu_page( self::SLUG, __( 'Import', 'migrateplus' ), __( 'Import', 'migrateplus' ), self::capability(), self::SLUG, array( __CLASS__, 'render_import' ) );
+		add_submenu_page( self::SLUG, __( 'Export Content', 'migrateplus' ), __( 'Export', 'migrateplus' ), self::capability(), self::EXPORT_SLUG, array( __CLASS__, 'render_export' ) );
+		add_submenu_page( self::SLUG, __( 'Find & Replace', 'migrateplus' ), __( 'Find & Replace', 'migrateplus' ), 'manage_options', self::REPLACE_SLUG, array( __CLASS__, 'render_replace' ) );
+		add_submenu_page( self::SLUG, __( 'History', 'migrateplus' ), __( 'History', 'migrateplus' ), self::capability(), self::HISTORY_SLUG, array( __CLASS__, 'render_history' ) );
+		add_submenu_page( self::SLUG, __( 'MigratePlus Settings', 'migrateplus' ), __( 'Settings', 'migrateplus' ), 'manage_options', MigratePlus_Settings::PAGE, array( 'MigratePlus_Settings', 'render' ) );
 	}
 
 	/**
@@ -68,8 +68,8 @@ class PressPort_Admin {
 	public static function action_links( $links ) {
 		array_unshift(
 			$links,
-			'<a href="' . esc_url( self::url() ) . '">' . esc_html__( 'Import', 'pressport' ) . '</a>',
-			'<a href="' . esc_url( self::url( PressPort_Settings::PAGE ) ) . '">' . esc_html__( 'Settings', 'pressport' ) . '</a>'
+			'<a href="' . esc_url( self::url() ) . '">' . esc_html__( 'Import', 'migrateplus' ) . '</a>',
+			'<a href="' . esc_url( self::url( MigratePlus_Settings::PAGE ) ) . '">' . esc_html__( 'Settings', 'migrateplus' ) . '</a>'
 		);
 		return $links;
 	}
@@ -79,20 +79,20 @@ class PressPort_Admin {
 	 */
 	public static function assets( $hook ) { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- admin_enqueue_scripts passes it; the page slug is checked instead.
 		$page = isset( $_GET['page'] ) ? sanitize_key( wp_unslash( $_GET['page'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification
-		if ( ! in_array( $page, array( self::SLUG, self::HISTORY_SLUG, self::EXPORT_SLUG, self::REPLACE_SLUG, PressPort_Settings::PAGE ), true ) ) {
+		if ( ! in_array( $page, array( self::SLUG, self::HISTORY_SLUG, self::EXPORT_SLUG, self::REPLACE_SLUG, MigratePlus_Settings::PAGE ), true ) ) {
 			return;
 		}
-		wp_enqueue_style( 'pressport', PRESSPORT_URL . 'assets/admin.css', array(), PRESSPORT_VERSION );
-		if ( PressPort_Settings::PAGE === $page ) {
+		wp_enqueue_style( 'migrateplus', MIGRATEPLUS_URL . 'assets/admin.css', array(), MIGRATEPLUS_VERSION );
+		if ( MigratePlus_Settings::PAGE === $page ) {
 			return;
 		}
-		wp_enqueue_script( 'pressport', PRESSPORT_URL . 'assets/admin.js', array(), PRESSPORT_VERSION, true );
+		wp_enqueue_script( 'migrateplus', MIGRATEPLUS_URL . 'assets/admin.js', array(), MIGRATEPLUS_VERSION, true );
 		$views = array(
 			self::HISTORY_SLUG => 'history',
 			self::EXPORT_SLUG  => 'export',
 			self::REPLACE_SLUG => 'replace',
 		);
-		wp_localize_script( 'pressport', 'PRESSPORT_DATA', self::bootstrap_data( isset( $views[ $page ] ) ? $views[ $page ] : 'new' ) );
+		wp_localize_script( 'migrateplus', 'MIGRATEPLUS_DATA', self::bootstrap_data( isset( $views[ $page ] ) ? $views[ $page ] : 'new' ) );
 	}
 
 	/**
@@ -103,7 +103,7 @@ class PressPort_Admin {
 	 */
 	protected static function bootstrap_data( $view ) {
 		$sources = array();
-		foreach ( PressPort_Sources::all() as $id => $class ) {
+		foreach ( MigratePlus_Sources::all() as $id => $class ) {
 			if ( class_exists( $class ) ) {
 				$sources[] = array(
 					'id'     => $id,
@@ -130,6 +130,7 @@ class PressPort_Admin {
 			$post_types[] = array(
 				'name'       => $pt->name,
 				'label'      => $pt->labels->singular_name,
+				'plural'     => $pt->labels->name,
 				'taxonomies' => $taxes,
 			);
 		}
@@ -149,7 +150,7 @@ class PressPort_Admin {
 		}
 
 		$targets = array();
-		foreach ( PressPort_Importer::targets() as $key => $info ) {
+		foreach ( MigratePlus_Importer::targets() as $key => $info ) {
 			$targets[] = array(
 				'key'   => $key,
 				'label' => $info[0],
@@ -159,55 +160,58 @@ class PressPort_Admin {
 
 		return array(
 			'ajaxUrl'        => admin_url( 'admin-ajax.php' ),
-			'nonce'          => wp_create_nonce( 'pressport_admin' ),
+			'nonce'          => wp_create_nonce( 'migrateplus_admin' ),
 			'adminUrl'       => admin_url(),
 			'view'           => $view,
 			'importUrl'      => self::url(),
 			'historyUrl'     => self::url( self::HISTORY_SLUG ),
 			'exportUrl'      => self::url( self::EXPORT_SLUG ),
-			'exportDefaults' => PressPort_Exporter::defaults(),
-			'settingsUrl'    => current_user_can( 'manage_options' ) ? self::url( PressPort_Settings::PAGE ) : '',
+			'exportDefaults' => MigratePlus_Exporter::defaults(),
+			'settingsUrl'    => current_user_can( 'manage_options' ) ? self::url( MigratePlus_Settings::PAGE ) : '',
 			'openJob'        => isset( $_GET['job'] ) ? sanitize_key( wp_unslash( $_GET['job'] ) ) : '', // phpcs:ignore WordPress.Security.NonceVerification
 			'resume'         => ! empty( $_GET['resume'] ), // phpcs:ignore WordPress.Security.NonceVerification
 			'sources'        => $sources,
 			'postTypes'      => $post_types,
 			'users'          => $users,
 			'targets'        => $targets,
-			'defaults'       => PressPort_Job::default_options(),
+			'defaults'       => MigratePlus_Job::default_options(),
 			'maxUpload'      => size_format( wp_max_upload_size() ),
 			'maxUploadBytes' => wp_max_upload_size(),
-			'acf'            => PressPort_ACF::bootstrap( wp_list_pluck( $post_types, 'name' ) ),
-			'woo'            => array( 'active' => PressPort_Woo::active() ),
-			'maxRemote'      => size_format( max( 1, (int) PressPort_Settings::get( 'max_remote_size' ) ) * MB_IN_BYTES ),
-			'tables'         => 'replace' === $view ? PressPort_Replace::tables() : array(),
+			'acf'            => MigratePlus_ACF::bootstrap( wp_list_pluck( $post_types, 'name' ) ),
+			'woo'            => array( 'active' => MigratePlus_Woo::active() ),
+			'menus'          => current_user_can( 'edit_theme_options' ), // Whether this user may export menus.
+			'zlib'           => MigratePlus_Util::zlib_available(), // Compressed (.json.gz) exports.
+			'mappings'       => 'new' === $view ? MigratePlus_Mappings::for_js() : array(),
+			'maxRemote'      => size_format( max( 1, (int) MigratePlus_Settings::get( 'max_remote_size' ) ) * MB_IN_BYTES ),
+			'tables'         => 'replace' === $view ? MigratePlus_Replace::tables() : array(),
 		);
 	}
 
 	public static function render_import() {
 		self::render_shell(
-			__( 'Import Content', 'pressport' ),
-			__( 'Upload a PressPort export (.json) and it imports straight away, using the field mapping saved in the file. Other JSON files work too: you map their fields first. Every import can be rolled back from History.', 'pressport' )
+			__( 'Import Content', 'migrateplus' ),
+			__( 'Upload a MigratePlus export (.json or .json.gz) and it imports straight away, using the field mapping saved in the file. Other JSON files work too: you map their fields first. Every import can be rolled back from History.', 'migrateplus' )
 		);
 	}
 
 	public static function render_export() {
 		self::render_shell(
-			__( 'Export Content', 'pressport' ),
-			__( 'Export posts, pages or custom post types with their terms, featured images, custom fields and ACF fields. Import the file on another site with PressPort and the fields map themselves.', 'pressport' )
+			__( 'Export Content', 'migrateplus' ),
+			__( 'Export posts, pages, media or custom post types, one type or several in one file, with their terms, featured images, custom fields and ACF fields. Import the file on another site with MigratePlus and the fields map themselves.', 'migrateplus' )
 		);
 	}
 
 	public static function render_history() {
 		self::render_shell(
-			__( 'History', 'pressport' ),
-			__( 'Every import and export you have run. Resume an import that stopped, run it again to pick up new content, or roll it back. Open an export\'s log to see what went into the file.', 'pressport' )
+			__( 'History', 'migrateplus' ),
+			__( 'Every import and export you have run. Resume an import that stopped, run it again to pick up new content, or roll it back. Open an export\'s log to see what went into the file.', 'migrateplus' )
 		);
 	}
 
 	public static function render_replace() {
 		self::render_shell(
-			__( 'Find & Replace', 'pressport' ),
-			__( 'Replace text across database tables, for example an old domain after a migration. Serialized data is handled safely. Start with a dry run. Real runs can be rolled back, but back up the database first anyway.', 'pressport' )
+			__( 'Find & Replace', 'migrateplus' ),
+			__( 'Replace text across database tables, for example an old domain after a migration. Serialized data is handled safely. Start with a dry run. Real runs can be rolled back, but back up the database first anyway.', 'migrateplus' )
 		);
 	}
 
@@ -219,15 +223,15 @@ class PressPort_Admin {
 	 */
 	protected static function render_shell( $title, $intro ) {
 		?>
-		<div class="wrap pressport-wrap">
+		<div class="wrap migrateplus-wrap">
 			<h1 class="wp-heading-inline"><?php echo esc_html( $title ); ?></h1>
 			<?php if ( current_user_can( 'manage_options' ) ) : ?>
-				<a href="<?php echo esc_url( self::url( PressPort_Settings::PAGE ) ); ?>" class="page-title-action"><?php esc_html_e( 'Settings', 'pressport' ); ?></a>
+				<a href="<?php echo esc_url( self::url( MigratePlus_Settings::PAGE ) ); ?>" class="page-title-action"><?php esc_html_e( 'Settings', 'migrateplus' ); ?></a>
 			<?php endif; ?>
 			<hr class="wp-header-end">
-			<p class="pressport-intro"><?php echo esc_html( $intro ); ?></p>
-			<div id="pressport-app"><p><?php esc_html_e( 'Loading…', 'pressport' ); ?></p></div>
-			<noscript><div class="notice notice-error"><p><?php esc_html_e( 'JavaScript is required for the importer.', 'pressport' ); ?></p></div></noscript>
+			<p class="migrateplus-intro"><?php echo esc_html( $intro ); ?></p>
+			<div id="migrateplus-app"><p><?php esc_html_e( 'Loading…', 'migrateplus' ); ?></p></div>
+			<noscript><div class="notice notice-error"><p><?php esc_html_e( 'JavaScript is required for the importer.', 'migrateplus' ); ?></p></div></noscript>
 		</div>
 		<?php
 	}
@@ -238,27 +242,27 @@ class PressPort_Admin {
 	 * Verify nonce + capability, or die with JSON error.
 	 */
 	protected static function guard() {
-		if ( ! check_ajax_referer( 'pressport_admin', 'nonce', false ) ) {
-			wp_send_json_error( array( 'message' => __( 'Your session expired. Reload the page.', 'pressport' ) ), 403 );
+		if ( ! check_ajax_referer( 'migrateplus_admin', 'nonce', false ) ) {
+			wp_send_json_error( array( 'message' => __( 'Your session expired. Reload the page.', 'migrateplus' ) ), 403 );
 		}
 		if ( ! current_user_can( self::capability() ) ) {
-			wp_send_json_error( array( 'message' => __( 'You are not allowed to do this.', 'pressport' ) ), 403 );
+			wp_send_json_error( array( 'message' => __( 'You are not allowed to do this.', 'migrateplus' ) ), 403 );
 		}
 	}
 
 	/**
 	 * Load the job from the request or die.
 	 *
-	 * @return PressPort_Job
+	 * @return MigratePlus_Job
 	 */
 	protected static function request_job() {
 		$id  = isset( $_POST['job'] ) ? sanitize_key( wp_unslash( $_POST['job'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification
-		$job = PressPort_Job::load( $id );
+		$job = MigratePlus_Job::load( $id );
 		if ( ! $job ) {
-			wp_send_json_error( array( 'message' => __( 'Import job not found.', 'pressport' ) ), 404 );
+			wp_send_json_error( array( 'message' => __( 'Import job not found.', 'migrateplus' ) ), 404 );
 		}
 		if ( ! self::may_use_job( $job ) ) {
-			wp_send_json_error( array( 'message' => __( 'You are not allowed to do this.', 'pressport' ) ), 403 );
+			wp_send_json_error( array( 'message' => __( 'You are not allowed to do this.', 'migrateplus' ) ), 403 );
 		}
 		return $job;
 	}
@@ -266,23 +270,23 @@ class PressPort_Admin {
 	/**
 	 * Whether the current user may see or change a job: whoever created it, or an administrator.
 	 *
-	 * @param PressPort_Job $job Job.
+	 * @param MigratePlus_Job $job Job.
 	 * @return bool
 	 */
-	protected static function may_use_job( PressPort_Job $job ) {
+	protected static function may_use_job( MigratePlus_Job $job ) {
 		return get_current_user_id() === (int) $job->data['user'] || current_user_can( 'manage_options' );
 	}
 
 	/**
 	 * Take the job's batch lock (reloading the job), or die while an import batch holds it.
 	 *
-	 * @param PressPort_Job $job Job.
+	 * @param MigratePlus_Job $job Job.
 	 * @return string Lock token.
 	 */
-	protected static function lock_job( PressPort_Job $job ) {
-		$lock = PressPort_Runner::lock( $job );
+	protected static function lock_job( MigratePlus_Job $job ) {
+		$lock = MigratePlus_Runner::lock( $job );
 		if ( ! $lock ) {
-			wp_send_json_error( array( 'message' => __( 'An import batch for this job is running. Try again when it finishes.', 'pressport' ) ), 409 );
+			wp_send_json_error( array( 'message' => __( 'An import batch for this job is running. Try again when it finishes.', 'migrateplus' ) ), 409 );
 		}
 		return $lock;
 	}
@@ -304,19 +308,19 @@ class PressPort_Admin {
 	protected static function store_upload( $file, $allowed ) {
 		if ( ! empty( $file['error'] ) ) {
 			/* translators: %d: PHP upload error code */
-			return new WP_Error( 'pressport_upload', sprintf( __( 'Upload failed (error %d). Check the file size limit.', 'pressport' ), (int) $file['error'] ) );
+			return new WP_Error( 'migrateplus_upload', sprintf( __( 'Upload failed (error %d). Check the file size limit.', 'migrateplus' ), (int) $file['error'] ) );
 		}
 		$ext = strtolower( pathinfo( (string) $file['name'], PATHINFO_EXTENSION ) );
 		if ( ! in_array( $ext, $allowed, true ) ) {
 			/* translators: %s: allowed extensions */
-			return new WP_Error( 'pressport_upload_type', sprintf( __( 'Unsupported file type. Allowed: %s', 'pressport' ), implode( ', ', $allowed ) ) );
+			return new WP_Error( 'migrateplus_upload_type', sprintf( __( 'Unsupported file type. Allowed: %s', 'migrateplus' ), implode( ', ', $allowed ) ) );
 		}
 		if ( ! is_uploaded_file( $file['tmp_name'] ) ) {
-			return new WP_Error( 'pressport_upload', __( 'Invalid upload.', 'pressport' ) );
+			return new WP_Error( 'migrateplus_upload', __( 'Invalid upload.', 'migrateplus' ) );
 		}
-		$dest = PressPort_Util::ensure_storage_dir() . 'upload-' . wp_generate_password( 12, false ) . '.' . $ext;
+		$dest = MigratePlus_Util::ensure_storage_dir() . 'upload-' . wp_generate_password( 12, false ) . '.' . $ext;
 		if ( ! move_uploaded_file( $file['tmp_name'], $dest ) ) {
-			return new WP_Error( 'pressport_upload', __( 'Could not save the uploaded file.', 'pressport' ) );
+			return new WP_Error( 'migrateplus_upload', __( 'Could not save the uploaded file.', 'migrateplus' ) );
 		}
 		return $dest;
 	}
@@ -328,9 +332,9 @@ class PressPort_Admin {
 		self::guard();
 		// phpcs:disable WordPress.Security.NonceVerification -- verified in guard().
 		$source_id = isset( $_POST['source'] ) ? sanitize_key( wp_unslash( $_POST['source'] ) ) : '';
-		$all       = PressPort_Sources::all();
+		$all       = MigratePlus_Sources::all();
 		if ( empty( $all[ $source_id ] ) ) {
-			self::fail( new WP_Error( 'pressport_source', __( 'Choose a source.', 'pressport' ) ) );
+			self::fail( new WP_Error( 'migrateplus_source', __( 'Choose a source.', 'migrateplus' ) ) );
 		}
 		$class    = $all[ $source_id ];
 		$raw      = isset( $_POST['settings'] ) && is_array( $_POST['settings'] ) ? wp_unslash( $_POST['settings'] ) : array(); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
@@ -340,7 +344,7 @@ class PressPort_Admin {
 			$key = $field['key'];
 			if ( 'file' === $field['type'] ) {
 				if ( ! empty( $_FILES[ 'file_' . $key ]['name'] ) ) {
-					$exts = PressPort_Source_Base::accepted_extensions( $field );
+					$exts = MigratePlus_Source_Base::accepted_extensions( $field );
 					$path = self::store_upload( $_FILES[ 'file_' . $key ], $exts ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
 					if ( is_wp_error( $path ) ) {
 						self::fail( $path );
@@ -349,11 +353,11 @@ class PressPort_Admin {
 					// The stored copy has a random name; keep the original so re-imports of the same file match.
 					$settings[ $key . '_name' ] = sanitize_file_name( wp_unslash( $_FILES[ 'file_' . $key ]['name'] ) ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
 					$uploads[]                  = $path;
-				} elseif ( PressPort_Source_Base::allows_remote( $field ) && ! empty( $raw[ $key . '_url' ] ) ) {
+				} elseif ( MigratePlus_Source_Base::allows_remote( $field ) && ! empty( $raw[ $key . '_url' ] ) ) {
 					// Downloaded by the source in prepare().
 					$url = esc_url_raw( trim( (string) $raw[ $key . '_url' ] ), array( 'http', 'https' ) );
 					if ( '' === $url ) {
-						self::fail( new WP_Error( 'pressport_remote_url', __( 'Enter a valid http:// or https:// URL.', 'pressport' ) ) );
+						self::fail( new WP_Error( 'migrateplus_remote_url', __( 'Enter a valid http:// or https:// URL.', 'migrateplus' ) ) );
 					}
 					$settings[ $key . '_url' ] = $url;
 				}
@@ -376,7 +380,7 @@ class PressPort_Admin {
 		}
 		// phpcs:enable
 
-		$preview = PressPort_Runner::preview( $source_id, $settings );
+		$preview = MigratePlus_Runner::preview( $source_id, $settings );
 		if ( is_wp_error( $preview ) ) {
 			// No job was created, so nothing else will ever clean up the upload.
 			array_map( 'wp_delete_file', $uploads );
@@ -386,11 +390,80 @@ class PressPort_Admin {
 		// Trim long values for display.
 		wp_send_json_success(
 			array(
-				'job'     => $preview['job']->to_public(),
-				'records' => self::preview_rows( $preview['records'] ),
-				'fields'  => $preview['fields'],
+				'job'          => $preview['job']->to_public(),
+				'records'      => self::preview_rows( $preview['records'] ),
+				'fields'       => $preview['fields'],
+				// A saved mapping made for a file with the same fields, offered (not applied) on the mapping screen.
+				'savedMapping' => self::is_export( $preview['job'] ) ? '' : MigratePlus_Mappings::match( $preview['fields'] ),
 			)
 		);
+	}
+
+	/**
+	 * Whether a job imports a MigratePlus export, which carries its own mapping.
+	 *
+	 * @param MigratePlus_Job $job Job.
+	 * @return bool
+	 */
+	protected static function is_export( MigratePlus_Job $job ) {
+		return isset( $job->data['settings']['migrateplus_mapping'] );
+	}
+
+	/**
+	 * Save the mapping and options on the mapping screen under a name.
+	 */
+	public static function ajax_mapping_save() {
+		self::guard();
+		$job = self::request_job();
+		if ( self::is_export( $job ) ) {
+			self::fail( new WP_Error( 'migrateplus_mapping_export', __( 'MigratePlus exports carry their own mapping, so there is nothing to save.', 'migrateplus' ) ) );
+		}
+		// phpcs:disable WordPress.Security.NonceVerification, WordPress.Security.ValidatedSanitizedInput
+		$name    = isset( $_POST['name'] ) ? wp_unslash( $_POST['name'] ) : '';
+		$mapping = isset( $_POST['mapping'] ) ? json_decode( wp_unslash( $_POST['mapping'] ), true ) : array();
+		$options = isset( $_POST['options'] ) ? json_decode( wp_unslash( $_POST['options'] ), true ) : array();
+		// phpcs:enable
+		$fields = isset( $job->data['settings']['fields'] ) ? (array) $job->data['settings']['fields'] : array();
+		$saved  = MigratePlus_Mappings::save( $name, (array) $mapping, self::clean_options( (array) $options ), $fields );
+		if ( is_wp_error( $saved ) ) {
+			self::fail( $saved );
+		}
+		wp_send_json_success(
+			array(
+				'name'     => $saved['name'],
+				'mappings' => MigratePlus_Mappings::for_js(),
+			)
+		);
+	}
+
+	/**
+	 * Rename a saved mapping.
+	 */
+	public static function ajax_mapping_rename() {
+		self::guard();
+		// phpcs:disable WordPress.Security.NonceVerification, WordPress.Security.ValidatedSanitizedInput -- verified in guard(); cleaned by MigratePlus_Mappings.
+		$old = isset( $_POST['name'] ) ? wp_unslash( $_POST['name'] ) : '';
+		$new = isset( $_POST['new_name'] ) ? wp_unslash( $_POST['new_name'] ) : '';
+		// phpcs:enable
+		$done = MigratePlus_Mappings::rename( $old, $new );
+		if ( is_wp_error( $done ) ) {
+			self::fail( $done );
+		}
+		wp_send_json_success(
+			array(
+				'name'     => MigratePlus_Mappings::clean_name( $new ),
+				'mappings' => MigratePlus_Mappings::for_js(),
+			)
+		);
+	}
+
+	/**
+	 * Delete a saved mapping.
+	 */
+	public static function ajax_mapping_delete() {
+		self::guard();
+		MigratePlus_Mappings::delete( isset( $_POST['name'] ) ? wp_unslash( $_POST['name'] ) : '' ); // phpcs:ignore WordPress.Security.NonceVerification, WordPress.Security.ValidatedSanitizedInput -- verified in guard(); cleaned by MigratePlus_Mappings.
+		wp_send_json_success( array( 'mappings' => MigratePlus_Mappings::for_js() ) );
 	}
 
 	/**
@@ -404,9 +477,11 @@ class PressPort_Admin {
 		$options = isset( $_POST['options'] ) ? json_decode( wp_unslash( $_POST['options'] ), true ) : array();
 		// phpcs:enable
 
-		$clean_map = self::clean_mapping( (array) $mapping );
-		if ( empty( $clean_map['fields']['post_title'] ) && empty( $clean_map['fields']['post_content'] ) ) {
-			self::fail( new WP_Error( 'pressport_mapping', __( 'Map at least the Title or Content field.', 'pressport' ) ) );
+		$clean_map = MigratePlus_Mappings::clean_mapping( (array) $mapping );
+		// An export of menus alone has no records to map.
+		$menus_only = 0 === (int) $job->data['total'] && ! empty( $job->data['settings']['menus_file'] );
+		if ( ! $menus_only && empty( $clean_map['fields']['post_title'] ) && empty( $clean_map['fields']['post_content'] ) ) {
+			self::fail( new WP_Error( 'migrateplus_mapping', __( 'Map at least the Title or Content field.', 'migrateplus' ) ) );
 		}
 		$clean_opt = self::clean_options( (array) $options );
 		$lock      = self::lock_job( $job );
@@ -416,9 +491,10 @@ class PressPort_Admin {
 		$job->data['status']  = 'ready';
 		$job->data['cursor']  = null;
 		$job->data['stats']   = array_fill_keys( array( 'processed', 'created', 'updated', 'skipped', 'failed' ), 0 );
-		$job->log( 'info', $clean_opt['dry_run'] ? __( 'Dry run started, nothing will be saved.', 'pressport' ) : __( 'Import started.', 'pressport' ) );
+		$job->reset_sections();
+		$job->log( 'info', $clean_opt['dry_run'] ? __( 'Dry run started, nothing will be saved.', 'migrateplus' ) : __( 'Import started.', 'migrateplus' ) );
 		$job->save();
-		PressPort_Runner::unlock( $job, $lock );
+		MigratePlus_Runner::unlock( $job, $lock );
 
 		wp_send_json_success( array( 'job' => $job->to_public() ) );
 	}
@@ -432,13 +508,13 @@ class PressPort_Admin {
 		$job = self::request_job();
 		// phpcs:disable WordPress.Security.NonceVerification, WordPress.Security.ValidatedSanitizedInput
 		if ( isset( $_POST['mapping'] ) ) {
-			$job->data['mapping'] = self::clean_mapping( (array) json_decode( wp_unslash( $_POST['mapping'] ), true ) );
+			$job->data['mapping'] = MigratePlus_Mappings::clean_mapping( (array) json_decode( wp_unslash( $_POST['mapping'] ), true ) );
 		}
 		if ( isset( $_POST['options'] ) ) {
 			$job->data['options'] = self::clean_options( (array) json_decode( wp_unslash( $_POST['options'] ), true ) );
 		}
 		// phpcs:enable
-		$found = PressPort_Runner::find_duplicates( $job );
+		$found = MigratePlus_Runner::find_duplicates( $job );
 		if ( is_wp_error( $found ) ) {
 			self::fail( $found );
 		}
@@ -447,10 +523,10 @@ class PressPort_Admin {
 		foreach ( $found['images'] as $i => $image ) {
 			$found['images'][ $i ]['imported_preview'] = '' !== $image['imported'] ? add_query_arg(
 				array(
-					'action' => 'pressport_media_preview',
+					'action' => 'migrateplus_media_preview',
 					'url'    => rawurlencode( $image['imported'] ),
 					'sig'    => self::preview_signature( $image['imported'] ),
-					'nonce'  => wp_create_nonce( 'pressport_admin' ),
+					'nonce'  => wp_create_nonce( 'migrateplus_admin' ),
 				),
 				admin_url( 'admin-ajax.php' )
 			) : '';
@@ -473,16 +549,16 @@ class PressPort_Admin {
 			status_header( 403 );
 			exit;
 		}
-		PressPort_Util::$in_request = true;
-		$response                   = wp_safe_remote_get(
+		MigratePlus_Util::$in_request = true;
+		$response                     = wp_safe_remote_get(
 			$url,
 			array(
 				'timeout'             => 20,
 				'limit_response_size' => 15 * MB_IN_BYTES,
 			)
 		);
-		PressPort_Util::$in_request = false;
-		$type                       = is_wp_error( $response ) ? '' : strtolower( trim( explode( ';', (string) wp_remote_retrieve_header( $response, 'content-type' ) )[0] ) );
+		MigratePlus_Util::$in_request = false;
+		$type                         = is_wp_error( $response ) ? '' : strtolower( trim( explode( ';', (string) wp_remote_retrieve_header( $response, 'content-type' ) )[0] ) );
 		if ( is_wp_error( $response ) || 200 !== (int) wp_remote_retrieve_response_code( $response ) || ! in_array( $type, array( 'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif' ), true ) ) {
 			status_header( 404 );
 			exit;
@@ -499,60 +575,7 @@ class PressPort_Admin {
 	 * @return string
 	 */
 	protected static function preview_signature( $url ) {
-		return hash_hmac( 'sha256', 'pressport_preview|' . $url, wp_salt( 'auth' ) );
-	}
-
-	/**
-	 * @param array $mapping Mapping from the request.
-	 * @return array
-	 */
-	protected static function clean_mapping( array $mapping ) {
-		$clean_map = array(
-			'fields'     => array(),
-			'meta'       => array(),
-			'taxonomies' => array(),
-			'acf'        => array(),
-		);
-		$targets   = PressPort_Importer::targets();
-		foreach ( isset( $mapping['fields'] ) ? (array) $mapping['fields'] : array() as $target => $source ) {
-			if ( isset( $targets[ $target ] ) && '' !== (string) $source ) {
-				$clean_map['fields'][ $target ] = self::clean_field_name( $source );
-			}
-		}
-		foreach ( isset( $mapping['meta'] ) ? (array) $mapping['meta'] : array() as $row ) {
-			if ( ! empty( $row['key'] ) && ! empty( $row['source'] ) ) {
-				$clean_map['meta'][] = array(
-					'key'    => sanitize_text_field( $row['key'] ),
-					'source' => self::clean_field_name( $row['source'] ),
-				);
-			}
-		}
-		foreach ( isset( $mapping['taxonomies'] ) ? (array) $mapping['taxonomies'] : array() as $row ) {
-			if ( ! empty( $row['taxonomy'] ) && ! empty( $row['source'] ) ) {
-				$clean_map['taxonomies'][] = array(
-					'taxonomy' => sanitize_key( $row['taxonomy'] ),
-					'source'   => self::clean_field_name( $row['source'] ),
-				);
-			}
-		}
-		foreach ( isset( $mapping['acf'] ) && is_array( $mapping['acf'] ) ? $mapping['acf'] : array() as $field => $source ) {
-			$field = sanitize_text_field( (string) $field );
-			if ( '' !== $field && '' !== (string) $source ) {
-				$clean_map['acf'][ $field ] = self::clean_field_name( $source );
-			}
-		}
-		return $clean_map;
-	}
-
-	/**
-	 * A source field name, kept exactly as the source spells it (spaces, %xx, < > included)
-	 * so it still matches: only invalid UTF-8 and control characters are removed.
-	 *
-	 * @param mixed $name Field name from the request.
-	 * @return string
-	 */
-	protected static function clean_field_name( $name ) {
-		return (string) preg_replace( '/[\x00-\x1F\x7F]/', '', wp_check_invalid_utf8( (string) $name, true ) );
+		return hash_hmac( 'sha256', 'migrateplus_preview|' . $url, wp_salt( 'auth' ) );
 	}
 
 	/**
@@ -560,32 +583,11 @@ class PressPort_Admin {
 	 * @return array
 	 */
 	protected static function clean_options( array $options ) {
-		$defaults  = PressPort_Job::default_options();
-		$post_type = isset( $options['post_type'] ) ? sanitize_key( $options['post_type'] ) : 'post';
-		$status    = isset( $options['default_status'] ) ? sanitize_key( $options['default_status'] ) : 'publish';
-		$duplicate = isset( $options['duplicate'] ) ? sanitize_key( $options['duplicate'] ) : 'skip';
-		$author    = isset( $options['default_author'] ) ? absint( $options['default_author'] ) : get_current_user_id();
-		$post_type = post_type_exists( $post_type ) ? $post_type : 'post';
-		if ( ! current_user_can( get_post_type_object( $post_type )->cap->edit_posts ) ) {
-			self::fail( new WP_Error( 'pressport_import_cap', __( 'You are not allowed to import this post type.', 'pressport' ) ) );
+		$clean = MigratePlus_Mappings::clean_options( $options );
+		if ( ! current_user_can( get_post_type_object( $clean['post_type'] )->cap->edit_posts ) ) {
+			self::fail( new WP_Error( 'migrateplus_import_cap', __( 'You are not allowed to import this post type.', 'migrateplus' ) ) );
 		}
-		return array(
-			'post_type'             => $post_type,
-			'default_status'        => in_array( $status, array( 'publish', 'draft', 'pending', 'private' ), true ) ? $status : 'draft',
-			'default_author'        => get_userdata( $author ) ? $author : get_current_user_id(),
-			'duplicate'             => in_array( $duplicate, array( 'skip', 'update', 'create' ), true ) ? $duplicate : 'skip',
-			'skip_existing'         => empty( $options['skip_existing'] ) ? 0 : 1,
-			'update_ids'            => array_values( array_filter( array_map( 'absint', isset( $options['update_ids'] ) ? (array) $options['update_ids'] : array() ) ) ),
-			'replace_ids'           => array_values( array_filter( array_map( 'absint', isset( $options['replace_ids'] ) ? (array) $options['replace_ids'] : array() ) ) ),
-			'copy_ids'              => array_values( array_filter( array_map( 'absint', isset( $options['copy_ids'] ) ? (array) $options['copy_ids'] : array() ) ) ),
-			'batch_size'            => max( 1, min( 100, isset( $options['batch_size'] ) ? (int) $options['batch_size'] : $defaults['batch_size'] ) ),
-			'import_featured_image' => empty( $options['import_featured_image'] ) ? 0 : 1,
-			'import_content_images' => empty( $options['import_content_images'] ) ? 0 : 1,
-			'create_terms'          => empty( $options['create_terms'] ) ? 0 : 1,
-			'create_authors'        => empty( $options['create_authors'] ) ? 0 : 1,
-			'rewrite_links'         => empty( $options['rewrite_links'] ) ? 0 : 1,
-			'dry_run'               => empty( $options['dry_run'] ) ? 0 : 1,
-		);
+		return $clean;
 	}
 
 	/**
@@ -594,7 +596,7 @@ class PressPort_Admin {
 	public static function ajax_run() {
 		self::guard();
 		$job    = self::request_job();
-		$result = PressPort_Runner::run_batch( $job );
+		$result = MigratePlus_Runner::run_batch( $job );
 		if ( is_wp_error( $result ) ) {
 			self::fail( $result );
 		}
@@ -615,12 +617,12 @@ class PressPort_Admin {
 		$job    = self::request_job();
 		$lock   = self::lock_job( $job );
 		$source = $job->source();
-		if ( ! is_wp_error( $source ) && $source instanceof PressPort_Source_Base && $source->has_remote_input() ) {
+		if ( ! is_wp_error( $source ) && $source instanceof MigratePlus_Source_Base && $source->has_remote_input() ) {
 			// Re-download the remote file / feed so re-runs pick up new items.
 			$prepared = $source->prepare();
 			if ( is_wp_error( $prepared ) ) {
 				/* translators: %s: error message */
-				$job->log( 'warning', sprintf( __( 'Could not refresh the source, re-using the previous copy: %s', 'pressport' ), $prepared->get_error_message() ) );
+				$job->log( 'warning', sprintf( __( 'Could not refresh the source, re-using the previous copy: %s', 'migrateplus' ), $prepared->get_error_message() ) );
 			} else {
 				$old = isset( $job->data['settings']['cache_file'] ) ? $job->data['settings']['cache_file'] : '';
 				if ( $old && ( empty( $prepared['cache_file'] ) || $old !== $prepared['cache_file'] ) && file_exists( $old ) ) {
@@ -628,19 +630,20 @@ class PressPort_Admin {
 				}
 				$job->data['settings'] = $prepared;
 				$job->data['total']    = isset( $prepared['total'] ) ? $prepared['total'] : null;
-				$job->log( 'info', __( 'Source refreshed from its URL.', 'pressport' ) );
+				$job->log( 'info', __( 'Source refreshed from its URL.', 'migrateplus' ) );
 			}
 		}
 		$job->data['status'] = 'ready';
 		$job->data['cursor'] = null;
 		$job->data['stats']  = array_fill_keys( array( 'processed', 'created', 'updated', 'skipped', 'failed' ), 0 );
+		$job->reset_sections();
 		// Changes approved last time may not be what the source holds now: the re-run follows the duplicate option.
 		$job->data['options']['update_ids']  = array();
 		$job->data['options']['replace_ids'] = array();
 		$job->data['options']['copy_ids']    = array();
-		$job->log( 'info', __( 'Job restarted.', 'pressport' ) );
+		$job->log( 'info', __( 'Job restarted.', 'migrateplus' ) );
 		$job->save();
-		PressPort_Runner::unlock( $job, $lock );
+		MigratePlus_Runner::unlock( $job, $lock );
 		wp_send_json_success( array( 'job' => $job->to_public() ) );
 	}
 
@@ -650,7 +653,7 @@ class PressPort_Admin {
 	public static function ajax_rollback() {
 		self::guard();
 		$job    = self::request_job();
-		$result = PressPort_Runner::rollback_batch( $job );
+		$result = MigratePlus_Runner::rollback_batch( $job );
 		wp_send_json_success( array_merge( $result, array( 'job' => $job->to_public() ) ) );
 	}
 
@@ -662,8 +665,94 @@ class PressPort_Admin {
 		$job  = self::request_job();
 		$lock = self::lock_job( $job );
 		$job->delete();
-		PressPort_Runner::unlock( $job, $lock );
+		MigratePlus_Runner::unlock( $job, $lock );
 		wp_send_json_success();
+	}
+
+	/**
+	 * Delete several History entries (imports and exports) in one request.
+	 */
+	public static function ajax_history_delete() {
+		self::guard();
+		$items = isset( $_POST['items'] ) ? json_decode( wp_unslash( $_POST['items'] ), true ) : array(); // phpcs:ignore WordPress.Security.NonceVerification, WordPress.Security.ValidatedSanitizedInput -- verified in guard(); each id is sanitized in delete_entries().
+		wp_send_json_success( self::delete_entries( is_array( $items ) ? $items : array() ) );
+	}
+
+	/**
+	 * Delete History entries the way the single deletes do, refusing any that are still running.
+	 * A job is also refused while a batch or a rollback batch holds its lock.
+	 *
+	 * @param array[] $items Entries, each { kind: job|export, id }.
+	 * @return array { deleted: array[] { kind, id }, skipped: array[] { kind, id, reason } }
+	 */
+	protected static function delete_entries( array $items ) {
+		$out  = array(
+			'deleted' => array(),
+			'skipped' => array(),
+		);
+		$skip = static function ( $kind, $id, $reason ) use ( &$out ) {
+			$out['skipped'][] = array(
+				'kind'   => $kind,
+				'id'     => $id,
+				'reason' => $reason,
+			);
+		};
+		foreach ( $items as $item ) {
+			$kind = is_array( $item ) && isset( $item['kind'] ) ? sanitize_key( $item['kind'] ) : '';
+			$id   = is_array( $item ) && isset( $item['id'] ) ? sanitize_key( $item['id'] ) : '';
+			if ( '' === $id || ! in_array( $kind, array( 'job', 'export' ), true ) ) {
+				continue;
+			}
+			if ( 'job' === $kind ) {
+				$job = MigratePlus_Job::load( $id );
+				if ( ! $job ) {
+					$skip( $kind, $id, __( 'no longer in history', 'migrateplus' ) );
+					continue;
+				}
+				if ( ! self::may_use_job( $job ) ) {
+					$skip( $kind, $id, __( 'not allowed', 'migrateplus' ) );
+					continue;
+				}
+				if ( 'running' === $job->data['status'] ) {
+					$skip( $kind, $id, __( 'still running', 'migrateplus' ) );
+					continue;
+				}
+				$lock = MigratePlus_Runner::lock( $job );
+				if ( ! $lock ) {
+					$skip( $kind, $id, __( 'an import or rollback batch is running', 'migrateplus' ) );
+					continue;
+				}
+				// lock() reloaded the job: it may have started running while this request waited.
+				if ( 'running' === $job->data['status'] ) {
+					MigratePlus_Runner::unlock( $job, $lock );
+					$skip( $kind, $id, __( 'still running', 'migrateplus' ) );
+					continue;
+				}
+				$job->delete();
+				MigratePlus_Runner::unlock( $job, $lock );
+			} else {
+				$entry = MigratePlus_Exporter::history_entry( $id );
+				if ( ! $entry ) {
+					$skip( $kind, $id, __( 'no longer in history', 'migrateplus' ) );
+					continue;
+				}
+				if ( ! self::may_use_export( $id ) ) {
+					$skip( $kind, $id, __( 'not allowed', 'migrateplus' ) );
+					continue;
+				}
+				// As in history(): a running export whose state has expired was abandoned, and may go.
+				if ( 'running' === $entry['status'] && MigratePlus_Exporter::load_state( $id ) ) {
+					$skip( $kind, $id, __( 'still running', 'migrateplus' ) );
+					continue;
+				}
+				MigratePlus_Exporter::forget( $id );
+			}
+			$out['deleted'][] = array(
+				'kind' => $kind,
+				'id'   => $id,
+			);
+		}
+		return $out;
 	}
 
 	/**
@@ -672,7 +761,7 @@ class PressPort_Admin {
 	public static function ajax_jobs() {
 		self::guard();
 		$jobs = array();
-		foreach ( PressPort_Job::all() as $job ) {
+		foreach ( MigratePlus_Job::all() as $job ) {
 			if ( ! self::may_use_job( $job ) ) {
 				continue;
 			}
@@ -696,7 +785,7 @@ class PressPort_Admin {
 		$data['fields'] = isset( $job->data['settings']['fields'] ) ? array_map( 'strval', array_values( (array) $job->data['settings']['fields'] ) ) : array();
 		// A few records for the mapping preview; sample values are not kept with the job.
 		$data['records'] = array();
-		$source          = PressPort_Sources::create( $job->data['source'], (array) $job->data['settings'] );
+		$source          = MigratePlus_Sources::create( $job->data['source'], (array) $job->data['settings'] );
 		$batch           = is_wp_error( $source ) ? $source : $source->fetch( null, 5 );
 		if ( ! is_wp_error( $batch ) && ! empty( $batch['records'] ) ) {
 			$data['records'] = self::preview_rows( $batch['records'] );
@@ -715,7 +804,7 @@ class PressPort_Admin {
 		foreach ( $records as $record ) {
 			$row = array();
 			foreach ( $record as $k => $v ) {
-				$s         = PressPort_Util::stringify( $v );
+				$s         = MigratePlus_Util::stringify( $v );
 				$row[ $k ] = function_exists( 'mb_substr' ) ? mb_substr( $s, 0, 400 ) : substr( $s, 0, 400 );
 			}
 			$rows[] = $row;
@@ -728,7 +817,7 @@ class PressPort_Admin {
 	 * @return string
 	 */
 	protected static function source_label( $id ) {
-		$all = PressPort_Sources::all();
+		$all = MigratePlus_Sources::all();
 		return isset( $all[ $id ] ) && class_exists( $all[ $id ] ) ? call_user_func( array( $all[ $id ], 'label' ) ) : $id;
 	}
 
@@ -743,9 +832,19 @@ class PressPort_Admin {
 		// phpcs:disable WordPress.Security.NonceVerification -- verified in guard().
 		$raw = isset( $_POST['args'] ) ? json_decode( wp_unslash( $_POST['args'] ), true ) : array(); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
 		// phpcs:enable
-		$args = PressPort_Exporter::sanitize_args( is_array( $raw ) ? $raw : array() );
-		if ( ! is_wp_error( $args ) && ! current_user_can( get_post_type_object( $args['post_type'] )->cap->edit_posts ) ) {
-			return new WP_Error( 'pressport_export_cap', __( 'You are not allowed to export this post type.', 'pressport' ) );
+		$args = MigratePlus_Exporter::sanitize_args( is_array( $raw ) ? $raw : array() );
+		if ( is_wp_error( $args ) ) {
+			return $args;
+		}
+		foreach ( $args['post_types'] as $type ) {
+			if ( ! current_user_can( get_post_type_object( $type )->cap->edit_posts ) ) {
+				/* translators: %s: post type label */
+				return new WP_Error( 'migrateplus_export_cap', sprintf( __( 'You are not allowed to export %s.', 'migrateplus' ), MigratePlus_Exporter::type_label( $type ) ) );
+			}
+		}
+		// The menus toggle is hidden from users who may not edit menus, but the default still sends it: leave menus out.
+		if ( ! current_user_can( 'edit_theme_options' ) ) {
+			$args['include_menus'] = 0;
 		}
 		return $args;
 	}
@@ -759,7 +858,14 @@ class PressPort_Admin {
 		if ( is_wp_error( $args ) ) {
 			self::fail( $args );
 		}
-		wp_send_json_success( array( 'count' => PressPort_Exporter::count( $args ) ) );
+		$counts = MigratePlus_Exporter::counts( $args );
+		wp_send_json_success(
+			array(
+				'count'  => array_sum( $counts ),
+				'counts' => $counts,
+				'menus'  => $args['include_menus'] ? count( wp_get_nav_menus() ) : 0,
+			)
+		);
 	}
 
 	/**
@@ -771,13 +877,14 @@ class PressPort_Admin {
 		if ( is_wp_error( $args ) ) {
 			self::fail( $args );
 		}
-		$state = PressPort_Exporter::start( $args );
+		$state = MigratePlus_Exporter::start( $args );
 		if ( is_wp_error( $state ) ) {
 			self::fail( $state );
 		}
-		if ( 0 === (int) $state['total'] ) {
-			PressPort_Exporter::forget( $state['id'] );
-			self::fail( new WP_Error( 'pressport_export_empty', __( 'Nothing matches these filters. Widen the status or date range.', 'pressport' ) ) );
+		// With menus included, a file of menus alone is still worth having.
+		if ( 0 === (int) $state['total'] && ! ( $args['include_menus'] && wp_get_nav_menus() ) ) {
+			MigratePlus_Exporter::forget( $state['id'] );
+			self::fail( new WP_Error( 'migrateplus_export_empty', __( 'Nothing matches these filters. Widen the status or date range.', 'migrateplus' ) ) );
 		}
 		wp_send_json_success( self::export_public( $state ) );
 	}
@@ -788,7 +895,7 @@ class PressPort_Admin {
 	public static function ajax_export_run() {
 		self::guard();
 		$state = self::request_export();
-		PressPort_Exporter::run_batch( $state, 50 );
+		MigratePlus_Exporter::run_batch( $state, 50 );
 		wp_send_json_success( self::export_public( $state ) );
 	}
 
@@ -799,11 +906,13 @@ class PressPort_Admin {
 		self::guard();
 		$state = self::request_export();
 		if ( empty( $state['complete'] ) || ! is_readable( $state['file'] ) ) {
-			wp_die( esc_html__( 'This export is not ready or has expired. Run it again.', 'pressport' ), '', array( 'response' => 404 ) );
+			wp_die( esc_html__( 'This export is not ready or has expired. Run it again.', 'migrateplus' ), '', array( 'response' => 404 ) );
 		}
 		nocache_headers();
-		header( 'Content-Type: application/json; charset=utf-8' );
-		header( 'Content-Disposition: attachment; filename="' . sanitize_file_name( $state['filename'] ) . '"' );
+		$gzip = '.gz' === substr( $state['filename'], -3 );
+		header( $gzip ? 'Content-Type: application/gzip' : 'Content-Type: application/json; charset=utf-8' );
+		// Sanitized without the ".gz", which sanitize_file_name() would turn ".json" in front of into ".json_".
+		header( 'Content-Disposition: attachment; filename="' . sanitize_file_name( $gzip ? substr( $state['filename'], 0, -3 ) : $state['filename'] ) . ( $gzip ? '.gz' : '' ) . '"' );
 		header( 'Content-Length: ' . filesize( $state['file'] ) );
 		readfile( $state['file'] ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 		exit;
@@ -814,7 +923,7 @@ class PressPort_Admin {
 	 */
 	public static function ajax_exports() {
 		self::guard();
-		$exports = PressPort_Exporter::history();
+		$exports = MigratePlus_Exporter::history();
 		foreach ( $exports as $i => $entry ) {
 			$exports[ $i ]['size'] = $entry['size'] ? size_format( $entry['size'] ) : '';
 			$exports[ $i ]['url']  = $entry['available'] && self::may_use_export( $entry['id'] ) ? self::export_download_url( $entry['id'] ) : '';
@@ -828,9 +937,9 @@ class PressPort_Admin {
 	public static function ajax_export_log() {
 		self::guard();
 		$id    = isset( $_POST['export'] ) ? sanitize_key( wp_unslash( $_POST['export'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification -- verified in guard().
-		$entry = self::may_use_export( $id ) ? PressPort_Exporter::history_entry( $id ) : null;
+		$entry = self::may_use_export( $id ) ? MigratePlus_Exporter::history_entry( $id ) : null;
 		if ( ! $entry ) {
-			wp_send_json_error( array( 'message' => __( 'This export is no longer in history.', 'pressport' ) ), 404 );
+			wp_send_json_error( array( 'message' => __( 'This export is no longer in history.', 'migrateplus' ) ), 404 );
 		}
 		wp_send_json_success( array( 'log' => $entry['log'] ) );
 	}
@@ -842,9 +951,9 @@ class PressPort_Admin {
 		self::guard();
 		$id = isset( $_POST['export'] ) ? sanitize_key( wp_unslash( $_POST['export'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification -- verified in guard().
 		if ( ! self::may_use_export( $id ) ) {
-			wp_send_json_error( array( 'message' => __( 'You are not allowed to do this.', 'pressport' ) ), 403 );
+			wp_send_json_error( array( 'message' => __( 'You are not allowed to do this.', 'migrateplus' ) ), 403 );
 		}
-		PressPort_Exporter::forget( $id );
+		MigratePlus_Exporter::forget( $id );
 		wp_send_json_success();
 	}
 
@@ -860,7 +969,7 @@ class PressPort_Admin {
 		if ( current_user_can( 'manage_options' ) ) {
 			return true;
 		}
-		$state = $id ? PressPort_Exporter::load_state( $id ) : null;
+		$state = $id ? MigratePlus_Exporter::load_state( $id ) : null;
 		return $state && get_current_user_id() === (int) $state['user'];
 	}
 
@@ -871,9 +980,9 @@ class PressPort_Admin {
 	protected static function export_download_url( $id ) {
 		return add_query_arg(
 			array(
-				'action' => 'pressport_export_download',
+				'action' => 'migrateplus_export_download',
 				'export' => $id,
-				'nonce'  => wp_create_nonce( 'pressport_admin' ),
+				'nonce'  => wp_create_nonce( 'migrateplus_admin' ),
 			),
 			admin_url( 'admin-ajax.php' )
 		);
@@ -889,7 +998,7 @@ class PressPort_Admin {
 		// phpcs:disable WordPress.Security.NonceVerification -- verified in guard().
 		$raw = isset( $_POST['args'] ) ? json_decode( wp_unslash( $_POST['args'] ), true ) : array(); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- search text is used as is.
 		// phpcs:enable
-		$state = PressPort_Replace::start( is_array( $raw ) ? $raw : array() );
+		$state = MigratePlus_Replace::start( is_array( $raw ) ? $raw : array() );
 		if ( is_wp_error( $state ) ) {
 			self::fail( $state );
 		}
@@ -901,14 +1010,14 @@ class PressPort_Admin {
 	 */
 	public static function ajax_replace_run() {
 		self::guard_admin();
-		$state = PressPort_Replace::load_state( isset( $_POST['run'] ) ? sanitize_key( wp_unslash( $_POST['run'] ) ) : '' ); // phpcs:ignore WordPress.Security.NonceVerification -- verified in guard().
+		$state = MigratePlus_Replace::load_state( isset( $_POST['run'] ) ? sanitize_key( wp_unslash( $_POST['run'] ) ) : '' ); // phpcs:ignore WordPress.Security.NonceVerification -- verified in guard().
 		if ( ! $state ) {
-			wp_send_json_error( array( 'message' => __( 'This run has expired. Start it again.', 'pressport' ) ), 404 );
+			wp_send_json_error( array( 'message' => __( 'This run has expired. Start it again.', 'migrateplus' ) ), 404 );
 		}
-		PressPort_Replace::run_batch( $state );
+		MigratePlus_Replace::run_batch( $state );
 		$out = self::replace_public( $state );
 		if ( $state['complete'] ) {
-			PressPort_Replace::delete( $state['id'] );
+			MigratePlus_Replace::delete( $state['id'] );
 		}
 		wp_send_json_success( $out );
 	}
@@ -918,7 +1027,7 @@ class PressPort_Admin {
 	 */
 	public static function ajax_replace_history() {
 		self::guard_admin();
-		wp_send_json_success( array( 'runs' => PressPort_Replace::history() ) );
+		wp_send_json_success( array( 'runs' => MigratePlus_Replace::history() ) );
 	}
 
 	/**
@@ -926,7 +1035,7 @@ class PressPort_Admin {
 	 */
 	public static function ajax_replace_rollback() {
 		self::guard_admin();
-		$entry = PressPort_Replace::rollback_batch( isset( $_POST['run'] ) ? sanitize_key( wp_unslash( $_POST['run'] ) ) : '' ); // phpcs:ignore WordPress.Security.NonceVerification -- verified in guard().
+		$entry = MigratePlus_Replace::rollback_batch( isset( $_POST['run'] ) ? sanitize_key( wp_unslash( $_POST['run'] ) ) : '' ); // phpcs:ignore WordPress.Security.NonceVerification -- verified in guard().
 		if ( is_wp_error( $entry ) ) {
 			self::fail( $entry );
 		}
@@ -938,14 +1047,14 @@ class PressPort_Admin {
 	 */
 	public static function ajax_replace_forget() {
 		self::guard_admin();
-		PressPort_Replace::forget( isset( $_POST['run'] ) ? sanitize_key( wp_unslash( $_POST['run'] ) ) : '' ); // phpcs:ignore WordPress.Security.NonceVerification -- verified in guard().
+		MigratePlus_Replace::forget( isset( $_POST['run'] ) ? sanitize_key( wp_unslash( $_POST['run'] ) ) : '' ); // phpcs:ignore WordPress.Security.NonceVerification -- verified in guard().
 		wp_send_json_success();
 	}
 
 	protected static function guard_admin() {
 		self::guard();
 		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_send_json_error( array( 'message' => __( 'Only administrators can use Find & Replace.', 'pressport' ) ), 403 );
+			wp_send_json_error( array( 'message' => __( 'Only administrators can use Find & Replace.', 'migrateplus' ) ), 403 );
 		}
 	}
 
@@ -984,9 +1093,9 @@ class PressPort_Admin {
 	 */
 	protected static function request_export() {
 		$id    = isset( $_REQUEST['export'] ) ? sanitize_key( wp_unslash( $_REQUEST['export'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification
-		$state = $id ? PressPort_Exporter::load_state( $id ) : null;
+		$state = $id ? MigratePlus_Exporter::load_state( $id ) : null;
 		if ( ! $state || ( get_current_user_id() !== (int) $state['user'] && ! current_user_can( 'manage_options' ) ) ) {
-			wp_send_json_error( array( 'message' => __( 'Export not found. It may have expired; run it again.', 'pressport' ) ), 404 );
+			wp_send_json_error( array( 'message' => __( 'Export not found. It may have expired; run it again.', 'migrateplus' ) ), 404 );
 		}
 		return $state;
 	}
@@ -1005,6 +1114,10 @@ class PressPort_Admin {
 			'meta'     => count( $state['meta_keys'] ),
 			'taxes'    => $state['taxes'],
 		);
+		// The post type being exported, when the file holds more than one.
+		$types          = $state['args']['post_types'];
+		$out['section'] = count( $types ) > 1 && ! $out['complete'] ? MigratePlus_Exporter::type_label( $types[ min( (int) $state['type_pos'], count( $types ) - 1 ) ] ) : '';
+		$out['menus']   = (int) $state['menus'];
 		if ( ! empty( $state['error'] ) ) {
 			$out['error'] = $state['error'];
 		} elseif ( $out['complete'] ) {

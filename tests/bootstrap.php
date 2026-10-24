@@ -1,8 +1,8 @@
 <?php
 /**
- * PHPUnit bootstrap: the WordPress test suite from Composer, with PressPort loaded.
+ * PHPUnit bootstrap: the WordPress test suite from Composer, with MigratePlus loaded.
  *
- * @package PressPort
+ * @package MigratePlus
  */
 
 $root = dirname( __DIR__ );
@@ -16,7 +16,7 @@ require_once $tests_dir . '/includes/functions.php';
 tests_add_filter(
 	'muplugins_loaded',
 	static function () use ( $root ) {
-		require $root . '/pressport.php';
+		require $root . '/migrateplus.php';
 	}
 );
 

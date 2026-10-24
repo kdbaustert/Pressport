@@ -1,9 +1,9 @@
-/* PressPort admin screen. Plain JS, no build step. */
+/* MigratePlus admin screen. Plain JS, no build step. */
 ( function () {
 	'use strict';
 
-	const D = window.PRESSPORT_DATA;
-	const root = document.getElementById( 'pressport-app' );
+	const D = window.MIGRATEPLUS_DATA;
+	const root = document.getElementById( 'migrateplus-app' );
 	if ( ! D || ! root ) {
 		return;
 	}
@@ -29,7 +29,11 @@
 		logQuery: '',
 		historyQuery: '',
 		historyJobs: null,
-		direct: false, // A PressPort export imported straight from the upload screen, without the mapping step.
+		direct: false, // A MigratePlus export imported straight from the upload screen, without the mapping step.
+		savedMappings: D.mappings || [], // Saved mappings for JSON that is not a MigratePlus export.
+		savedPick: '', // The saved mapping chosen in the select, or offered because the file has its fields.
+		savedName: '',
+		savedNotice: null, // { type, text } shown on the saved mappings panel.
 	};
 
 	// Helpers
@@ -68,7 +72,7 @@
 		if ( ! ( data instanceof FormData ) ) {
 			Object.entries( data || {} ).forEach( ( [ k, v ] ) => body.append( k, typeof v === 'object' ? JSON.stringify( v ) : v ) );
 		}
-		body.append( 'action', 'pressport_' + action );
+		body.append( 'action', 'migrateplus_' + action );
 		body.append( 'nonce', D.nonce );
 		return body;
 	}
@@ -78,7 +82,7 @@
 		try {
 			json = JSON.parse( text );
 		} catch ( e ) {}
-		// admin-ajax answers a bare "0" when the request never reached PressPort, e.g. a post larger than post_max_size.
+		// admin-ajax answers a bare "0" when the request never reached MigratePlus, e.g. a post larger than post_max_size.
 		if ( ! json || 'object' !== typeof json ) {
 			throw new Error( 'Unexpected server response (HTTP ' + status + '). ' + String( text ).replace( /<[^>]+>/g, ' ' ).trim().slice( 0, 300 ) );
 		}
@@ -153,7 +157,7 @@
 	// Progress modal
 
 	/**
-	 * A single reusable modal with a progress bar. Lives outside #pressport-app so
+	 * A single reusable modal with a progress bar. Lives outside #migrateplus-app so
 	 * re-renders of the page never tear it down.
 	 *
 	 * modal.open( { title, message, percent, detail, stats, actions, tone, icon, dismissible } )
@@ -169,31 +173,31 @@
 		let opts = {};
 		let lastFocus = null;
 
-		const ICONS = { success: 'dashicons-yes', error: 'dashicons-warning', paused: 'dashicons-controls-pause', file: 'dashicons-database-import', working: '' };
+		const ICONS = { success: 'dashicons-yes', error: 'dashicons-warning', paused: 'dashicons-controls-pause', file: 'dashicons-database-import', danger: 'dashicons-trash', question: 'dashicons-editor-help', working: '' };
 
 		function build() {
-			parts.icon = el( 'span', { class: 'pressport-modal-icon', 'aria-hidden': 'true' }, el( 'span', { class: 'dashicons' } ) );
-			parts.title = el( 'h2', { class: 'pressport-modal-title', id: 'pressport-modal-title' } );
-			parts.message = el( 'p', { class: 'pressport-modal-message', id: 'pressport-modal-message' } );
-			parts.close = el( 'button', { type: 'button', class: 'pressport-modal-close', 'aria-label': 'Close', title: 'Close', onclick: dismiss }, el( 'span', { class: 'dashicons dashicons-no-alt', 'aria-hidden': 'true' } ) );
-			parts.head = el( 'header', { class: 'pressport-modal-head' }, [
+			parts.icon = el( 'span', { class: 'migrateplus-modal-icon', 'aria-hidden': 'true' }, el( 'span', { class: 'dashicons' } ) );
+			parts.title = el( 'h2', { class: 'migrateplus-modal-title', id: 'migrateplus-modal-title' } );
+			parts.message = el( 'p', { class: 'migrateplus-modal-message', id: 'migrateplus-modal-message' } );
+			parts.close = el( 'button', { type: 'button', class: 'migrateplus-modal-close', 'aria-label': 'Close', title: 'Close', onclick: dismiss }, el( 'span', { class: 'dashicons dashicons-no-alt', 'aria-hidden': 'true' } ) );
+			parts.head = el( 'header', { class: 'migrateplus-modal-head' }, [
 				parts.icon,
-				el( 'div', { class: 'pressport-modal-heading' }, [ parts.title, parts.message ] ),
+				el( 'div', { class: 'migrateplus-modal-heading' }, [ parts.title, parts.message ] ),
 				parts.close,
 			] );
-			parts.fill = el( 'span', { class: 'pressport-modal-fill' } );
+			parts.fill = el( 'span', { class: 'migrateplus-modal-fill' } );
 			parts.obar = outcomeBar( {}, 0, {} );
-			parts.bar = el( 'div', { class: 'pressport-progress pressport-modal-bar', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-labelledby': 'pressport-modal-title' }, parts.fill );
-			parts.percent = el( 'span', { class: 'pressport-modal-percent' } );
-			parts.detail = el( 'span', { class: 'pressport-modal-detail' } );
-			parts.meta = el( 'div', { class: 'pressport-modal-meta' }, [ parts.percent, parts.detail ] );
-			parts.stats = el( 'ul', { class: 'pressport-legend pressport-modal-stats' } );
-			parts.note = el( 'p', { class: 'pressport-modal-note', 'aria-live': 'polite' } );
-			parts.actions = el( 'div', { class: 'pressport-modal-actions' } );
-			parts.dialog = el( 'div', { class: 'pressport-modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'pressport-modal-title', 'aria-describedby': 'pressport-modal-message' }, [
+			parts.bar = el( 'div', { class: 'migrateplus-progress migrateplus-modal-bar', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-labelledby': 'migrateplus-modal-title' }, parts.fill );
+			parts.percent = el( 'span', { class: 'migrateplus-modal-percent' } );
+			parts.detail = el( 'span', { class: 'migrateplus-modal-detail' } );
+			parts.meta = el( 'div', { class: 'migrateplus-modal-meta' }, [ parts.percent, parts.detail ] );
+			parts.stats = el( 'ul', { class: 'migrateplus-legend migrateplus-modal-stats' } );
+			parts.note = el( 'p', { class: 'migrateplus-modal-note', 'aria-live': 'polite' } );
+			parts.actions = el( 'div', { class: 'migrateplus-modal-actions' } );
+			parts.dialog = el( 'div', { class: 'migrateplus-modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'migrateplus-modal-title', 'aria-describedby': 'migrateplus-modal-message' }, [
 				parts.head, parts.meta, parts.bar, parts.obar, parts.stats, parts.note, parts.actions,
 			] );
-			overlay = el( 'div', { class: 'pressport-modal-overlay' }, parts.dialog );
+			overlay = el( 'div', { class: 'migrateplus-modal-overlay' }, parts.dialog );
 			overlay.addEventListener( 'keydown', onKey );
 			document.body.appendChild( overlay );
 		}
@@ -291,7 +295,7 @@
 				const hadFocus = parts.dialog.contains( document.activeElement );
 				parts.actions.innerHTML = '';
 				actions.forEach( ( a ) => {
-					const cls = 'button' + ( a.primary ? ' button-primary' : '' ) + ( a.danger ? ' pressport-danger' : '' );
+					const cls = 'button' + ( a.primary ? ' button-primary' : '' ) + ( a.danger ? ' migrateplus-danger' : '' );
 					parts.actions.appendChild( a.href
 						? el( 'a', { class: cls, href: a.href, text: a.label } )
 						: el( 'button', { type: 'button', class: cls, text: a.label, disabled: a.disabled, onclick: a.onClick } ) );
@@ -323,7 +327,7 @@
 			if ( ! overlay ) {
 				lastFocus = document.activeElement;
 				build();
-				document.body.classList.add( 'pressport-modal-open' );
+				document.body.classList.add( 'migrateplus-modal-open' );
 			}
 			opts = {};
 			parts.actionsSig = null;
@@ -341,7 +345,7 @@
 			overlay = null;
 			parts = {};
 			opts = {};
-			document.body.classList.remove( 'pressport-modal-open' );
+			document.body.classList.remove( 'migrateplus-modal-open' );
 			if ( lastFocus && document.body.contains( lastFocus ) ) {
 				lastFocus.focus( { preventScroll: true } );
 			}
@@ -426,7 +430,7 @@
 				m.meta = m.meta.filter( ( row ) => row.source !== hit );
 			}
 		} );
-		// Custom fields from PressPort / WordPress exports ("meta.<key>"), skipping private keys.
+		// Custom fields from MigratePlus / WordPress exports ("meta.<key>"), skipping private keys.
 		const acfNames = new Set( acfFields( pt ).map( ( f ) => f.name ) );
 		state.fields.forEach( ( f ) => {
 			const key = f.startsWith( 'meta.' ) ? f.slice( 5 ) : '';
@@ -478,7 +482,7 @@
 	}
 
 	function fieldSelect( value, onChange, opts ) {
-		const select = el( 'select', { class: 'pressport-field-select', 'aria-label': ( opts && opts.label ) || 'Source field', onchange: ( e ) => onChange( e.target.value ) }, [
+		const select = el( 'select', { class: 'migrateplus-field-select', 'aria-label': ( opts && opts.label ) || 'Source field', onchange: ( e ) => onChange( e.target.value ) }, [
 			el( 'option', { value: '', text: '(not mapped)' } ),
 		] );
 		state.fields.forEach( ( f ) => select.appendChild( el( 'option', { value: f, text: f, selected: f === value } ) ) );
@@ -496,7 +500,7 @@
 	}
 
 	function notice( type, message ) {
-		return el( 'div', { class: 'notice notice-' + type + ' inline pressport-notice' }, el( 'p', { text: message } ) );
+		return el( 'div', { class: 'notice notice-' + type + ' inline migrateplus-notice' }, el( 'p', { text: message } ) );
 	}
 
 	/** Show a failed request's message at the top of the page. */
@@ -504,6 +508,43 @@
 		const n = notice( 'error', err.message );
 		root.insertBefore( n, root.firstChild );
 		n.scrollIntoView( { block: 'nearest' } );
+	}
+
+	/**
+	 * A confirmation in the plugin's modal, in place of window.confirm. The modal does not block,
+	 * so whatever follows the answer goes in onConfirm. Its button is disabled once clicked so the
+	 * request can't be sent twice; onConfirm then closes the modal or updates it.
+	 */
+	function ask( { title, message, label, danger, onConfirm } ) {
+		modal.open( {
+			kind: 'confirm',
+			// The spinner is for work in progress; until the user answers, show what is being asked.
+			icon: danger ? 'danger' : 'question',
+			bar: false,
+			dismissible: true,
+			title,
+			message,
+			actions: [
+				{ label, primary: true, danger, onClick: () => {
+					modal.update( { icon: 'working', dismissible: false, actions: [ { label: label + '…', primary: true, danger, disabled: true } ] } );
+					onConfirm();
+				} },
+				{ label: 'Cancel', onClick: () => modal.close() },
+			],
+		} );
+	}
+
+	/** A failed request's message in the modal, in place of window.alert. */
+	function modalError( title, err ) {
+		modal.open( {
+			kind: 'error',
+			bar: false,
+			tone: 'error',
+			dismissible: true,
+			title,
+			note: err.message,
+			actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
+		} );
 	}
 
 	function formatDate( ts ) {
@@ -552,8 +593,8 @@
 	 */
 	function outcomeBar( stats, total, opts ) {
 		const bar = el( 'div', { role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100 } );
-		OUTCOMES.forEach( ( [ key ] ) => bar.appendChild( el( 'span', { class: 'pressport-obar-seg is-' + key } ) ) );
-		bar.appendChild( el( 'span', { class: 'pressport-obar-runner' } ) );
+		OUTCOMES.forEach( ( [ key ] ) => bar.appendChild( el( 'span', { class: 'migrateplus-obar-seg is-' + key } ) ) );
+		bar.appendChild( el( 'span', { class: 'migrateplus-obar-runner' } ) );
 		setOutcomeBar( bar, stats, total, opts );
 		return bar;
 	}
@@ -563,7 +604,7 @@
 		opts = opts || {};
 		const processed = Number( stats.processed ) || 0;
 		const base = Math.max( Number( total ) || 0, processed, 1 );
-		bar.className = 'pressport-obar' + ( opts.size ? ' is-' + opts.size : '' ) + ( opts.indeterminate ? ' is-indeterminate' : '' ) + ( opts.tone ? ' is-' + opts.tone : '' );
+		bar.className = 'migrateplus-obar' + ( opts.size ? ' is-' + opts.size : '' ) + ( opts.indeterminate ? ' is-indeterminate' : '' ) + ( opts.tone ? ' is-' + opts.tone : '' );
 		bar.setAttribute( 'aria-label', opts.label || 'Progress' );
 		if ( opts.indeterminate ) {
 			bar.removeAttribute( 'aria-valuenow' );
@@ -577,7 +618,7 @@
 	}
 
 	function outcomeLegend( stats, dry ) {
-		return el( 'ul', { class: 'pressport-legend' }, OUTCOMES.map( ( [ key, label, dryLabel ] ) =>
+		return el( 'ul', { class: 'migrateplus-legend' }, OUTCOMES.map( ( [ key, label, dryLabel ] ) =>
 			el( 'li', { class: 'is-' + key + ( Number( stats[ key ] ) ? '' : ' is-zero' ) }, [
 				el( 'strong', { text: ( Number( stats[ key ] ) || 0 ).toLocaleString() } ),
 				el( 'span', { text: dry ? dryLabel : label } ),
@@ -586,7 +627,7 @@
 	}
 
 	const SOURCE_BLURBS = {
-		json: 'A PressPort export, or any JSON file or API',
+		json: 'A MigratePlus export, or any JSON file or API',
 	};
 
 	// Render
@@ -611,7 +652,7 @@
 
 	function draw() {
 		root.innerHTML = '';
-		root.classList.add( 'pressport-app' );
+		root.classList.add( 'migrateplus-app' );
 		if ( state.tab === 'history' ) {
 			renderHistory();
 			return;
@@ -651,13 +692,13 @@
 			[ 'run', 'Import' ],
 		];
 		const idx = steps.findIndex( ( s ) => s[ 0 ] === state.step );
-		return el( 'ol', { class: 'pressport-route', 'aria-label': 'Import steps' }, steps.map( ( s, i ) =>
+		return el( 'ol', { class: 'migrateplus-route', 'aria-label': 'Import steps' }, steps.map( ( s, i ) =>
 			el( 'li', {
 				class: i === idx ? 'is-current' : ( i < idx ? 'is-done' : '' ),
 				'aria-current': i === idx ? 'step' : null,
 			}, [
-				el( 'span', { class: 'pressport-route-dot', 'aria-hidden': 'true', text: i < idx ? '✓' : String( i + 1 ) } ),
-				el( 'span', { class: 'pressport-route-label', text: s[ 1 ] } ),
+				el( 'span', { class: 'migrateplus-route-dot', 'aria-hidden': 'true', text: i < idx ? '✓' : String( i + 1 ) } ),
+				el( 'span', { class: 'migrateplus-route-label', text: s[ 1 ] } ),
 			] )
 		) );
 	}
@@ -665,19 +706,19 @@
 	// Step 1
 
 	function renderSource() {
-		const cards = el( 'div', { class: 'pressport-tiles', role: 'radiogroup', 'aria-label': 'Source' }, D.sources.map( ( s ) =>
-			el( 'label', { class: 'pressport-tile' + ( s.id === state.sourceId ? ' is-selected' : '' ) }, [
-				el( 'input', { type: 'radio', name: 'pressport_source', value: s.id, checked: s.id === state.sourceId, onchange: () => {
+		const cards = el( 'div', { class: 'migrateplus-tiles', role: 'radiogroup', 'aria-label': 'Source' }, D.sources.map( ( s ) =>
+			el( 'label', { class: 'migrateplus-tile' + ( s.id === state.sourceId ? ' is-selected' : '' ) }, [
+				el( 'input', { type: 'radio', name: 'migrateplus_source', value: s.id, checked: s.id === state.sourceId, onchange: () => {
 					state.sourceId = s.id;
 					state.error = '';
 					render();
-					const first = root.querySelector( '.pressport-tile.is-selected input' );
+					const first = root.querySelector( '.migrateplus-tile.is-selected input' );
 					if ( first ) {
 						first.focus();
 					}
 				} } ),
-				el( 'span', { class: 'pressport-source-icon pressport-icon-' + s.id, 'aria-hidden': 'true' } ),
-				el( 'span', { class: 'pressport-tile-text' }, [
+				el( 'span', { class: 'migrateplus-source-icon migrateplus-icon-' + s.id, 'aria-hidden': 'true' } ),
+				el( 'span', { class: 'migrateplus-tile-text' }, [
 					el( 'strong', { text: s.label } ),
 					SOURCE_BLURBS[ s.id ] ? el( 'span', { text: SOURCE_BLURBS[ s.id ] } ) : null,
 				] ),
@@ -685,10 +726,10 @@
 		) );
 
 		const source = D.sources.find( ( s ) => s.id === state.sourceId );
-		const form = el( 'form', { class: 'pressport-panel pressport-source-form', onsubmit: onPreview } );
-		const fields = el( 'div', { class: 'pressport-fields' } );
+		const form = el( 'form', { class: 'migrateplus-panel migrateplus-source-form', onsubmit: onPreview } );
+		const fields = el( 'div', { class: 'migrateplus-fields' } );
 		source.schema.forEach( ( f ) => {
-			const id = 'pressport-set-' + f.key;
+			const id = 'migrateplus-set-' + f.key;
 			let input;
 			const name = f.type === 'file' ? 'file_' + f.key : 'settings[' + f.key + ']';
 			if ( f.type === 'select' ) {
@@ -711,30 +752,30 @@
 			}
 			const help = [];
 			if ( f.help ) {
-				help.push( el( 'p', { class: 'pressport-field-help', text: f.help } ) );
+				help.push( el( 'p', { class: 'migrateplus-field-help', text: f.help } ) );
 			}
 			if ( f.type === 'file' && f.remote === false ) {
-				help.push( el( 'p', { class: 'pressport-field-help', text: 'Max upload size: ' + D.maxUpload } ) );
+				help.push( el( 'p', { class: 'migrateplus-field-help', text: 'Max upload size: ' + D.maxUpload } ) );
 			}
-			fields.appendChild( el( 'div', { class: 'pressport-field pressport-field-' + f.type }, [
-				el( 'label', { class: 'pressport-field-label', for: f.type === 'file' ? null : id }, [
+			fields.appendChild( el( 'div', { class: 'migrateplus-field migrateplus-field-' + f.type }, [
+				el( 'label', { class: 'migrateplus-field-label', for: f.type === 'file' ? null : id }, [
 					f.label,
-					f.required ? el( 'span', { class: 'pressport-req', text: 'Required' } ) : null,
+					f.required ? el( 'span', { class: 'migrateplus-req', text: 'Required' } ) : null,
 				] ),
 				input,
 			].concat( help ) ) );
 		} );
-		form.appendChild( el( 'header', { class: 'pressport-panel-head' }, [
-			el( 'span', { class: 'pressport-source-icon pressport-icon-' + source.id, 'aria-hidden': 'true' } ),
+		form.appendChild( el( 'header', { class: 'migrateplus-panel-head' }, [
+			el( 'span', { class: 'migrateplus-source-icon migrateplus-icon-' + source.id, 'aria-hidden': 'true' } ),
 			el( 'div', {}, [
 				el( 'h2', { text: source.label } ),
 				SOURCE_BLURBS[ source.id ] ? el( 'p', { text: SOURCE_BLURBS[ source.id ] } ) : null,
 			] ),
 		] ) );
 		form.appendChild( fields );
-		form.appendChild( el( 'footer', { class: 'pressport-panel-foot' }, [
-			el( 'p', { class: 'pressport-foot-note', text: 'Nothing is imported yet. You will see a preview and map the fields first.' } ),
-			el( 'button', { type: 'submit', class: 'button button-primary pressport-btn-lg', disabled: state.busy, text: 'Connect and preview' } ),
+		form.appendChild( el( 'footer', { class: 'migrateplus-panel-foot' }, [
+			el( 'p', { class: 'migrateplus-foot-note', text: 'Nothing is imported yet. You will see a preview and map the fields first.' } ),
+			el( 'button', { type: 'submit', class: 'button button-primary migrateplus-btn-lg', disabled: state.busy, text: 'Connect and preview' } ),
 		] ) );
 
 		if ( D.sources.length > 1 ) {
@@ -751,11 +792,11 @@
 
 	/**
 	 * Upload screen: one large drop area and a button to choose the file, with the
-	 * upload limit underneath. Dropping a PressPort export imports it straight away.
+	 * upload limit underneath. Dropping a MigratePlus export imports it straight away.
 	 */
 	function renderDrop() {
 		const field = D.sources.find( ( s ) => s.id === state.sourceId ).schema[ 0 ];
-		const input = el( 'input', { type: 'file', id: 'pressport-import-file', accept: field.accept || '', class: 'pressport-drop-input', 'aria-label': 'File to import', onchange: ( e ) => {
+		const input = el( 'input', { type: 'file', id: 'migrateplus-import-file', accept: field.accept || '', class: 'migrateplus-drop-input', 'aria-label': 'File to import', onchange: ( e ) => {
 			const file = e.target.files && e.target.files[ 0 ];
 			e.target.value = ''; // Choosing the same file again still fires change.
 			if ( file ) {
@@ -763,11 +804,11 @@
 			}
 		} } );
 
-		const area = el( 'div', { class: 'pressport-import-drop' }, [
+		const area = el( 'div', { class: 'migrateplus-import-drop' }, [
 			el( 'span', { class: 'dashicons dashicons-cloud-upload', 'aria-hidden': 'true' } ),
-			el( 'strong', { text: 'Drop a JSON file here to import it' } ),
-			el( 'span', { class: 'pressport-muted', text: 'A PressPort export imports straight away. Other JSON files go to field mapping first.' } ),
-			el( 'button', { type: 'button', class: 'button button-primary pressport-btn-lg', disabled: state.busy, text: 'Choose a JSON file', onclick: () => input.click() } ),
+			el( 'strong', { text: 'Drop a JSON file (.json or .json.gz) here to import it' } ),
+			el( 'span', { class: 'migrateplus-muted', text: 'A MigratePlus export imports straight away. Other JSON files go to field mapping first.' } ),
+			el( 'button', { type: 'button', class: 'button button-primary migrateplus-btn-lg', disabled: state.busy, text: 'Choose a JSON file', onclick: () => input.click() } ),
 		] );
 		[ 'dragenter', 'dragover' ].forEach( ( t ) => area.addEventListener( t, ( e ) => {
 			e.preventDefault();
@@ -786,10 +827,10 @@
 			}
 		} );
 
-		root.appendChild( el( 'section', { class: 'pressport-panel pressport-import' }, [
+		root.appendChild( el( 'section', { class: 'migrateplus-panel migrateplus-import' }, [
 			area,
 			input,
-			el( 'p', { class: 'pressport-import-limit', text: 'Maximum upload size: ' + D.maxUpload } ),
+			el( 'p', { class: 'migrateplus-import-limit', text: 'Maximum upload size: ' + D.maxUpload } ),
 		] ) );
 	}
 
@@ -802,7 +843,7 @@
 				bar: false,
 				title: 'This file can’t be imported',
 				tone: 'error',
-				note: '“' + file.name + '” is not a ' + exts.join( ' or ' ) + ' file. Export one from PressPort → Export on the other site.',
+				note: '“' + file.name + '” is not a ' + exts.join( ' or ' ) + ' file. Export one from MigratePlus → Export on the other site.',
 				dismissible: true,
 				actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
 			} );
@@ -814,7 +855,7 @@
 				bar: false,
 				title: 'This file is too large',
 				tone: 'error',
-				note: '“' + file.name + '” is ' + formatBytes( file.size ) + '. This server accepts uploads up to ' + D.maxUpload + '.',
+				note: '“' + file.name + '” is ' + formatBytes( file.size ) + '. This server accepts uploads up to ' + D.maxUpload + '.' + ( D.zlib && ! /\.gz$/i.test( file.name ) ? ' Export it again with “Compress the file” on: a .json.gz is much smaller.' : '' ),
 				dismissible: true,
 				actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
 			} );
@@ -826,49 +867,89 @@
 		requestPreview( fd, { upload: file } );
 	}
 
-	/** Whether a previewed job came from a PressPort export (it carries its own mapping). */
+	/** Whether a previewed job came from a MigratePlus export (it carries its own mapping). */
 	function isExport( job ) {
-		return !! ( job.settings && ( job.settings.pressport_site || job.settings.pressport_post_type ) );
+		return !! ( job.settings && ( job.settings.migrateplus_site || job.settings.migrateplus_post_type ) );
+	}
+
+	/** Whether a MigratePlus export holds several post types (each record then names its own). */
+	function isMultiType( job ) {
+		return !! ( job && job.settings && String( job.settings.migrateplus_post_types || '' ).includes( ',' ) );
+	}
+
+	/** "Media, Pages and Posts", from a job's sections or a list of labels. */
+	function listLabels( labels ) {
+		return labels.length > 1 ? labels.slice( 0, -1 ).join( ', ' ) + ' and ' + labels[ labels.length - 1 ] : labels.join( '' );
+	}
+
+	/** Progress per part of a MigratePlus export ("Media 12 of 12, Pages 3 of 10, Menus 0 of 2"), when it has more than one. */
+	function sectionsText( job ) {
+		const list = job.sections || [];
+		return list.length > 1 ? list.map( ( x ) => x.label + ' ' + Number( x.done ).toLocaleString() + ' of ' + Number( x.total ).toLocaleString() ).join( ', ' ) : '';
+	}
+
+	/** The part being imported now: the first one not done, or the menus once the records are. */
+	function currentSection( job ) {
+		const list = job.sections || [];
+		if ( list.length < 2 || [ 'complete', 'rolled_back' ].includes( job.status ) ) {
+			return null;
+		}
+		return 'menus' === job.stage ? list[ list.length - 1 ] : list.find( ( x ) => Number( x.done ) < Number( x.total ) ) || null;
 	}
 
 	/**
-	 * Ask before importing a PressPort export straight away. With duplicates found
+	 * Ask before importing a MigratePlus export straight away. With duplicates found
 	 * (d from checkDuplicates), the choice is whether to skip them.
 	 */
 	function confirmImport( d ) {
 		const job = state.job;
 		const total = Number( job.total ) || 0;
-		const from = job.settings.pressport_site ? hostOf( job.settings.pressport_site ) : '';
-		const intro = ( from ? 'Exported from ' + from + '. ' : '' ) + 'Everything is imported as ' + postType( state.options.post_type ).label + ', with the field mapping saved in the file.';
-		const review = { label: 'Review mapping', onClick: () => {
+		const from = job.settings.migrateplus_site ? hostOf( job.settings.migrateplus_site ) : '';
+		const menus = Number( job.settings.migrateplus_menus ) || 0;
+		const parts = ( job.sections || [] ).filter( ( x ) => 'nav_menu' !== x.type ).map( ( x ) => x.label );
+		const menuNote = menus && Number( state.options.import_menus ) ? ' Then ' + menus + ( 1 === menus ? ' menu is' : ' menus are' ) + ' rebuilt, linked to the imported content.' : '';
+		// An export of menus alone: they link to content already on this site.
+		const menusOnly = ! total && menus > 0;
+		let intro = ( from ? 'Exported from ' + from + '. ' : '' ) + ( isMultiType( job )
+			? listLabels( parts ) + ' are imported in that order, each as its own type, with the field mapping saved in the file.'
+			: 'Everything is imported as ' + postType( state.options.post_type ).label + ', with the field mapping saved in the file.' ) + menuNote;
+		if ( menusOnly ) {
+			intro = ( from ? 'Exported from ' + from + '. ' : '' ) + 'This file holds navigation menus only. Their items link to the posts, pages and terms already on this site; an item whose target is not here is skipped.' +
+				( Number( state.options.import_menus ) ? '' : ' “Import menus” is off in Settings, so nothing would be imported.' );
+		}
+		// The mapping screen handles one post type; a file with several imports as it is, and menus alone have nothing to map.
+		const review = isMultiType( job ) || menusOnly ? [] : [ { label: 'Review mapping', onClick: () => {
 			modal.close();
 			state.direct = false;
 			state.step = 'map';
 			render();
-		} };
+		} } ];
 		const cancel = { label: 'Cancel', onClick: () => modal.close() };
 		const base = {
 			kind: 'confirm',
 			icon: 'file',
 			bar: false,
-			title: 'Import ' + total.toLocaleString() + ' ' + ( 1 === total ? 'item' : 'items' ) + '?',
+			title: menusOnly ? 'Import ' + menus + ( 1 === menus ? ' menu' : ' menus' ) + '?' : 'Import ' + total.toLocaleString() + ' ' + ( 1 === total ? 'item' : 'items' ) + '?',
 			dismissible: true,
 		};
 		if ( d && d.count ) {
 			modal.open( Object.assign( base, duplicateSummary( d ), {
 				message: intro + ' ' + duplicateMessage( d ) + changedMessage( d ),
-				actions: duplicateActions( d, () => start( false, true ), () => confirmImport( d ) ).concat( review, cancel ),
+				actions: duplicateActions( d, () => start( false, true ), () => confirmImport( d ) ).concat( review, [ cancel ] ),
 			} ) );
 			return;
 		}
 		modal.open( Object.assign( base, {
 			message: intro + ' You can roll the import back from History.',
-			actions: [ { label: 'Import', primary: true, onClick: () => start( false, true ) }, review, cancel ],
+			actions: [ { label: 'Import', primary: true, onClick: () => start( false, true ) } ].concat( review, [ cancel ] ),
 		} ) );
 	}
 
 	/** The mapping as it will be saved: ACF fields only when they belong to the chosen type. */
 	function mappingToSave() {
+		if ( isMultiType( state.job ) ) {
+			return state.mapping; // Its ACF fields belong to several types.
+		}
 		const allowed = new Set( acfFields( state.options.post_type ).flatMap( ( f ) => [ f.key, f.name ] ) );
 		const mapping = Object.assign( {}, state.mapping, { acf: {} } );
 		Object.entries( state.mapping.acf ).forEach( ( [ k, v ] ) => {
@@ -961,7 +1042,7 @@
 		const r = state.review;
 		const items = r.d.changed || [];
 		const images = r.d.images || [];
-		const count = el( 'span', { class: 'pressport-actionbar-status', 'aria-live': 'polite' } );
+		const count = el( 'span', { class: 'migrateplus-actionbar-status', 'aria-live': 'polite' } );
 		const go = el( 'button', { type: 'button', class: 'button button-primary' } );
 		const boxes = [];
 		const radios = [];
@@ -986,19 +1067,19 @@
 		};
 
 		if ( items.length ) {
-			root.appendChild( el( 'section', { class: 'pressport-panel pressport-review-head' }, [
+			root.appendChild( el( 'section', { class: 'migrateplus-panel migrateplus-review-head' }, [
 				el( 'h2', { text: 'Review changes' } ),
 				el( 'p', { text: items.length + ( 1 === items.length ? ' item in this import is' : ' items in this import are' ) + ' already on this site and differ from it. Tick the ones to update with the imported version. Everything else that is already here is skipped.' } ),
-				el( 'p', { class: 'pressport-muted', text: 'Custom fields, terms and images are updated too and are not shown here. WordPress keeps a revision of each post or page that is updated, so you can restore the old version from the editor.' } ),
-				el( 'div', { class: 'pressport-review-tools' }, [
+				el( 'p', { class: 'migrateplus-muted', text: 'Custom fields, terms and images are updated too and are not shown here. WordPress keeps a revision of each post or page that is updated, so you can restore the old version from the editor.' } ),
+				el( 'div', { class: 'migrateplus-review-tools' }, [
 					el( 'button', { type: 'button', class: 'button button-small', text: 'Select all', onclick: () => setAll( true ) } ),
 					el( 'button', { type: 'button', class: 'button button-small', text: 'Select none', onclick: () => setAll( false ) } ),
 				] ),
 			] ) );
 		}
 
-		root.appendChild( el( 'ol', { class: 'pressport-review' }, items.map( ( it, i ) => {
-			const id = 'pressport-review-' + it.post_id;
+		root.appendChild( el( 'ol', { class: 'migrateplus-review' }, items.map( ( it, i ) => {
+			const id = 'migrateplus-review-' + it.post_id;
 			const box = el( 'input', { type: 'checkbox', id, value: it.post_id, onchange: ( e ) => {
 				if ( e.target.checked ) {
 					r.selected.add( it.post_id );
@@ -1009,15 +1090,15 @@
 			} } );
 			boxes.push( box );
 			const fields = Object.keys( it.changes ).map( ( k ) => it.changes[ k ] );
-			return el( 'li', { class: 'pressport-panel pressport-review-item' }, [
-				el( 'div', { class: 'pressport-review-row' }, [
+			return el( 'li', { class: 'migrateplus-panel migrateplus-review-item' }, [
+				el( 'div', { class: 'migrateplus-review-row' }, [
 					box,
 					el( 'label', { for: id }, [
 						el( 'strong', { text: it.title || '(untitled)' } ),
-						el( 'span', { class: 'pressport-muted', text: it.type + ' #' + it.post_id + ' · ' + ( 'before' === it.kind ? 'imported before' : 'same ' + it.label ) + ' · changes: ' + fields.map( ( f ) => f.label.toLowerCase() ).join( ', ' ) } ),
+						el( 'span', { class: 'migrateplus-muted', text: it.type + ' #' + it.post_id + ' · ' + ( 'before' === it.kind ? 'imported before' : 'same ' + it.label ) + ' · changes: ' + fields.map( ( f ) => f.label.toLowerCase() ).join( ', ' ) } ),
 					] ),
 				] ),
-				el( 'details', { class: 'pressport-review-body', open: i < 3 }, [
+				el( 'details', { class: 'migrateplus-review-body', open: i < 3 }, [
 					el( 'summary', { text: 'Show changes' } ),
 					...fieldChanges( fields ),
 				] ),
@@ -1025,22 +1106,22 @@
 		} ) ) );
 
 		if ( images.length ) {
-			root.appendChild( el( 'section', { class: 'pressport-panel pressport-review-head' }, [
+			root.appendChild( el( 'section', { class: 'migrateplus-panel migrateplus-review-head' }, [
 				el( 'h2', { text: 'Compare media' } ),
 				el( 'p', { text: images.length + ( 1 === images.length ? ' file in this import is' : ' files in this import are' ) + ' already in the Media Library. For each one, choose what to do. Skipped files are left as they are.' } ),
-				el( 'p', { class: 'pressport-muted', text: '"Update details" keeps the file on this site and copies the title, caption, description and alt text. "Replace image" also swaps in the imported file, in the same Media Library item, so pages that use it show the new image. A replaced file cannot be rolled back. "Keep both" adds the imported file as a new item and leaves this one alone.' } ),
-				el( 'div', { class: 'pressport-review-tools' }, [
+				el( 'p', { class: 'migrateplus-muted', text: '"Update details" keeps the file on this site and copies the title, caption, description and alt text. "Replace image" also swaps in the imported file, in the same Media Library item, so pages that use it show the new image. A replaced file cannot be rolled back. "Keep both" adds the imported file as a new item and leaves this one alone.' } ),
+				el( 'div', { class: 'migrateplus-review-tools' }, [
 					el( 'button', { type: 'button', class: 'button button-small', text: 'Skip all', onclick: () => setAllMedia( 'skip' ) } ),
 					el( 'button', { type: 'button', class: 'button button-small', text: 'Update all details', onclick: () => setAllMedia( 'update' ) } ),
 					el( 'button', { type: 'button', class: 'button button-small', text: 'Replace all', onclick: () => setAllMedia( 'replace' ) } ),
 					el( 'button', { type: 'button', class: 'button button-small', text: 'Keep both for all', onclick: () => setAllMedia( 'copy' ) } ),
 				] ),
 			] ) );
-			root.appendChild( el( 'ol', { class: 'pressport-review' }, images.map( ( it ) => {
+			root.appendChild( el( 'ol', { class: 'migrateplus-review' }, images.map( ( it ) => {
 				const fields = Object.keys( it.changes ).map( ( k ) => it.changes[ k ] );
 				const choice = ( v, label ) => {
-					const id = 'pressport-media-' + it.post_id + '-' + v;
-					const radio = el( 'input', { type: 'radio', id, name: 'pressport-media-' + it.post_id, value: v, onchange: () => {
+					const id = 'migrateplus-media-' + it.post_id + '-' + v;
+					const radio = el( 'input', { type: 'radio', id, name: 'migrateplus-media-' + it.post_id, value: v, onchange: () => {
 						if ( 'skip' === v ) {
 							r.media.delete( it.post_id );
 						} else {
@@ -1049,32 +1130,32 @@
 						sync();
 					} } );
 					radios.push( [ radio, it.post_id, v ] );
-					return el( 'label', { class: 'pressport-check-chip', for: id }, [ radio, el( 'span', { text: label } ) ] );
+					return el( 'label', { class: 'migrateplus-check-chip', for: id }, [ radio, el( 'span', { text: label } ) ] );
 				};
-				const figure = ( src, href, caption ) => el( 'figure', { class: 'pressport-media-pick' }, [
+				const figure = ( src, href, caption ) => el( 'figure', { class: 'migrateplus-media-pick' }, [
 					src && it.is_image
 						? el( 'a', { href, target: '_blank', rel: 'noopener' }, el( 'img', { src, alt: caption + ': ' + ( it.title || 'image' ), loading: 'lazy' } ) )
-						: el( 'span', { class: 'pressport-media-file', text: ( href || '' ).split( '/' ).pop() || '(no preview)' } ),
+						: el( 'span', { class: 'migrateplus-media-file', text: ( href || '' ).split( '/' ).pop() || '(no preview)' } ),
 					el( 'figcaption', { text: caption } ),
 				] );
-				return el( 'li', { class: 'pressport-panel pressport-review-item' }, [
-					el( 'div', { class: 'pressport-review-row' }, [
-						el( 'div', { class: 'pressport-review-title' }, [
+				return el( 'li', { class: 'migrateplus-panel migrateplus-review-item' }, [
+					el( 'div', { class: 'migrateplus-review-row' }, [
+						el( 'div', { class: 'migrateplus-review-title' }, [
 							el( 'strong', { text: it.title || '(untitled)' } ),
-							el( 'span', { class: 'pressport-muted', text: 'Media #' + it.post_id + ' · ' + ( 'before' === it.kind ? 'imported before' : 'same ' + it.label ) + ( fields.length ? ' · details differ: ' + fields.map( ( f ) => f.label.toLowerCase() ).join( ', ' ) : ' · same details' ) } ),
+							el( 'span', { class: 'migrateplus-muted', text: 'Media #' + it.post_id + ' · ' + ( 'before' === it.kind ? 'imported before' : 'same ' + it.label ) + ( fields.length ? ' · details differ: ' + fields.map( ( f ) => f.label.toLowerCase() ).join( ', ' ) : ' · same details' ) } ),
 						] ),
 					] ),
-					el( 'div', { class: 'pressport-media-compare' }, [
+					el( 'div', { class: 'migrateplus-media-compare' }, [
 						figure( it.current, it.current_full, 'On this site' ),
 						figure( it.imported_preview || it.imported, it.imported, 'In the import' ),
 					] ),
-					el( 'div', { class: 'pressport-chips', role: 'radiogroup', 'aria-label': 'What to do with ' + ( it.title || 'this file' ) }, [
+					el( 'div', { class: 'migrateplus-chips', role: 'radiogroup', 'aria-label': 'What to do with ' + ( it.title || 'this file' ) }, [
 						choice( 'skip', 'Skip' ),
 						choice( 'update', 'Update details' ),
 						choice( 'replace', 'Replace image' ),
 						choice( 'copy', 'Keep both' ),
 					] ),
-					fields.length ? el( 'details', { class: 'pressport-review-body' }, [ el( 'summary', { text: 'Show detail changes' } ), ...fieldChanges( fields ) ] ) : null,
+					fields.length ? el( 'details', { class: 'migrateplus-review-body' }, [ el( 'summary', { text: 'Show detail changes' } ), ...fieldChanges( fields ) ] ) : null,
 				] );
 			} ) ) );
 		}
@@ -1087,9 +1168,9 @@
 			state.review = null;
 			r.apply( ids, lists.replace, lists.copy );
 		} );
-		root.appendChild( el( 'div', { class: 'pressport-actionbar' }, [
+		root.appendChild( el( 'div', { class: 'migrateplus-actionbar' }, [
 			count,
-			el( 'div', { class: 'pressport-actionbar-buttons' }, [
+			el( 'div', { class: 'migrateplus-actionbar-buttons' }, [
 				el( 'button', { type: 'button', class: 'button', text: 'Back', onclick: () => {
 					state.step = r.back;
 					state.review = null;
@@ -1104,11 +1185,11 @@
 
 	/** Each changed field: a diff for longer text, "Now / Imported" for short values. */
 	function fieldChanges( fields ) {
-		return fields.map( ( f ) => el( 'div', { class: 'pressport-review-field' }, [
+		return fields.map( ( f ) => el( 'div', { class: 'migrateplus-review-field' }, [
 			el( 'h3', { text: f.label } ),
 			f.old.includes( '\n' ) || f.new.includes( '\n' ) || f.old.length + f.new.length > 160
 				? diffView( f.old, f.new )
-				: el( 'dl', { class: 'pressport-review-swap' }, [
+				: el( 'dl', { class: 'migrateplus-review-swap' }, [
 					el( 'dt', { text: 'Now' } ), el( 'dd', { class: 'is-old', text: f.old || '(empty)' } ),
 					el( 'dt', { text: 'Imported' } ), el( 'dd', { class: 'is-new', text: f.new || '(empty)' } ),
 				] ),
@@ -1185,10 +1266,10 @@
 			}
 			flush();
 			const kind = { ' ': 'is-same', '-': 'is-old', '+': 'is-new' }[ row[ 0 ] ];
-			out.push( el( 'li', { class: kind }, [ el( 'span', { class: 'pressport-diff-sign', 'aria-label': { ' ': 'Unchanged', '-': 'Removed', '+': 'Added' }[ row[ 0 ] ], text: ' ' === row[ 0 ] ? '' : ( '-' === row[ 0 ] ? '−' : '+' ) } ), el( 'span', { text: row[ 1 ] || ' ' } ) ] ) );
+			out.push( el( 'li', { class: kind }, [ el( 'span', { class: 'migrateplus-diff-sign', 'aria-label': { ' ': 'Unchanged', '-': 'Removed', '+': 'Added' }[ row[ 0 ] ], text: ' ' === row[ 0 ] ? '' : ( '-' === row[ 0 ] ? '−' : '+' ) } ), el( 'span', { text: row[ 1 ] || ' ' } ) ] ) );
 		} );
 		flush();
-		return el( 'ol', { class: 'pressport-diff' }, out );
+		return el( 'ol', { class: 'migrateplus-diff' }, out );
 	}
 
 	/**
@@ -1196,12 +1277,12 @@
 	 * The upload side is a drop zone.
 	 */
 	function fileInput( f, id, name ) {
-		const upload = el( 'input', { id, name, type: 'file', accept: f.accept || '', class: 'pressport-drop-input' } );
-		const fileName = el( 'span', { class: 'pressport-drop-file' } );
-		const zone = el( 'label', { class: 'pressport-drop', for: id }, [
+		const upload = el( 'input', { id, name, type: 'file', accept: f.accept || '', class: 'migrateplus-drop-input' } );
+		const fileName = el( 'span', { class: 'migrateplus-drop-file' } );
+		const zone = el( 'label', { class: 'migrateplus-drop', for: id }, [
 			upload,
-			el( 'span', { class: 'pressport-drop-icon', 'aria-hidden': 'true' } ),
-			el( 'span', { class: 'pressport-drop-text' }, [
+			el( 'span', { class: 'migrateplus-drop-icon', 'aria-hidden': 'true' } ),
+			el( 'span', { class: 'migrateplus-drop-text' }, [
 				el( 'strong', { text: 'Drop a file here or choose one' } ),
 				el( 'span', { text: ( f.accept || '' ).split( ',' ).filter( ( a ) => a.trim().startsWith( '.' ) ).join( ', ' ) + ', up to ' + D.maxUpload } ),
 			] ),
@@ -1239,10 +1320,10 @@
 			autocomplete: 'off',
 			'aria-label': f.label + ' URL',
 		} );
-		const uploadPane = el( 'div', { class: 'pressport-file-pane' }, zone );
-		const urlPane = el( 'div', { class: 'pressport-file-pane' }, [
+		const uploadPane = el( 'div', { class: 'migrateplus-file-pane' }, zone );
+		const urlPane = el( 'div', { class: 'migrateplus-file-pane' }, [
 			urlInput,
-			el( 'p', { class: 'pressport-field-help', text: 'Your server downloads the file (up to ' + D.maxRemote + '). Google Sheets, Google Drive, Dropbox and GitHub share links work too, as long as they are shared publicly.' } ),
+			el( 'p', { class: 'migrateplus-field-help', text: 'Your server downloads the file (up to ' + D.maxRemote + '). Google Sheets, Google Drive, Dropbox and GitHub share links work too, as long as they are shared publicly.' } ),
 		] );
 
 		const tabs = {};
@@ -1263,11 +1344,11 @@
 				( isUrl ? urlInput : upload ).focus();
 			}
 		};
-		tabs.url = el( 'button', { type: 'button', class: 'pressport-seg', text: 'From a URL', onclick: () => setMode( 'url', true ) } );
-		tabs.upload = el( 'button', { type: 'button', class: 'pressport-seg', text: 'Upload a file', onclick: () => setMode( 'upload', true ) } );
+		tabs.url = el( 'button', { type: 'button', class: 'migrateplus-seg', text: 'From a URL', onclick: () => setMode( 'url', true ) } );
+		tabs.upload = el( 'button', { type: 'button', class: 'migrateplus-seg', text: 'Upload a file', onclick: () => setMode( 'upload', true ) } );
 
-		const wrap = el( 'div', { class: 'pressport-file-field' }, [
-			el( 'div', { class: 'pressport-segmented', role: 'group', 'aria-label': f.label + ': how to provide it' }, [ tabs.upload, tabs.url ] ),
+		const wrap = el( 'div', { class: 'migrateplus-file-field' }, [
+			el( 'div', { class: 'migrateplus-segmented', role: 'group', 'aria-label': f.label + ': how to provide it' }, [ tabs.upload, tabs.url ] ),
 			uploadPane,
 			urlPane,
 		] );
@@ -1302,7 +1383,7 @@
 		if ( submit ) {
 			submit.disabled = true;
 		}
-		const oldNotice = root.querySelector( '.pressport-notice.notice-error' );
+		const oldNotice = root.querySelector( '.migrateplus-notice.notice-error' );
 		if ( oldNotice ) {
 			oldNotice.remove();
 		}
@@ -1316,7 +1397,7 @@
 	}
 
 	/**
-	 * Send a source to the server and read its first records. A PressPort export goes
+	 * Send a source to the server and read its first records. A MigratePlus export goes
 	 * straight to the import confirmation; anything else opens the mapping step.
 	 *
 	 * ctx: { upload: File, remote: url, connectTo: host, label, onError( err ) }
@@ -1357,6 +1438,8 @@
 			state.options = Object.assign( {}, D.defaults, data.job.options );
 			state.suggested = {};
 			state.busy = false;
+			state.savedPick = data.savedMapping || '';
+			state.savedNotice = data.savedMapping ? { type: 'info', text: 'This file has the same fields as the saved mapping “' + data.savedMapping + '”, so it is selected below. Choose Apply to use it, or map the fields yourself.' } : null;
 			if ( isExport( data.job ) ) {
 				state.direct = true;
 				render();
@@ -1397,9 +1480,9 @@
 		const source = D.sources.find( ( s ) => s.id === job.source ) || D.sources.find( ( s ) => s.id === state.sourceId ) || { id: job.source, label: job.source };
 		const total = job.total === null || job.total === undefined ? null : Number( job.total );
 
-		root.appendChild( el( 'section', { class: 'pressport-summary' }, [
-			el( 'span', { class: 'pressport-source-icon pressport-icon-' + source.id, 'aria-hidden': 'true' } ),
-			el( 'div', { class: 'pressport-summary-text' }, [
+		root.appendChild( el( 'section', { class: 'migrateplus-summary' }, [
+			el( 'span', { class: 'migrateplus-source-icon migrateplus-icon-' + source.id, 'aria-hidden': 'true' } ),
+			el( 'div', { class: 'migrateplus-summary-text' }, [
 				el( 'strong', { text: 'Connected to ' + source.label } ),
 				el( 'span', { text: ( total === null ? 'Unknown number of' : total.toLocaleString() ) + ' records, ' + state.fields.length + ' fields' + ( job.settings.file_url || job.settings.url || job.settings.site_url ? ' from ' + hostOf( job.settings.file_url || job.settings.url || job.settings.site_url ) : '' ) } ),
 			] ),
@@ -1410,42 +1493,183 @@
 			} } ),
 		] ) );
 
+		if ( ! isExport( job ) ) {
+			root.appendChild( renderSavedMappings() );
+		}
+
 		// Preview table.
 		const cols = state.fields.slice( 0, 40 );
 		// No records when a job's cached copy is gone: an empty table would only say "First 0 records".
 		if ( state.records.length ) {
-			root.appendChild( el( 'details', { class: 'pressport-panel pressport-preview-panel', open: true }, [
+			root.appendChild( el( 'details', { class: 'migrateplus-panel migrateplus-preview-panel', open: true }, [
 				el( 'summary', {}, [
 					el( 'h2', { text: 'Preview' } ),
-					el( 'span', { class: 'pressport-muted', text: 'First ' + state.records.length + ' records' + ( state.fields.length > cols.length ? ', ' + cols.length + ' of ' + state.fields.length + ' fields shown' : '' ) } ),
+					el( 'span', { class: 'migrateplus-muted', text: 'First ' + state.records.length + ' records' + ( state.fields.length > cols.length ? ', ' + cols.length + ' of ' + state.fields.length + ' fields shown' : '' ) } ),
 				] ),
-				el( 'div', { class: 'pressport-preview-scroll', tabindex: 0, 'aria-label': 'Preview records' }, el( 'table', { class: 'pressport-preview' }, [
+				el( 'div', { class: 'migrateplus-preview-scroll', tabindex: 0, 'aria-label': 'Preview records' }, el( 'table', { class: 'migrateplus-preview' }, [
 					el( 'thead', {}, el( 'tr', {}, cols.map( ( c ) => el( 'th', { scope: 'col', text: c } ) ) ) ),
 					el( 'tbody', {}, state.records.map( ( r ) => el( 'tr', {}, cols.map( ( c ) => el( 'td', { title: r[ c ] || '', text: truncate( r[ c ], 80 ) } ) ) ) ) ),
 				] ) ),
 			] ) );
 		}
 
-		const grid = el( 'div', { class: 'pressport-grid' } );
+		const grid = el( 'div', { class: 'migrateplus-grid' } );
 		grid.appendChild( renderMappingCard() );
 		grid.appendChild( renderOptionsCard() );
 		root.appendChild( grid );
 
 		const mapped = D.targets.filter( ( t ) => state.mapping.fields[ t.key ] ).length;
 		const ready = !! ( state.mapping.fields.post_title || state.mapping.fields.post_content );
-		root.appendChild( el( 'div', { class: 'pressport-actionbar' }, [
-			el( 'span', { class: 'pressport-actionbar-status' + ( ready ? '' : ' is-warn' ), 'aria-live': 'polite', text: ready
+		root.appendChild( el( 'div', { class: 'migrateplus-actionbar' }, [
+			el( 'span', { class: 'migrateplus-actionbar-status' + ( ready ? '' : ' is-warn' ), 'aria-live': 'polite', text: ready
 				? mapped + ' of ' + D.targets.length + ' fields mapped'
 				: 'Map the title or the content to continue' } ),
-			el( 'div', { class: 'pressport-actionbar-buttons' }, [
+			el( 'div', { class: 'migrateplus-actionbar-buttons' }, [
 				el( 'button', { type: 'button', class: 'button', disabled: state.busy, text: 'Dry run', title: 'Process everything without saving, to check the mapping', onclick: () => start( true ) } ),
 				el( 'button', { type: 'button', class: 'button button-primary', disabled: state.busy, text: 'Start import', onclick: () => start( false ) } ),
 			] ),
 		] ) );
 	}
 
+	/**
+	 * Save the mapping and options under a name, or load, rename or delete a saved one.
+	 * Saved mappings are only for JSON that is not a MigratePlus export.
+	 */
+	function renderSavedMappings() {
+		const list = state.savedMappings;
+		const pick = list.find( ( m ) => m.name === state.savedPick ) || null;
+		const say = ( type, text ) => {
+			state.savedNotice = { type, text };
+			render();
+		};
+		const refresh = ( d ) => {
+			state.savedMappings = d.mappings || [];
+			state.savedPick = d.name || '';
+		};
+		const select = el( 'select', { id: 'migrateplus-saved-select', 'aria-label': 'Load saved mapping', disabled: ! list.length, onchange: ( e ) => {
+			state.savedPick = e.target.value;
+			state.savedNotice = null;
+			render();
+		} }, [ el( 'option', { value: '', text: list.length ? 'Choose a saved mapping' : 'No saved mappings yet' } ) ].concat(
+			list.map( ( m ) => el( 'option', { value: m.name, text: m.name, selected: pick && m.name === pick.name } ) )
+		) );
+		const save = () => {
+			const name = ( state.savedName || '' ).trim() || ( pick ? pick.name : '' );
+			if ( ! name ) {
+				say( 'error', 'Give the mapping a name first.' );
+				return;
+			}
+			const send = () => api( 'mapping_save', { job: state.job.id, name, mapping: mappingToSave(), options: state.options } ).then( ( d ) => {
+				refresh( d );
+				state.savedName = '';
+				say( 'success', 'Saved as “' + d.name + '”. A file with the same fields will offer it.' );
+			} ).catch( ( err ) => say( 'error', err.message ) );
+			if ( ! list.some( ( m ) => m.name === name ) ) {
+				send();
+				return;
+			}
+			ask( {
+				title: 'Replace saved mapping?',
+				message: 'Replace the saved mapping “' + name + '” with this one?',
+				label: 'Replace',
+				onConfirm: () => {
+					modal.close();
+					send();
+				},
+			} );
+		};
+		const rename = () => {
+			// eslint-disable-next-line no-alert
+			const name = window.prompt( 'New name for “' + pick.name + '”:', pick.name );
+			if ( ! name || name.trim() === pick.name ) {
+				return;
+			}
+			api( 'mapping_rename', { name: pick.name, new_name: name.trim() } ).then( ( d ) => {
+				refresh( d );
+				say( 'success', 'Renamed to “' + d.name + '”.' );
+			} ).catch( ( err ) => say( 'error', err.message ) );
+		};
+		const remove = () => ask( {
+			title: 'Delete saved mapping?',
+			message: 'Delete the saved mapping “' + pick.name + '”? It is deleted for everyone who imports on this site.',
+			label: 'Delete',
+			danger: true,
+			onConfirm: () => {
+				modal.close();
+				api( 'mapping_delete', { name: pick.name } ).then( ( d ) => {
+					refresh( d );
+					say( 'success', 'Deleted “' + pick.name + '”.' );
+				} ).catch( ( err ) => say( 'error', err.message ) );
+			},
+		} );
+		return el( 'section', { class: 'migrateplus-panel migrateplus-saved' }, [
+			el( 'h2', { text: 'Saved mappings' } ),
+			el( 'p', { class: 'migrateplus-muted', text: 'Save this mapping and the import options to use them again for the next file from the same place. Saved mappings are shared by everyone who imports on this site.' } ),
+			state.savedNotice ? notice( state.savedNotice.type, state.savedNotice.text ) : null,
+			el( 'div', { class: 'migrateplus-saved-row' }, [
+				select,
+				el( 'button', { type: 'button', class: 'button', disabled: ! pick, text: 'Apply', onclick: () => applySavedMapping( pick ) } ),
+				el( 'button', { type: 'button', class: 'button-link', disabled: ! pick, text: 'Rename', onclick: rename } ),
+				el( 'button', { type: 'button', class: 'migrateplus-link-danger', disabled: ! pick, text: 'Delete', onclick: remove } ),
+			] ),
+			el( 'div', { class: 'migrateplus-saved-row' }, [
+				el( 'input', { type: 'text', id: 'migrateplus-saved-name', 'aria-label': 'Name for this mapping', placeholder: pick ? pick.name : 'Name, for example Books feed', value: state.savedName, maxlength: 100, oninput: ( e ) => {
+					state.savedName = e.target.value;
+				} } ),
+				el( 'button', { type: 'button', class: 'button', text: 'Save mapping', onclick: save } ),
+			] ),
+		] );
+	}
+
+	/**
+	 * Use a saved mapping and its import options. Source fields this file does not
+	 * have are left unmapped, and the notice lists them.
+	 */
+	function applySavedMapping( entry ) {
+		const have = new Set( state.fields.concat( nestedFields() ) );
+		const dropped = new Set();
+		const keep = ( source ) => {
+			if ( have.has( source ) ) {
+				return true;
+			}
+			dropped.add( source );
+			return false;
+		};
+		const m = normalizeMapping( entry.mapping );
+		Object.keys( m.fields ).forEach( ( k ) => {
+			if ( ! keep( m.fields[ k ] ) ) {
+				delete m.fields[ k ];
+			}
+		} );
+		m.meta = m.meta.filter( ( row ) => keep( row.source ) );
+		m.taxonomies = m.taxonomies.filter( ( row ) => keep( row.source ) );
+		Object.keys( m.acf ).forEach( ( k ) => {
+			if ( ! keep( m.acf[ k ] ) ) {
+				delete m.acf[ k ];
+			}
+		} );
+		const options = Object.assign( {}, entry.options );
+		const missingType = options.post_type && ! D.postTypes.some( ( p ) => p.name === options.post_type ) ? options.post_type : '';
+		if ( missingType ) {
+			delete options.post_type;
+		}
+		state.mapping = m;
+		state.options = Object.assign( {}, state.options, options );
+		// Suggestions would add fields to a mapping chosen on purpose.
+		state.suggested = { [ state.options.post_type ]: true };
+		const notes = [ 'Applied “' + entry.name + '”.' ];
+		if ( dropped.size ) {
+			notes.push( 'Not in this file, so left unmapped: ' + Array.from( dropped ).join( ', ' ) + '.' );
+		}
+		if ( missingType ) {
+			notes.push( 'Its post type “' + missingType + '” does not exist on this site; “Import as” was left as it was.' );
+		}
+		state.savedNotice = { type: dropped.size || missingType ? 'warning' : 'success', text: notes.join( ' ' ) };
+		render();
+	}
+
 	function updateActionbar() {
-		const status = root.querySelector( '.pressport-actionbar-status' );
+		const status = root.querySelector( '.migrateplus-actionbar-status' );
 		if ( ! status ) {
 			return;
 		}
@@ -1458,11 +1682,11 @@
 	function renderMappingCard() {
 		const m = state.mapping;
 		const rows = D.targets.map( ( t ) => {
-			const sampleCell = el( 'td', { class: 'pressport-sample', text: truncate( sample( m.fields[ t.key ] ), 120 ) } );
+			const sampleCell = el( 'td', { class: 'migrateplus-sample', text: truncate( sample( m.fields[ t.key ] ), 120 ) } );
 			const row = el( 'tr', { class: m.fields[ t.key ] ? 'is-mapped' : '' } );
 			[
-				el( 'th', { scope: 'row' }, [ el( 'span', { text: t.label } ), t.help ? el( 'span', { class: 'pressport-help', text: t.help } ) : null ] ),
-				el( 'td', { class: 'pressport-arrow', 'aria-hidden': 'true', text: '←' } ),
+				el( 'th', { scope: 'row' }, [ el( 'span', { text: t.label } ), t.help ? el( 'span', { class: 'migrateplus-help', text: t.help } ) : null ] ),
+				el( 'td', { class: 'migrateplus-arrow', 'aria-hidden': 'true', text: '←' } ),
 				el( 'td', {}, fieldSelect( m.fields[ t.key ] || '', ( v ) => {
 					if ( v ) {
 						m.fields[ t.key ] = v;
@@ -1472,65 +1696,65 @@
 					row.classList.toggle( 'is-mapped', !! v );
 					sampleCell.textContent = truncate( sample( v ), 120 );
 					updateActionbar();
-				} ) ),
+				}, { nested: t.key === 'comments' } ) ),
 				sampleCell,
 			].forEach( ( c ) => row.appendChild( c ) );
 			return row;
 		} );
 
-		const metaRows = m.meta.map( ( row, i ) => el( 'div', { class: 'pressport-pair' }, [
+		const metaRows = m.meta.map( ( row, i ) => el( 'div', { class: 'migrateplus-pair' }, [
 			el( 'input', { type: 'text', class: 'code', placeholder: 'meta_key', 'aria-label': 'Custom field name', value: row.key || '', oninput: ( e ) => {
 				row.key = e.target.value;
 			} } ),
-			el( 'span', { class: 'pressport-arrow', 'aria-hidden': 'true', text: '←' } ),
+			el( 'span', { class: 'migrateplus-arrow', 'aria-hidden': 'true', text: '←' } ),
 			fieldSelect( row.source, ( v ) => {
 				row.source = v;
 			} ),
-			el( 'button', { type: 'button', class: 'pressport-icon-btn', 'aria-label': 'Remove custom field', title: 'Remove', text: '×', onclick: () => {
+			el( 'button', { type: 'button', class: 'migrateplus-icon-btn', 'aria-label': 'Remove custom field', title: 'Remove', text: '×', onclick: () => {
 				m.meta.splice( i, 1 );
 				render();
 			} } ),
 		] ) );
 
 		const taxes = postType( state.options.post_type ).taxonomies.filter( ( t ) => t.name !== 'category' && t.name !== 'post_tag' );
-		const taxRows = m.taxonomies.map( ( row, i ) => el( 'div', { class: 'pressport-pair' }, [
+		const taxRows = m.taxonomies.map( ( row, i ) => el( 'div', { class: 'migrateplus-pair' }, [
 			el( 'select', { 'aria-label': 'Taxonomy', onchange: ( e ) => {
 				row.taxonomy = e.target.value;
 			} }, [ el( 'option', { value: '', text: 'Choose taxonomy' } ) ].concat( taxes.map( ( t ) => el( 'option', { value: t.name, text: t.label + ' (' + t.name + ')', selected: t.name === row.taxonomy } ) ) ) ),
-			el( 'span', { class: 'pressport-arrow', 'aria-hidden': 'true', text: '←' } ),
+			el( 'span', { class: 'migrateplus-arrow', 'aria-hidden': 'true', text: '←' } ),
 			fieldSelect( row.source, ( v ) => {
 				row.source = v;
 			} ),
-			el( 'button', { type: 'button', class: 'pressport-icon-btn', 'aria-label': 'Remove taxonomy', title: 'Remove', text: '×', onclick: () => {
+			el( 'button', { type: 'button', class: 'migrateplus-icon-btn', 'aria-label': 'Remove taxonomy', title: 'Remove', text: '×', onclick: () => {
 				m.taxonomies.splice( i, 1 );
 				render();
 			} } ),
 		] ) );
 
-		return el( 'section', { class: 'pressport-panel pressport-mapping' }, [
-			el( 'header', { class: 'pressport-section-head' }, [
+		return el( 'section', { class: 'migrateplus-panel migrateplus-mapping' }, [
+			el( 'header', { class: 'migrateplus-section-head' }, [
 				el( 'h2', { text: 'Field mapping' } ),
-				el( 'p', { class: 'pressport-muted', text: 'Pick which source field fills each WordPress field. Suggestions are already filled in.' } ),
+				el( 'p', { class: 'migrateplus-muted', text: 'Pick which source field fills each WordPress field. Suggestions are already filled in.' } ),
 			] ),
-			el( 'table', { class: 'pressport-map-table' }, [
+			el( 'table', { class: 'migrateplus-map-table' }, [
 				el( 'thead', {}, el( 'tr', {}, [ el( 'th', { scope: 'col', text: 'WordPress field' } ), el( 'th', { 'aria-hidden': 'true' } ), el( 'th', { scope: 'col', text: 'Source field' } ), el( 'th', { scope: 'col', text: 'Sample value' } ) ] ) ),
 				el( 'tbody', {}, rows ),
 			] ),
 			renderAcfSection(),
-			el( 'div', { class: 'pressport-subsection' }, [
+			el( 'div', { class: 'migrateplus-subsection' }, [
 				el( 'h3', { text: 'Custom fields' } ),
-				m.meta.length ? el( 'div', { class: 'pressport-pairs' }, metaRows ) : el( 'p', { class: 'pressport-muted', text: 'Save any source field as post meta. ACF field names work too.' } ),
-				el( 'button', { type: 'button', class: 'button pressport-add', text: 'Add custom field', onclick: () => {
+				m.meta.length ? el( 'div', { class: 'migrateplus-pairs' }, metaRows ) : el( 'p', { class: 'migrateplus-muted', text: 'Save any source field as post meta. ACF field names work too.' } ),
+				el( 'button', { type: 'button', class: 'button migrateplus-add', text: 'Add custom field', onclick: () => {
 					m.meta.push( { key: '', source: '' } );
 					render();
 				} } ),
 			] ),
-			el( 'div', { class: 'pressport-subsection' }, [
+			el( 'div', { class: 'migrateplus-subsection' }, [
 				el( 'h3', { text: 'Other taxonomies' } ),
 				taxes.length
-					? ( m.taxonomies.length ? el( 'div', { class: 'pressport-pairs' }, taxRows ) : el( 'p', { class: 'pressport-muted', text: 'Assign terms in custom taxonomies registered for this post type.' } ) )
-					: el( 'p', { class: 'pressport-muted', text: 'This post type has no other taxonomies.' } ),
-				taxes.length ? el( 'button', { type: 'button', class: 'button pressport-add', text: 'Add taxonomy', onclick: () => {
+					? ( m.taxonomies.length ? el( 'div', { class: 'migrateplus-pairs' }, taxRows ) : el( 'p', { class: 'migrateplus-muted', text: 'Assign terms in custom taxonomies registered for this post type.' } ) )
+					: el( 'p', { class: 'migrateplus-muted', text: 'This post type has no other taxonomies.' } ),
+				taxes.length ? el( 'button', { type: 'button', class: 'button migrateplus-add', text: 'Add taxonomy', onclick: () => {
 					m.taxonomies.push( { taxonomy: '', source: '' } );
 					render();
 				} } ) : null,
@@ -1572,14 +1796,14 @@
 		const pt = state.options.post_type;
 		const fields = acfFields( pt );
 		const m = state.mapping;
-		const head = el( 'div', { class: 'pressport-acf-head' }, [
+		const head = el( 'div', { class: 'migrateplus-acf-head' }, [
 			el( 'h3', { text: 'ACF fields' } ),
-			el( 'span', { class: 'pressport-badge', text: fields.length + ' field' + ( fields.length === 1 ? '' : 's' ) } ),
+			el( 'span', { class: 'migrateplus-badge', text: fields.length + ' field' + ( fields.length === 1 ? '' : 's' ) } ),
 		] );
 		if ( ! fields.length ) {
-			return el( 'div', { class: 'pressport-subsection pressport-acf' }, [
+			return el( 'div', { class: 'migrateplus-subsection migrateplus-acf' }, [
 				head,
-				el( 'p', { class: 'pressport-muted', text: 'No ACF field groups are assigned to this post type. Assign one in ACF, or pick another post type under "Import as".' } ),
+				el( 'p', { class: 'migrateplus-muted', text: 'No ACF field groups are assigned to this post type. Assign one in ACF, or pick another post type under "Import as".' } ),
 			] );
 		}
 		const groups = {};
@@ -1588,21 +1812,21 @@
 		} );
 		const body = [];
 		Object.entries( groups ).forEach( ( [ group, list ] ) => {
-			body.push( el( 'tr', { class: 'pressport-acf-group' }, el( 'th', { colspan: 4, scope: 'colgroup', text: group } ) ) );
+			body.push( el( 'tr', { class: 'migrateplus-acf-group' }, el( 'th', { colspan: 4, scope: 'colgroup', text: group } ) ) );
 			list.forEach( ( f ) => {
 				const current = m.acf[ f.key ] || m.acf[ f.name ] || '';
-				const sampleCell = el( 'td', { class: 'pressport-sample', text: truncate( sample( current ), 120 ) } );
+				const sampleCell = el( 'td', { class: 'migrateplus-sample', text: truncate( sample( current ), 120 ) } );
 				const row = el( 'tr', { class: current ? 'is-mapped' : '' } );
 				[
 					el( 'th', { scope: 'row' }, [
 						el( 'span', { text: f.label + ( f.required ? ' *' : '' ) } ),
-						el( 'span', { class: 'pressport-help' }, [
+						el( 'span', { class: 'migrateplus-help' }, [
 							el( 'code', { text: f.name } ),
 							' ' + ( ACF_TYPE_LABELS[ f.type ] || f.type ),
 							f.sub && f.sub.length ? ' (' + f.sub.join( ', ' ) + ')' : '',
 						] ),
 					] ),
-					el( 'td', { class: 'pressport-arrow', 'aria-hidden': 'true', text: '←' } ),
+					el( 'td', { class: 'migrateplus-arrow', 'aria-hidden': 'true', text: '←' } ),
 					el( 'td', {}, [
 						fieldSelect( current, ( v ) => {
 							delete m.acf[ f.name ];
@@ -1614,17 +1838,17 @@
 							row.classList.toggle( 'is-mapped', !! v );
 							sampleCell.textContent = truncate( sample( v ), 120 );
 						}, { nested: true, label: f.label } ),
-						ACF_HINTS[ f.type ] ? el( 'span', { class: 'pressport-help', text: ACF_HINTS[ f.type ] } ) : null,
+						ACF_HINTS[ f.type ] ? el( 'span', { class: 'migrateplus-help', text: ACF_HINTS[ f.type ] } ) : null,
 					] ),
 					sampleCell,
 				].forEach( ( c ) => row.appendChild( c ) );
 				body.push( row );
 			} );
 		} );
-		return el( 'div', { class: 'pressport-subsection pressport-acf' }, [
+		return el( 'div', { class: 'migrateplus-subsection migrateplus-acf' }, [
 			head,
-			el( 'p', { class: 'pressport-muted', text: 'Values are converted for each field type: image URLs are downloaded, related posts and terms are looked up, dates and choices are normalised.' } ),
-			el( 'table', { class: 'pressport-map-table' }, el( 'tbody', {}, body ) ),
+			el( 'p', { class: 'migrateplus-muted', text: 'Values are converted for each field type: image URLs are downloaded, related posts and terms are looked up, dates and choices are normalised.' } ),
+			el( 'table', { class: 'migrateplus-map-table' }, el( 'tbody', {}, body ) ),
 		] );
 	}
 
@@ -1635,45 +1859,49 @@
 		};
 		let uid = 0;
 		const toggle = ( k, label, help ) => {
-			const id = 'pressport-opt-' + k;
-			return el( 'div', { class: 'pressport-toggle' }, [
-				el( 'input', { type: 'checkbox', role: 'switch', id, class: 'pressport-switch', checked: !! Number( o[ k ] ), onchange: set( k ) } ),
-				el( 'label', { for: id }, [ el( 'span', { text: label } ), help ? el( 'span', { class: 'pressport-help', text: help } ) : null ] ),
+			const id = 'migrateplus-opt-' + k;
+			return el( 'div', { class: 'migrateplus-toggle' }, [
+				el( 'input', { type: 'checkbox', role: 'switch', id, class: 'migrateplus-switch', checked: !! Number( o[ k ] ), onchange: set( k ) } ),
+				el( 'label', { for: id }, [ el( 'span', { text: label } ), help ? el( 'span', { class: 'migrateplus-help', text: help } ) : null ] ),
 			] );
 		};
 		const row = ( label, control, help ) => {
-			const id = 'pressport-opt-row-' + ( ++uid );
+			const id = 'migrateplus-opt-row-' + ( ++uid );
 			control.id = id;
-			return el( 'div', { class: 'pressport-opt' }, [
-				el( 'label', { class: 'pressport-opt-label', for: id, text: label } ),
+			return el( 'div', { class: 'migrateplus-opt' }, [
+				el( 'label', { class: 'migrateplus-opt-label', for: id, text: label } ),
 				control,
-				help ? el( 'span', { class: 'pressport-help', text: help } ) : null,
+				help ? el( 'span', { class: 'migrateplus-help', text: help } ) : null,
 			] );
 		};
 
-		return el( 'aside', { class: 'pressport-panel pressport-options' }, [
-			el( 'header', { class: 'pressport-section-head' }, [
+		return el( 'aside', { class: 'migrateplus-panel migrateplus-options' }, [
+			el( 'header', { class: 'migrateplus-section-head' }, [
 				el( 'h2', { text: 'Import options' } ),
-				D.settingsUrl ? el( 'p', { class: 'pressport-muted' }, [ 'Defaults come from ', el( 'a', { href: D.settingsUrl, text: 'Settings' } ), '.' ] ) : null,
+				D.settingsUrl ? el( 'p', { class: 'migrateplus-muted' }, [ 'Defaults come from ', el( 'a', { href: D.settingsUrl, text: 'Settings' } ), '.' ] ) : null,
 			] ),
 			row( 'Import as', el( 'select', { onchange: ( e ) => {
 				o.post_type = e.target.value;
 				render();
 			} }, D.postTypes.map( ( p ) => el( 'option', { value: p.name, text: p.label + ' (' + p.name + ')', selected: p.name === o.post_type } ) ) ), 'Used for every record, unless "Post type" is mapped and names a type this site has.' ),
 			row( 'Default status', el( 'select', { onchange: set( 'default_status' ) }, [ [ 'publish', 'Published' ], [ 'draft', 'Draft' ], [ 'pending', 'Pending review' ], [ 'private', 'Private' ] ].map( ( [ v, l ] ) =>
-				el( 'option', { value: v, text: l, selected: v === o.default_status } ) ) ), 'Used when a record has no status, or one PressPort does not recognise.' ),
+				el( 'option', { value: v, text: l, selected: v === o.default_status } ) ) ), 'Used when a record has no status, or one MigratePlus does not recognise.' ),
+			row( 'Status for every item', el( 'select', { onchange: set( 'force_status' ) }, [ [ '', 'Keep each record’s status' ], [ 'publish', 'Published' ], [ 'draft', 'Draft' ], [ 'pending', 'Pending review' ], [ 'private', 'Private' ] ].map( ( [ v, l ] ) =>
+				el( 'option', { value: v, text: l, selected: v === ( o.force_status || '' ) } ) ) ), 'Overrides the status in the file, also for posts that are updated. Published posts with a future date are scheduled.' ),
 			row( 'Default author', el( 'select', { onchange: set( 'default_author' ) }, D.users.map( ( u ) =>
 				el( 'option', { value: u.id, text: u.name, selected: Number( u.id ) === Number( o.default_author ) } ) ) ) ),
 			row( 'Records imported before', el( 'select', { onchange: set( 'duplicate' ) }, [
 				[ 'skip', 'Skip them' ], [ 'update', 'Update them' ], [ 'create', 'Create duplicates' ],
 			].map( ( [ v, l ] ) => el( 'option', { value: v, text: l, selected: v === o.duplicate } ) ) ), 'Matched by the mapped Source ID.' ),
 			row( 'Batch size', el( 'input', { type: 'number', min: 1, max: 100, value: o.batch_size, onchange: set( 'batch_size' ) } ), 'Records per request. Lower it if image downloads time out.' ),
-			el( 'div', { class: 'pressport-toggles' }, [
+			el( 'div', { class: 'migrateplus-toggles' }, [
 				toggle( 'import_featured_image', 'Download featured images' ),
 				toggle( 'import_content_images', 'Download images in content', 'Copies <img> files into the Media Library and rewrites their URLs.' ),
 				toggle( 'create_terms', 'Create missing categories and terms' ),
 				toggle( 'create_authors', 'Create missing authors', 'New users get the Author role and a random password.' ),
-				toggle( 'rewrite_links', 'Point links to the old site here', 'PressPort exports only. Files in wp-content keep their old URLs unless images in content are downloaded.' ),
+				toggle( 'rewrite_links', 'Point links to the old site here', 'MigratePlus exports only. Files in wp-content keep their old URLs unless images in content are downloaded.' ),
+				toggle( 'import_comments', 'Import comments', 'MigratePlus exports that include comments. Importing the file again updates them instead of adding them twice.' ),
+				toggle( 'import_menus', 'Import menus', 'MigratePlus exports that include menus, after all posts. A menu with the same slug is filled rather than copied.' ),
 			] ),
 		] );
 	}
@@ -1684,6 +1912,15 @@
 	 */
 	function start( dry, checked ) {
 		state.options.dry_run = dry ? 1 : 0;
+		if ( dry ) {
+			// A real run asks what to do with records already on this site. A dry run
+			// can't ask, so it takes the default answer (skip them); otherwise its
+			// counts would call every duplicate "created".
+			state.options.skip_existing = 1;
+			state.options.update_ids = [];
+			state.options.replace_ids = [];
+			state.options.copy_ids = [];
+		}
 		if ( ! dry && ! checked ) {
 			state.options.skip_existing = 0;
 			modal.open( { kind: 'confirm', title: 'Checking for duplicates', message: 'Looking for items in this import that are already on this site…', percent: null, actions: [] } );
@@ -1778,7 +2015,7 @@
 			statusText = ( dry ? 'Dry run in progress' : 'Importing' ) + '. Keep this tab open.';
 		}
 
-		const actions = el( 'div', { class: 'pressport-actions' } );
+		const actions = el( 'div', { class: 'migrateplus-actions' } );
 		if ( ! done && 'draft' !== job.status ) {
 			actions.appendChild( state.paused
 				? el( 'button', { type: 'button', class: 'button button-primary', text: 'Resume', disabled: state.running, onclick: resume } )
@@ -1794,22 +2031,23 @@
 					render();
 				} } ) );
 			} else if ( job.status === 'complete' ) {
-				actions.appendChild( el( 'a', { class: 'button button-primary', href: D.adminUrl + 'edit.php?post_type=' + encodeURIComponent( job.options.post_type ), text: 'View imported content' } ) );
+				actions.appendChild( el( 'a', { class: 'button button-primary', href: contentUrl( job ), text: 'View imported content' } ) );
 			}
 			actions.appendChild( el( 'button', { type: 'button', class: 'button', text: 'Import', onclick: reset } ) );
 			if ( ! dry && job.status === 'complete' && importedCount( job ) > 0 ) {
-				actions.appendChild( el( 'button', { type: 'button', class: 'button pressport-danger pressport-push', text: 'Roll back this import', onclick: () => rollback( job.id ) } ) );
+				actions.appendChild( el( 'button', { type: 'button', class: 'button migrateplus-danger migrateplus-push', text: 'Roll back this import', onclick: () => rollback( job.id ) } ) );
 			}
 		}
 
-		root.appendChild( el( 'section', { class: 'pressport-panel pressport-run' + ( tone ? ' is-' + tone : '' ) }, [
-			el( 'div', { class: 'pressport-run-head' }, [
-				el( 'div', { class: 'pressport-run-figure', 'aria-hidden': 'true' }, pct === null
-					? el( 'span', { class: 'pressport-run-count', text: processed.toLocaleString() } )
-					: [ el( 'span', { class: 'pressport-run-count', text: String( pct ) } ), el( 'span', { class: 'pressport-run-unit', text: '%' } ) ] ),
-				el( 'div', { class: 'pressport-run-text' }, [
+		root.appendChild( el( 'section', { class: 'migrateplus-panel migrateplus-run' + ( tone ? ' is-' + tone : '' ) }, [
+			el( 'div', { class: 'migrateplus-run-head' }, [
+				el( 'div', { class: 'migrateplus-run-figure', 'aria-hidden': 'true' }, pct === null
+					? el( 'span', { class: 'migrateplus-run-count', text: processed.toLocaleString() } )
+					: [ el( 'span', { class: 'migrateplus-run-count', text: String( pct ) } ), el( 'span', { class: 'migrateplus-run-unit', text: '%' } ) ] ),
+				el( 'div', { class: 'migrateplus-run-text' }, [
 					el( 'h2', { 'aria-live': 'polite', text: statusText } ),
-					el( 'p', { class: 'pressport-muted', text: processed.toLocaleString() + ( total ? ' of ' + total.toLocaleString() : '' ) + ' records processed' + ( dry ? ' (dry run)' : '' ) } ),
+					el( 'p', { class: 'migrateplus-muted', text: processed.toLocaleString() + ( total ? ' of ' + total.toLocaleString() : '' ) + ' records processed' + ( dry ? ' (dry run)' : '' ) } ),
+					sectionsText( job ) ? el( 'p', { class: 'migrateplus-muted', text: sectionsText( job ) } ) : null,
 				] ),
 			] ),
 			outcomeBar( s, total, { size: 'lg', indeterminate: ! done && ! total && ! state.paused, tone, label: 'Import progress' } ),
@@ -1825,24 +2063,24 @@
 				counts[ e.l ]++;
 			}
 		} );
-		const list = el( 'ol', { class: 'pressport-log' } );
+		const list = el( 'ol', { class: 'migrateplus-log' } );
 		const fillLog = () => {
 			list.innerHTML = '';
 			const q = state.logQuery.trim().toLowerCase();
 			const entries = ( job.log || [] ).slice().reverse().filter( ( e ) =>
 				( state.logFilter === 'all' || e.l === state.logFilter ) && ( ! q || String( e.m ).toLowerCase().includes( q ) )
 			);
-			entries.forEach( ( e ) => list.appendChild( el( 'li', { class: 'pressport-log-' + e.l }, [
+			entries.forEach( ( e ) => list.appendChild( el( 'li', { class: 'migrateplus-log-' + e.l }, [
 				el( 'time', { datetime: new Date( e.t * 1000 ).toISOString(), text: new Date( e.t * 1000 ).toLocaleTimeString() } ),
 				el( 'span', { text: e.m } ),
 			] ) ) );
 			if ( ! entries.length ) {
-				list.appendChild( el( 'li', { class: 'pressport-log-empty', text: counts.all ? 'No log lines match.' : 'Waiting for the first batch…' } ) );
+				list.appendChild( el( 'li', { class: 'migrateplus-log-empty', text: counts.all ? 'No log lines match.' : 'Waiting for the first batch…' } ) );
 			}
 		};
 		const chip = ( key, label ) => el( 'button', {
 			type: 'button',
-			class: 'pressport-chip' + ( state.logFilter === key ? ' is-active' : '' ),
+			class: 'migrateplus-chip' + ( state.logFilter === key ? ' is-active' : '' ),
 			'aria-pressed': state.logFilter === key ? 'true' : 'false',
 			onclick: ( e ) => {
 				state.logFilter = key;
@@ -1852,16 +2090,16 @@
 				} );
 				fillLog();
 			},
-		}, [ label, el( 'span', { class: 'pressport-chip-count', text: String( counts[ key === 'all' ? 'all' : key ] || 0 ) } ) ] );
+		}, [ label, el( 'span', { class: 'migrateplus-chip-count', text: String( counts[ key === 'all' ? 'all' : key ] || 0 ) } ) ] );
 
 		fillLog();
-		root.appendChild( el( 'section', { class: 'pressport-panel pressport-log-panel' }, [
-			el( 'header', { class: 'pressport-log-head' }, [
+		root.appendChild( el( 'section', { class: 'migrateplus-panel migrateplus-log-panel' }, [
+			el( 'header', { class: 'migrateplus-log-head' }, [
 				el( 'h2', { text: 'Log' } ),
-				el( 'div', { class: 'pressport-chips', role: 'group', 'aria-label': 'Filter log' }, [
+				el( 'div', { class: 'migrateplus-chips', role: 'group', 'aria-label': 'Filter log' }, [
 					chip( 'all', 'All' ), chip( 'success', 'Saved' ), chip( 'warning', 'Warnings' ), chip( 'error', 'Errors' ),
 				] ),
-				el( 'input', { type: 'search', id: 'pressport-log-search', class: 'pressport-search', placeholder: 'Search the log', 'aria-label': 'Search the log', value: state.logQuery, oninput: ( e ) => {
+				el( 'input', { type: 'search', id: 'migrateplus-log-search', class: 'migrateplus-search', placeholder: 'Search the log', 'aria-label': 'Search the log', value: state.logQuery, oninput: ( e ) => {
 					state.logQuery = e.target.value;
 					fillLog();
 				} } ),
@@ -1872,6 +2110,12 @@
 		if ( modal.kind() === 'run' ) {
 			modal.update( runModalOptions() );
 		}
+	}
+
+	/** Where the imported content is listed: the menus screen for an export of menus alone. */
+	function contentUrl( job ) {
+		const menusOnly = ! Number( job.total ) && ( job.sections || [] ).some( ( x ) => 'nav_menu' === x.type );
+		return D.adminUrl + ( menusOnly ? 'nav-menus.php' : 'edit.php?post_type=' + encodeURIComponent( job.options.post_type ) );
 	}
 
 	function pause() {
@@ -1950,7 +2194,7 @@
 					{ label: 'Close', onClick: () => modal.close() },
 				]
 				: [
-					{ label: 'View imported content', primary: true, href: D.adminUrl + 'edit.php?post_type=' + encodeURIComponent( job.options.post_type ) },
+					{ label: 'View imported content', primary: true, href: contentUrl( job ) },
 					{ label: 'Close', onClick: () => {
 						modal.close();
 						render();
@@ -1980,7 +2224,9 @@
 			];
 		} else {
 			title = ( dry ? 'Dry run in progress' : 'Importing content' ) + '…';
-			message = 'Keep this tab open. Records are processed in batches of ' + job.options.batch_size + '.';
+			const part = currentSection( job );
+			message = ( part ? 'Now: ' + part.label.toLowerCase() + ', ' + Number( part.done ).toLocaleString() + ' of ' + Number( part.total ).toLocaleString() + '. ' + sectionsText( job ) + '. ' : '' ) +
+				'Keep this tab open. Records are processed in batches of ' + job.options.batch_size + '.';
 			const last = ( job.log || [] )[ ( job.log || [] ).length - 1 ];
 			note = last ? truncate( last.m, 140 ) : 'Waiting for the first batch…';
 			actions = [
@@ -2057,6 +2303,8 @@
 		state.error = '';
 		state.paused = false;
 		state.direct = false;
+		state.savedPick = '';
+		state.savedNotice = null;
 		if ( state.tab !== 'new' ) {
 			window.location.href = D.importUrl;
 			return;
@@ -2066,12 +2314,18 @@
 
 	/** Posts the job created over all its runs (stats only cover the last; jobs saved before created_total fall back to them). */
 	function importedCount( job ) {
-		return Number( job.created_total ) || Number( job.stats.created ) || 0;
+		return ( Number( job.created_total ) || Number( job.stats.created ) || 0 ) + ( Number( job.comments_total ) || 0 );
 	}
 
-	function rollback( jobId ) {
-		// eslint-disable-next-line no-alert
-		if ( ! window.confirm( 'Permanently delete every post and media file created by this import? Posts that were only updated are kept.' ) ) {
+	function rollback( jobId, confirmed ) {
+		if ( ! confirmed ) {
+			ask( {
+				title: 'Roll back this import?',
+				message: 'Permanently delete every post, media file, comment and menu created by this import? Posts that were only updated are kept, without the comments it added to them.',
+				label: 'Roll back',
+				danger: true,
+				onConfirm: () => rollback( jobId, true ),
+			} );
 			return;
 		}
 		let total = 0;
@@ -2151,19 +2405,26 @@
 	const EXPORT_STATUSES = [ [ 'publish', 'Published' ], [ 'draft', 'Draft' ], [ 'pending', 'Pending review' ], [ 'private', 'Private' ], [ 'future', 'Scheduled' ] ];
 
 	function renderExport() {
-		const x = state.exportArgs = state.exportArgs || Object.assign( {}, D.exportDefaults, { statuses: ( D.exportDefaults.statuses || [ 'publish' ] ).slice() } );
-		const countEl = el( 'span', { class: 'pressport-export-count', 'aria-live': 'polite', text: 'Counting…' } );
-		const submit = el( 'button', { type: 'submit', class: 'button button-primary pressport-btn-lg', text: 'Export' } );
+		const x = state.exportArgs = state.exportArgs || Object.assign( {}, D.exportDefaults, {
+			statuses: ( D.exportDefaults.statuses || [ 'publish' ] ).slice(),
+			post_types: ( D.exportDefaults.post_types || [ 'post' ] ).slice(),
+		} );
+		const countEl = el( 'span', { class: 'migrateplus-export-count', 'aria-live': 'polite', text: 'Counting…' } );
+		const submit = el( 'button', { type: 'submit', class: 'button button-primary migrateplus-btn-lg', text: 'Export' } );
 		let timer = null;
 		const recount = () => {
 			clearTimeout( timer );
 			countEl.textContent = 'Counting…';
 			timer = setTimeout( () => {
-				const pt = postType( x.post_type );
 				api( 'export_count', { args: x } ).then( ( d ) => {
-					countEl.textContent = d.count.toLocaleString() + ' ' + ( d.count === 1 ? pt.label.toLowerCase() : 'items' ) + ' will be exported';
+					const counts = Object.entries( d.counts || {} );
+					const each = counts.length > 1 ? ' (' + counts.map( ( [ type, n ] ) => n.toLocaleString() + ' ' + ( 1 === n ? postType( type ).label : postType( type ).plural || postType( type ).label ).toLowerCase() ).join( ', ' ) + ')' : '';
+					const menus = d.menus ? ', with ' + d.menus + ( 1 === d.menus ? ' menu' : ' menus' ) : '';
+					countEl.textContent = ! d.count && d.menus
+						? 'No content matches: only ' + d.menus + ( 1 === d.menus ? ' menu' : ' menus' ) + ' will be exported'
+						: d.count.toLocaleString() + ' ' + ( d.count === 1 && 1 === counts.length ? postType( counts[ 0 ][ 0 ] ).label.toLowerCase() : 'items' ) + each + menus + ' will be exported';
 					countEl.classList.toggle( 'is-warn', ! d.count );
-					submit.disabled = ! d.count;
+					submit.disabled = ! d.count && ! d.menus; // Menus alone are worth a file.
 				} ).catch( ( e ) => {
 					countEl.textContent = e.message;
 					countEl.classList.add( 'is-warn' );
@@ -2175,34 +2436,48 @@
 			recount();
 		};
 		const toggle = ( k, label, help, disabled ) => {
-			const id = 'pressport-export-' + k;
-			return el( 'div', { class: 'pressport-toggle' + ( disabled ? ' is-disabled' : '' ) }, [
-				el( 'input', { type: 'checkbox', role: 'switch', id, class: 'pressport-switch', disabled, checked: ! disabled && !! Number( x[ k ] ), onchange: ( e ) => set( k, e.target.checked ? 1 : 0 ) } ),
-				el( 'label', { for: id }, [ el( 'span', { text: label } ), help ? el( 'span', { class: 'pressport-help', text: help } ) : null ] ),
+			const id = 'migrateplus-export-' + k;
+			return el( 'div', { class: 'migrateplus-toggle' + ( disabled ? ' is-disabled' : '' ) }, [
+				el( 'input', { type: 'checkbox', role: 'switch', id, class: 'migrateplus-switch', disabled, checked: ! disabled && !! Number( x[ k ] ), onchange: ( e ) => set( k, e.target.checked ? 1 : 0 ) } ),
+				el( 'label', { for: id }, [ el( 'span', { text: label } ), help ? el( 'span', { class: 'migrateplus-help', text: help } ) : null ] ),
 			] );
 		};
-		const acfCount = acfFields( x.post_type ).length;
-		const isMedia = x.post_type === 'attachment';
+		const acfCount = x.post_types.reduce( ( n, t ) => n + acfFields( t ).length, 0 );
+		// Statuses, featured images and the like don't apply to media.
+		const isMedia = x.post_types.every( ( t ) => t === 'attachment' );
 
-		const form = el( 'form', { class: 'pressport-panel pressport-export', onsubmit: ( e ) => {
+		const form = el( 'form', { class: 'migrateplus-panel migrateplus-export', onsubmit: ( e ) => {
 			e.preventDefault();
 			runExport();
 		} }, [
-			el( 'div', { class: 'pressport-export-grid' }, [
+			el( 'div', { class: 'migrateplus-export-grid' }, [
 				el( 'section', {}, [
 					el( 'h2', { text: 'What to export' } ),
-					el( 'div', { class: 'pressport-opt' }, [
-						el( 'label', { class: 'pressport-opt-label', for: 'pressport-export-type', text: 'Content type' } ),
-						el( 'select', { id: 'pressport-export-type', onchange: ( e ) => {
-							x.post_type = e.target.value;
-							render();
-						} }, D.postTypes.map( ( p ) => el( 'option', { value: p.name, text: p.label + ' (' + p.name + ')', selected: p.name === x.post_type } ) ) ),
+					el( 'fieldset', { class: 'migrateplus-opt' }, [
+						el( 'legend', { class: 'migrateplus-opt-label', text: 'Content types' } ),
+						el( 'div', { class: 'migrateplus-chips' }, D.postTypes.map( ( p ) => {
+							const id = 'migrateplus-export-type-' + p.name;
+							return el( 'label', { class: 'migrateplus-check-chip', for: id, title: p.name }, [
+								el( 'input', { type: 'checkbox', id, checked: x.post_types.includes( p.name ), onchange: ( e ) => {
+									const picked = e.target.checked ? x.post_types.concat( p.name ) : x.post_types.filter( ( t ) => t !== p.name );
+									x.post_types = D.postTypes.map( ( t ) => t.name ).filter( ( t ) => picked.includes( t ) ); // In the order shown.
+									if ( ! x.post_types.length ) {
+										x.post_types = [ p.name ];
+										e.target.checked = true;
+										return;
+									}
+									render();
+								} } ),
+								el( 'span', { text: p.label } ),
+							] );
+						} ) ),
+						x.post_types.length > 1 ? el( 'span', { class: 'migrateplus-help', text: 'One file, imported in one go: media first, so featured images and ACF images reuse the files it brings, then the rest in the order shown.' } ) : null,
 					] ),
-					isMedia ? null : el( 'fieldset', { class: 'pressport-opt' }, [
-						el( 'legend', { class: 'pressport-opt-label', text: 'Status' } ),
-						el( 'div', { class: 'pressport-chips' }, EXPORT_STATUSES.map( ( [ v, l ] ) => {
-							const id = 'pressport-export-status-' + v;
-							return el( 'label', { class: 'pressport-check-chip', for: id }, [
+					isMedia ? null : el( 'fieldset', { class: 'migrateplus-opt' }, [
+						el( 'legend', { class: 'migrateplus-opt-label', text: 'Status' } ),
+						el( 'div', { class: 'migrateplus-chips' }, EXPORT_STATUSES.map( ( [ v, l ] ) => {
+							const id = 'migrateplus-export-status-' + v;
+							return el( 'label', { class: 'migrateplus-check-chip', for: id }, [
 								el( 'input', { type: 'checkbox', id, checked: x.statuses.includes( v ), onchange: ( e ) => {
 									x.statuses = e.target.checked ? x.statuses.concat( v ) : x.statuses.filter( ( s ) => s !== v );
 									if ( ! x.statuses.length ) {
@@ -2216,40 +2491,43 @@
 							] );
 						} ) ),
 					] ),
-					el( 'fieldset', { class: 'pressport-opt' }, [
-						el( 'legend', { class: 'pressport-opt-label', text: isMedia ? 'Uploaded between' : 'Published between' } ),
-						el( 'div', { class: 'pressport-date-range' }, [
+					el( 'fieldset', { class: 'migrateplus-opt' }, [
+						el( 'legend', { class: 'migrateplus-opt-label', text: isMedia ? 'Uploaded between' : 'Published between' } ),
+						el( 'div', { class: 'migrateplus-date-range' }, [
 							el( 'input', { type: 'date', 'aria-label': 'From', value: x.after, onchange: ( e ) => set( 'after', e.target.value ) } ),
-							el( 'span', { class: 'pressport-muted', text: 'and' } ),
+							el( 'span', { class: 'migrateplus-muted', text: 'and' } ),
 							el( 'input', { type: 'date', 'aria-label': 'To', value: x.before, onchange: ( e ) => set( 'before', e.target.value ) } ),
 						] ),
-						el( 'span', { class: 'pressport-help', text: 'Leave empty to export everything.' } ),
+						el( 'span', { class: 'migrateplus-help', text: 'Leave empty to export everything.' } ),
 					] ),
 				] ),
 				el( 'section', {}, [
 					el( 'h2', { text: 'Include' } ),
-					el( 'div', { class: 'pressport-toggles is-flush' }, [
+					el( 'div', { class: 'migrateplus-toggles is-flush' }, [
 						toggle( 'include_terms', 'Categories, tags and terms', 'Hierarchy is kept as "Parent > Child".' ),
 						isMedia ? null : toggle( 'include_image', 'Featured images', 'Exported as URLs; the importing site downloads them.' ),
 						toggle( 'include_meta', 'Custom fields', 'Public post meta. Private keys starting with "_" and keys listed in Settings are left out.' ),
 						D.acf && D.acf.active
 							? toggle( 'include_acf', 'ACF fields', acfCount ? acfCount + ' field' + ( acfCount === 1 ? '' : 's' ) + ' on this content type. Images become URLs, related posts become references.' : 'No ACF fields on this content type.', ! acfCount )
 							: toggle( 'include_acf', 'ACF fields', 'Advanced Custom Fields is not active on this site.', true ),
-						D.woo && D.woo.active && x.post_type === 'product'
+						D.woo && D.woo.active && x.post_types.includes( 'product' )
 							? toggle( 'include_woo', 'WooCommerce product data', 'Prices, stock, attributes, downloads and variations. Images become URLs; related products link up by ID or SKU.' )
 							: null,
+						toggle( 'include_comments', 'Comments', 'Approved comments and replies, with their public comment fields. Pending, spam and trashed comments are left out.' ),
+						D.menus ? toggle( 'include_menus', 'Navigation menus', 'Every menu with its items and theme locations. Items point at posts and terms, so export the content they link to in this file too.' ) : null,
+						D.zlib ? toggle( 'gzip', 'Compress the file (.json.gz)', 'Much smaller, for a site whose upload limit is lower than the export. MigratePlus imports it as it is.' ) : null,
 					] ),
 				] ),
 			] ),
-			el( 'footer', { class: 'pressport-panel-foot' }, [ countEl, submit ] ),
+			el( 'footer', { class: 'migrateplus-panel-foot' }, [ countEl, submit ] ),
 		] );
 		root.appendChild( form );
 
 		if ( state.lastExport ) {
 			const le = state.lastExport;
-			root.appendChild( el( 'section', { class: 'pressport-summary' }, [
-				el( 'span', { class: 'pressport-source-icon pressport-icon-json', 'aria-hidden': 'true' } ),
-				el( 'div', { class: 'pressport-summary-text' }, [
+			root.appendChild( el( 'section', { class: 'migrateplus-summary' }, [
+				el( 'span', { class: 'migrateplus-source-icon migrateplus-icon-json', 'aria-hidden': 'true' } ),
+				el( 'div', { class: 'migrateplus-summary-text' }, [
 					el( 'strong', { text: le.filename } ),
 					el( 'span', { text: le.done.toLocaleString() + ' items, ' + le.size + '. The download link works for 24 hours.' } ),
 				] ),
@@ -2263,7 +2541,7 @@
 		const x = state.exportArgs;
 		modal.open( {
 			kind: 'export',
-			title: 'Exporting ' + postType( x.post_type ).label.toLowerCase() + ' content',
+			title: 'Exporting ' + ( 1 === x.post_types.length ? postType( x.post_types[ 0 ] ).label.toLowerCase() + ' ' : '' ) + 'content',
 			message: 'Writing a JSON file. Keep this tab open.',
 			percent: null,
 			detail: 'Counting…',
@@ -2293,16 +2571,19 @@
 				if ( d.meta ) {
 					extras.push( d.meta + ' custom field' + ( d.meta === 1 ? '' : 's' ) );
 				}
+				if ( d.menus ) {
+					extras.push( d.menus + ' menu' + ( d.menus === 1 ? '' : 's' ) );
+				}
 				modal.update( {
 					title: 'Export ready',
-					message: 'Import it on the other site with PressPort → Import. The fields map themselves.',
+					message: 'Import it on the other site with MigratePlus → Import. The fields map themselves.',
 					percent: 100,
 					tone: 'success',
 					detail: d.done.toLocaleString() + ' items' + ( extras.length ? ' with ' + extras.join( ' and ' ) : '' ) + ', ' + d.size,
 					dismissible: true,
 					onDismiss: null,
 					actions: [
-						{ label: 'Download ' + d.filename.split( '.' ).pop().toUpperCase(), primary: true, href: d.url },
+						{ label: 'Download ' + ( /\.json\.gz$/.test( d.filename ) ? '.json.gz' : 'JSON' ), primary: true, href: d.url },
 						{ label: 'Close', onClick: () => {
 							modal.close();
 							render();
@@ -2314,7 +2595,7 @@
 			}
 			modal.update( {
 				percent: d.total ? ( d.done / d.total ) * 100 : null,
-				detail: d.done.toLocaleString() + ' of ' + d.total.toLocaleString() + ' items',
+				detail: d.done.toLocaleString() + ' of ' + d.total.toLocaleString() + ' items' + ( d.section ? ', now ' + d.section.toLowerCase() : '' ),
 			} );
 			return step( id );
 		} );
@@ -2337,8 +2618,8 @@
 			dry_run: 1,
 			result: null,
 		};
-		const submit = el( 'button', { type: 'submit', class: 'button button-primary pressport-btn-lg', text: r.dry_run ? 'Run dry run' : 'Replace' } );
-		const tableCount = el( 'span', { class: 'pressport-help' } );
+		const submit = el( 'button', { type: 'submit', class: 'button button-primary migrateplus-btn-lg', text: r.dry_run ? 'Run dry run' : 'Replace' } );
+		const tableCount = el( 'span', { class: 'migrateplus-help' } );
 		const errorSlot = el( 'div', { 'aria-live': 'assertive' } );
 		const sync = () => {
 			tableCount.textContent = r.tables.length + ' of ' + ( D.tables || [] ).length + ' tables selected';
@@ -2349,31 +2630,31 @@
 			}
 		};
 		const toggle = ( k, label, help ) => {
-			const id = 'pressport-replace-' + k;
-			return el( 'div', { class: 'pressport-toggle' }, [
-				el( 'input', { type: 'checkbox', role: 'switch', id, class: 'pressport-switch', checked: !! r[ k ], onchange: ( e ) => {
+			const id = 'migrateplus-replace-' + k;
+			return el( 'div', { class: 'migrateplus-toggle' }, [
+				el( 'input', { type: 'checkbox', role: 'switch', id, class: 'migrateplus-switch', checked: !! r[ k ], onchange: ( e ) => {
 					r[ k ] = e.target.checked ? 1 : 0;
 					sync();
 				} } ),
-				el( 'label', { for: id }, [ el( 'span', { text: label } ), help ? el( 'span', { class: 'pressport-help', text: help } ) : null ] ),
+				el( 'label', { for: id }, [ el( 'span', { text: label } ), help ? el( 'span', { class: 'migrateplus-help', text: help } ) : null ] ),
 			] );
 		};
-		const text = ( k, label, placeholder ) => el( 'div', { class: 'pressport-opt' }, [
-			el( 'label', { class: 'pressport-opt-label', for: 'pressport-replace-' + k, text: label } ),
-			el( 'input', { type: 'text', id: 'pressport-replace-' + k, class: 'pressport-code-input', value: r[ k ], placeholder, autocomplete: 'off', spellcheck: 'false', oninput: ( e ) => {
+		const text = ( k, label, placeholder ) => el( 'div', { class: 'migrateplus-opt' }, [
+			el( 'label', { class: 'migrateplus-opt-label', for: 'migrateplus-replace-' + k, text: label } ),
+			el( 'input', { type: 'text', id: 'migrateplus-replace-' + k, class: 'migrateplus-code-input', value: r[ k ], placeholder, autocomplete: 'off', spellcheck: 'false', oninput: ( e ) => {
 				r[ k ] = e.target.value;
 				sync();
 			} } ),
 		] );
 		const boxes = ( D.tables || [] ).map( ( t ) => {
-			const id = 'pressport-table-' + t.name;
-			return el( 'label', { class: 'pressport-table-option', for: id }, [
+			const id = 'migrateplus-table-' + t.name;
+			return el( 'label', { class: 'migrateplus-table-option', for: id }, [
 				el( 'input', { type: 'checkbox', id, value: t.name, checked: r.tables.includes( t.name ), onchange: ( e ) => {
 					r.tables = e.target.checked ? r.tables.concat( t.name ) : r.tables.filter( ( n ) => n !== t.name );
 					sync();
 				} } ),
 				el( 'code', { text: t.name } ),
-				el( 'span', { class: 'pressport-help', text: '~' + t.rows.toLocaleString() + ' rows, ' + formatBytes( t.size ) } ),
+				el( 'span', { class: 'migrateplus-help', text: '~' + t.rows.toLocaleString() + ' rows, ' + formatBytes( t.size ) } ),
 			] );
 		} );
 		const selectAll = ( on ) => {
@@ -2384,7 +2665,7 @@
 			sync();
 		};
 
-		root.appendChild( el( 'form', { class: 'pressport-panel pressport-export pressport-replace', onsubmit: ( e ) => {
+		root.appendChild( el( 'form', { class: 'migrateplus-panel migrateplus-export migrateplus-replace', onsubmit: ( e ) => {
 			e.preventDefault();
 			const problem = ! r.search ? 'Enter the text to search for.' : ( ! r.tables.length ? 'No database tables are selected. Please select at least one.' : '' );
 			errorSlot.innerHTML = '';
@@ -2395,31 +2676,31 @@
 			runReplace();
 		} }, [
 			errorSlot,
-			el( 'div', { class: 'pressport-export-grid' }, [
+			el( 'div', { class: 'migrateplus-export-grid' }, [
 				el( 'section', {}, [
 					el( 'h2', { text: 'Find and replace' } ),
 					text( 'search', 'Search for', 'http://old-site.test' ),
 					text( 'replace', 'Replace with', 'https://new-site.com' ),
-					el( 'div', { class: 'pressport-toggles is-flush' }, [
+					el( 'div', { class: 'migrateplus-toggles is-flush' }, [
 						toggle( 'dry_run', 'Dry run', 'Count and preview the changes without saving anything.' ),
 						toggle( 'whole_urls', 'Whole URLs only', 'When you search for a web address or domain, only that exact site matches: http://old.test is not changed inside http://old.test.example.com or http://old.testing.com, and old.test is not changed inside sub.old.test.' ),
 						toggle( 'case_insensitive', 'Ignore case', 'Match "Example" and "example" alike.' ),
 						toggle( 'guids', 'Replace GUIDs', 'Post GUIDs are permanent IDs that feed readers rely on. Leave this off unless you know you need it.' ),
 					] ),
-					el( 'p', { class: 'pressport-help', text: 'PressPort\'s own history and tracking data are left alone, so later imports still recognise content they brought in.' } ),
+					el( 'p', { class: 'migrateplus-help', text: 'MigratePlus\'s own history and tracking data are left alone, so later imports still recognise content they brought in.' } ),
 				] ),
 				el( 'section', {}, [
 					el( 'h2', { text: 'Tables' } ),
-					el( 'div', { class: 'pressport-table-tools' }, [
+					el( 'div', { class: 'migrateplus-table-tools' }, [
 						tableCount,
 						el( 'button', { type: 'button', class: 'button-link', text: 'All', onclick: () => selectAll( true ) } ),
 						el( 'button', { type: 'button', class: 'button-link', text: 'None', onclick: () => selectAll( false ) } ),
 					] ),
-					el( 'div', { class: 'pressport-table-list' }, boxes ),
+					el( 'div', { class: 'migrateplus-table-list' }, boxes ),
 				] ),
 			] ),
-			el( 'footer', { class: 'pressport-panel-foot' }, [
-				el( 'span', { class: 'pressport-help', text: 'Real runs keep the original values so they can be rolled back. A database backup is still the safest net.' } ),
+			el( 'footer', { class: 'migrateplus-panel-foot' }, [
+				el( 'span', { class: 'migrateplus-help', text: 'Real runs keep the original values so they can be rolled back. A database backup is still the safest net.' } ),
 				submit,
 			] ),
 		] ) );
@@ -2433,10 +2714,10 @@
 
 	/** Real runs, with rollback. Dry runs change nothing, so they are not listed. */
 	function drawReplaceRuns() {
-		const wrap = el( 'section', { class: 'pressport-panel pressport-history-panel pressport-replace-runs' } );
+		const wrap = el( 'section', { class: 'migrateplus-panel migrateplus-history-panel migrateplus-replace-runs' } );
 		root.appendChild( wrap );
 		if ( ! state.replaceRuns ) {
-			wrap.appendChild( el( 'p', { class: 'pressport-muted pressport-loading', text: 'Loading past replacements…' } ) );
+			wrap.appendChild( el( 'p', { class: 'migrateplus-muted migrateplus-loading', text: 'Loading past replacements…' } ) );
 			api( 'replace_history', {} ).then( ( d ) => {
 				state.replaceRuns = d.runs;
 				wrap.remove();
@@ -2448,59 +2729,67 @@
 			return;
 		}
 		const runs = state.replaceRuns;
-		wrap.appendChild( el( 'header', { class: 'pressport-history-head' }, [
-			el( 'h2', { class: 'pressport-history-title', text: 'Past replacements' } ),
-			el( 'span', { class: 'pressport-muted', text: runs.length ? runs.length + ' run' + ( runs.length === 1 ? '' : 's' ) : '' } ),
+		wrap.appendChild( el( 'header', { class: 'migrateplus-history-head' }, [
+			el( 'h2', { class: 'migrateplus-history-title', text: 'Past replacements' } ),
+			el( 'span', { class: 'migrateplus-muted', text: runs.length ? runs.length + ' run' + ( runs.length === 1 ? '' : 's' ) : '' } ),
 		] ) );
 		if ( ! runs.length ) {
-			wrap.appendChild( el( 'p', { class: 'pressport-muted pressport-loading', text: 'Replacements you run for real show up here, and can be rolled back.' } ) );
+			wrap.appendChild( el( 'p', { class: 'migrateplus-muted migrateplus-loading', text: 'Replacements you run for real show up here, and can be rolled back.' } ) );
 			return;
 		}
 		const labels = { running: 'Running', complete: 'Complete', stopped: 'Stopped', failed: 'Failed', rolling_back: 'Rolling back', rollback_failed: 'Rollback incomplete', rolled_back: 'Rolled back' };
 		const body = el( 'tbody' );
 		runs.forEach( ( run ) => {
-			const actions = el( 'div', { class: 'pressport-row-actions' } );
+			const actions = el( 'div', { class: 'migrateplus-row-actions' } );
 			if ( run.can_resume ) {
 				actions.appendChild( el( 'button', { type: 'button', class: 'button button-small button-primary', text: 'Resume', onclick: () => runReplace( run ) } ) );
 			}
 			if ( run.can_undo ) {
-				actions.appendChild( el( 'button', { type: 'button', class: 'button button-small pressport-danger', text: { rolling_back: 'Finish rollback', rollback_failed: 'Retry rollback' }[ run.status ] || 'Roll back', onclick: () => rollbackReplace( run ) } ) );
+				actions.appendChild( el( 'button', { type: 'button', class: 'button button-small migrateplus-danger', text: { rolling_back: 'Finish rollback', rollback_failed: 'Retry rollback' }[ run.status ] || 'Roll back', onclick: () => rollbackReplace( run ) } ) );
 			}
-			actions.appendChild( el( 'button', { type: 'button', class: 'pressport-link-danger', text: 'Delete', title: 'Remove from this list. The changes stay, but can no longer be rolled back.', onclick: () => {
-				// eslint-disable-next-line no-alert
-				if ( window.confirm( run.status === 'rolled_back' ? 'Remove this run from the list?' : 'Remove this run from the list? Its changes stay in the database, but can no longer be rolled back.' ) ) {
-					api( 'replace_forget', { run: run.id } ).then( () => {
-						state.replaceRuns = state.replaceRuns.filter( ( x ) => x.id !== run.id );
-						render();
-					} ).catch( showError );
-				}
-			} } ) );
+			actions.appendChild( el( 'button', { type: 'button', class: 'migrateplus-link-danger', text: 'Delete', title: 'Remove from this list. The changes stay, but can no longer be rolled back.', onclick: () => ask( {
+				title: 'Delete this run?',
+				message: run.status === 'rolled_back' ? 'Remove this run from the list?' : 'Remove this run from the list? Its changes stay in the database, but can no longer be rolled back.',
+				label: 'Delete',
+				danger: true,
+				onConfirm: () => api( 'replace_forget', { run: run.id } ).then( () => {
+					modal.close();
+					state.replaceRuns = state.replaceRuns.filter( ( x ) => x.id !== run.id );
+					render();
+				} ).catch( ( err ) => modalError( 'Could not delete', err ) ),
+			} ) } ) );
 			let result = run.changes.toLocaleString() + ' replacement' + ( run.changes === 1 ? '' : 's' ) + ' in ' + run.rows.toLocaleString() + ' row' + ( run.rows === 1 ? '' : 's' );
 			if ( run.status === 'rolled_back' ) {
 				result = run.restored.toLocaleString() + ' value' + ( run.restored === 1 ? '' : 's' ) + ' restored' + ( run.kept ? ', ' + run.kept.toLocaleString() + ' kept because they were edited since' : '' );
 			}
 			body.appendChild( el( 'tr', {}, [
 				el( 'td', {}, [
-					el( 'code', { class: 'pressport-replace-pair', text: run.search + ' → ' + run.replace } ),
-					el( 'span', { class: 'pressport-help' }, [
+					el( 'code', { class: 'migrateplus-replace-pair', text: run.search + ' → ' + run.replace } ),
+					el( 'span', { class: 'migrateplus-help' }, [
 						run.user ? run.user + ', ' : '',
 						el( 'time', { datetime: new Date( run.created * 1000 ).toISOString(), title: formatDate( run.created ), text: relativeTime( run.created ) } ),
 					] ),
 				] ),
-				el( 'td', {}, el( 'span', { class: 'pressport-badge pressport-badge-' + run.status, text: labels[ run.status ] || run.status } ) ),
-				el( 'td', { class: 'pressport-h-result' }, el( 'span', { class: 'pressport-help', text: result } ) ),
+				el( 'td', {}, el( 'span', { class: 'migrateplus-badge migrateplus-badge-' + run.status, text: labels[ run.status ] || run.status } ) ),
+				el( 'td', { class: 'migrateplus-h-result' }, el( 'span', { class: 'migrateplus-help', text: result } ) ),
 				el( 'td', {}, actions ),
 			] ) );
 		} );
-		wrap.appendChild( el( 'div', { class: 'pressport-table-scroll' }, el( 'table', { class: 'pressport-history' }, [
+		wrap.appendChild( el( 'div', { class: 'migrateplus-table-scroll' }, el( 'table', { class: 'migrateplus-history' }, [
 			el( 'thead', {}, el( 'tr', {}, [ 'Replacement', 'Status', 'Result', '' ].map( ( h ) => el( 'th', { scope: 'col', text: h } ) ) ) ),
 			body,
 		] ) ) );
 	}
 
-	function rollbackReplace( run ) {
-		// eslint-disable-next-line no-alert
-		if ( ! window.confirm( 'Roll back "' + run.search + '" → "' + run.replace + '"? Original values are put back. Anything edited since the replacement is kept as it is.' ) ) {
+	function rollbackReplace( run, confirmed ) {
+		if ( ! confirmed ) {
+			ask( {
+				title: 'Roll back this replacement?',
+				message: 'Roll back "' + run.search + '" → "' + run.replace + '"? Original values are put back. Anything edited since the replacement is kept as it is.',
+				label: 'Roll back',
+				danger: true,
+				onConfirm: () => rollbackReplace( run, true ),
+			} );
 			return;
 		}
 		modal.open( {
@@ -2550,13 +2839,18 @@
 	}
 
 	/** Start a run from the form, or pick up a stopped one (`resumeRun`, from Past replacements). */
-	function runReplace( resumeRun ) {
+	function runReplace( resumeRun, confirmed ) {
 		const r = state.replace;
 		const question = resumeRun
 			? 'Resume replacing "' + resumeRun.search + '" with "' + resumeRun.replace + '"? It picks up where it stopped.'
 			: ( r.dry_run ? '' : 'Replace "' + r.search + '" with "' + r.replace + '" in ' + r.tables.length + ' tables? This changes the database. You can roll it back afterwards from Past replacements.' );
-		// eslint-disable-next-line no-alert
-		if ( question && ! window.confirm( question ) ) {
+		if ( question && ! confirmed ) {
+			ask( {
+				title: resumeRun ? 'Resume this replacement?' : 'Replace in the database?',
+				message: question,
+				label: resumeRun ? 'Resume' : 'Replace',
+				onConfirm: () => runReplace( resumeRun, true ),
+			} );
 			return;
 		}
 		const args = resumeRun
@@ -2603,7 +2897,7 @@
 				actions: [ { label: 'See details', primary: true, onClick: () => {
 					modal.close();
 					render();
-					const res = root.querySelector( '.pressport-replace-results' );
+					const res = root.querySelector( '.migrateplus-replace-results' );
 					if ( res ) {
 						res.scrollIntoView( { behavior: 'smooth' } );
 					}
@@ -2621,9 +2915,9 @@
 		const unsafe = d.tables.filter( ( t ) => t.unsafe );
 		const body = el( 'tbody' );
 		changed.forEach( ( t ) => {
-			const detail = el( 'tr', { class: 'pressport-export-log-row', hidden: true }, el( 'td', { colspan: 4, class: 'pressport-export-log' },
-				el( 'ol', { class: 'pressport-log pressport-replace-samples' }, t.samples.map( ( s ) => el( 'li', {}, [
-					el( 'span', { class: 'pressport-help', text: s.column + ' (row ' + s.row + ')' } ),
+			const detail = el( 'tr', { class: 'migrateplus-export-log-row', hidden: true }, el( 'td', { colspan: 4, class: 'migrateplus-export-log' },
+				el( 'ol', { class: 'migrateplus-log migrateplus-replace-samples' }, t.samples.map( ( s ) => el( 'li', {}, [
+					el( 'span', { class: 'migrateplus-help', text: s.column + ' (row ' + s.row + ')' } ),
 					el( 'del', { text: ( s.cut[ 0 ] ? '…' : '' ) + s.before + ( s.cut[ 1 ] ? '…' : '' ) } ),
 					el( 'ins', { text: ( s.cut[ 0 ] ? '…' : '' ) + s.after + ( s.cut[ 1 ] ? '…' : '' ) } ),
 				] ) ) ) ) );
@@ -2636,24 +2930,24 @@
 				el( 'td', {}, el( 'code', { text: t.name } ) ),
 				el( 'td', { text: t.rows.toLocaleString() } ),
 				el( 'td', { text: t.changes.toLocaleString() } ),
-				el( 'td', {}, el( 'div', { class: 'pressport-row-actions' }, btn ) ),
+				el( 'td', {}, el( 'div', { class: 'migrateplus-row-actions' }, btn ) ),
 			] ) );
 			body.appendChild( detail );
 		} );
 		if ( ! changed.length ) {
-			body.appendChild( el( 'tr', {}, el( 'td', { colspan: 4, class: 'pressport-muted pressport-no-match', text: 'No matches for "' + a.search + '" in the selected tables.' } ) ) );
+			body.appendChild( el( 'tr', {}, el( 'td', { colspan: 4, class: 'migrateplus-muted migrateplus-no-match', text: 'No matches for "' + a.search + '" in the selected tables.' } ) ) );
 		}
-		root.appendChild( el( 'section', { class: 'pressport-panel pressport-history-panel pressport-replace-results' }, [
-			el( 'header', { class: 'pressport-history-head' }, [
-				el( 'h2', { class: 'pressport-history-title', text: d.dry_run ? 'Dry run results' : 'Results' } ),
-				el( 'span', { class: 'pressport-muted', text: '"' + a.search + '" → "' + a.replace + '"' } ),
+		root.appendChild( el( 'section', { class: 'migrateplus-panel migrateplus-history-panel migrateplus-replace-results' }, [
+			el( 'header', { class: 'migrateplus-history-head' }, [
+				el( 'h2', { class: 'migrateplus-history-title', text: d.dry_run ? 'Dry run results' : 'Results' } ),
+				el( 'span', { class: 'migrateplus-muted', text: '"' + a.search + '" → "' + a.replace + '"' } ),
 			] ),
-			el( 'div', { class: 'pressport-table-scroll' }, el( 'table', { class: 'pressport-history' }, [
+			el( 'div', { class: 'migrateplus-table-scroll' }, el( 'table', { class: 'migrateplus-history' }, [
 				el( 'thead', {}, el( 'tr', {}, [ 'Table', d.dry_run ? 'Rows to change' : 'Rows changed', 'Replacements', '' ].map( ( h ) => el( 'th', { scope: 'col', text: h } ) ) ) ),
 				body,
 			] ) ),
-			skipped.length ? el( 'p', { class: 'pressport-help pressport-loading', text: 'Skipped: ' + skipped.map( ( t ) => t.name + ' (' + t.skipped + ')' ).join( '; ' ) } ) : null,
-			unsafe.length ? el( 'p', { class: 'pressport-help pressport-loading', text: 'Values left as they are because they contain objects that can’t be safely edited: ' + unsafe.map( ( t ) => t.name + ' (' + t.unsafe + ')' ).join( '; ' ) } ) : null,
+			skipped.length ? el( 'p', { class: 'migrateplus-help migrateplus-loading', text: 'Skipped: ' + skipped.map( ( t ) => t.name + ' (' + t.skipped + ')' ).join( '; ' ) } ) : null,
+			unsafe.length ? el( 'p', { class: 'migrateplus-help migrateplus-loading', text: 'Values left as they are because they contain objects that can’t be safely edited: ' + unsafe.map( ( t ) => t.name + ' (' + t.unsafe + ')' ).join( '; ' ) } ) : null,
 		] ) );
 	}
 
@@ -2661,8 +2955,8 @@
 
 	function renderHistory() {
 		root.innerHTML = '';
-		root.classList.add( 'pressport-app' );
-		const wrap = el( 'section', { class: 'pressport-panel pressport-history-panel', 'aria-busy': 'true' }, el( 'p', { class: 'pressport-muted pressport-loading', text: 'Loading history…' } ) );
+		root.classList.add( 'migrateplus-app' );
+		const wrap = el( 'section', { class: 'migrateplus-panel migrateplus-history-panel', 'aria-busy': 'true' }, el( 'p', { class: 'migrateplus-muted migrateplus-loading', text: 'Loading history…' } ) );
 		root.appendChild( wrap );
 		api( 'jobs', {} ).then( ( data ) => {
 			state.historyJobs = data.jobs;
@@ -2673,7 +2967,7 @@
 			wrap.appendChild( notice( 'error', err.message ) );
 		} );
 
-		const exportsWrap = el( 'section', { class: 'pressport-panel pressport-history-panel pressport-exports-panel', 'aria-busy': 'true' }, el( 'p', { class: 'pressport-muted pressport-loading', text: 'Loading exports…' } ) );
+		const exportsWrap = el( 'section', { class: 'migrateplus-panel migrateplus-history-panel migrateplus-exports-panel', 'aria-busy': 'true' }, el( 'p', { class: 'migrateplus-muted migrateplus-loading', text: 'Loading exports…' } ) );
 		root.appendChild( exportsWrap );
 		api( 'exports', {} ).then( ( data ) => {
 			exportsWrap.removeAttribute( 'aria-busy' );
@@ -2688,27 +2982,124 @@
 
 	function drawExports( wrap, exports ) {
 		wrap.innerHTML = '';
-		wrap.appendChild( el( 'header', { class: 'pressport-history-head' }, [
-			el( 'h2', { class: 'pressport-history-title', text: 'Exports' } ),
-			el( 'span', { class: 'pressport-muted', text: exports.length ? exports.length + ' export' + ( exports.length === 1 ? '' : 's' ) : '' } ),
-			el( 'a', { class: 'button pressport-push', href: D.exportUrl, text: 'Export' } ),
+		wrap.appendChild( el( 'header', { class: 'migrateplus-history-head' }, [
+			el( 'h2', { class: 'migrateplus-history-title', text: 'Exports' } ),
+			el( 'span', { class: 'migrateplus-muted', text: exports.length ? exports.length + ' export' + ( exports.length === 1 ? '' : 's' ) : '' } ),
+			el( 'a', { class: 'button migrateplus-push', href: D.exportUrl, text: 'Export' } ),
 		] ) );
 		if ( ! exports.length ) {
-			wrap.appendChild( el( 'p', { class: 'pressport-muted pressport-loading', text: 'Exports you run show up here with a log of what went into the file.' } ) );
+			wrap.appendChild( el( 'p', { class: 'migrateplus-muted migrateplus-loading', text: 'Exports you run show up here with a log of what went into the file.' } ) );
 			return;
 		}
 		const body = el( 'tbody' );
-		exports.forEach( ( x ) => exportRows( x, body, () => drawExports( wrap, exports.filter( ( e ) => e.id !== x.id ) ) ) );
-		wrap.appendChild( el( 'div', { class: 'pressport-table-scroll' }, el( 'table', { class: 'pressport-history' }, [
-			el( 'thead', {}, el( 'tr', {}, [ 'Export', 'Status', 'Result', '' ].map( ( h ) => el( 'th', { scope: 'col', text: h } ) ) ) ),
+		const pick = bulkSelection( 'export', 'export', 'Their files are deleted too, if they are still kept.', ( d ) => {
+			const gone = new Set( d.deleted.map( ( e ) => e.id ) );
+			drawExports( wrap, exports.filter( ( e ) => ! gone.has( e.id ) ) );
+		} );
+		wrap.querySelector( '.migrateplus-history-head' ).insertBefore( pick.button, wrap.querySelector( '.migrateplus-push' ) );
+		exports.forEach( ( x ) => exportRows( x, body, () => drawExports( wrap, exports.filter( ( e ) => e.id !== x.id ) ), pick ) );
+		wrap.appendChild( el( 'div', { class: 'migrateplus-table-scroll' }, el( 'table', { class: 'migrateplus-history' }, [
+			el( 'thead', {}, el( 'tr', {}, [ pick.head() ].concat( [ 'Export', 'Status', 'Result', '' ].map( ( h ) => el( 'th', { scope: 'col', text: h } ) ) ) ) ),
 			body,
 		] ) ) );
+		pick.sync();
+	}
+
+	/**
+	 * Row checkboxes, a select-all and a "Delete selected" button for one History table.
+	 * kind goes to the server with each id; warning is added to the confirmation.
+	 * Call reset() before redrawing the rows and sync() after.
+	 */
+	function bulkSelection( kind, noun, warning, onDone ) {
+		const selected = new Set();
+		let boxes = new Map(); // id => checkbox, for the rows on screen.
+		const names = new Map();
+		const button = el( 'button', { type: 'button', class: 'button migrateplus-danger', disabled: true, text: 'Delete selected', onclick: () => confirmBulkDelete( kind, noun, warning, [ ...selected ], names, onDone ) } );
+		const all = el( 'input', { type: 'checkbox', 'aria-label': 'Select all', onchange: ( e ) => {
+			boxes.forEach( ( box, id ) => {
+				box.checked = e.target.checked;
+				if ( box.checked ) {
+					selected.add( id );
+				} else {
+					selected.delete( id );
+				}
+			} );
+			sync();
+		} } );
+		// Rows hidden by the search are dropped from the selection, so nothing out of sight is deleted.
+		function sync() {
+			selected.forEach( ( id ) => ! boxes.has( id ) && selected.delete( id ) );
+			const n = selected.size;
+			button.disabled = ! n;
+			button.textContent = n ? 'Delete ' + n + ' ' + ( n === 1 ? 'entry' : 'entries' ) : 'Delete selected';
+			all.checked = boxes.size > 0 && n === boxes.size;
+			all.indeterminate = n > 0 && n < boxes.size;
+			all.disabled = ! boxes.size;
+		}
+		return {
+			button,
+			sync,
+			reset: () => {
+				boxes = new Map();
+			},
+			head: () => el( 'td', { class: 'migrateplus-check-column' }, all ),
+			cell: ( id, name ) => {
+				names.set( id, name );
+				const box = el( 'input', { type: 'checkbox', checked: selected.has( id ), 'aria-label': 'Select ' + name, onchange: ( e ) => {
+					if ( e.target.checked ) {
+						selected.add( id );
+					} else {
+						selected.delete( id );
+					}
+					sync();
+				} } );
+				boxes.set( id, box );
+				return el( 'th', { scope: 'row', class: 'migrateplus-check-column' }, box );
+			},
+		};
+	}
+
+	/** Ask once, delete the chosen History entries in one request, and say what was deleted and what was skipped. */
+	function confirmBulkDelete( kind, noun, warning, ids, names, onDone ) {
+		const n = ids.length;
+		const plural = ( c, word ) => c + ' ' + word + ( c === 1 ? '' : 's' );
+		const run = () => {
+			api( 'history_delete', { items: ids.map( ( id ) => ( { kind, id } ) ) } ).then( ( d ) => {
+				const reasons = {};
+				d.skipped.forEach( ( s ) => {
+					reasons[ s.reason ] = ( reasons[ s.reason ] || 0 ) + 1;
+				} );
+				const keys = Object.keys( reasons );
+				let summary = 'Deleted ' + d.deleted.length;
+				if ( keys.length === 1 ) {
+					summary += ', skipped ' + d.skipped.length + ' (' + keys[ 0 ] + ')';
+				} else if ( keys.length ) {
+					summary += ', skipped ' + d.skipped.length + ' (' + keys.map( ( r ) => reasons[ r ] + ' ' + r ).join( ', ' ) + ')';
+				}
+				onDone( d );
+				modal.update( {
+					title: summary + '.',
+					message: '',
+					tone: d.deleted.length ? 'success' : 'error',
+					note: d.skipped.length ? 'Skipped: ' + d.skipped.map( ( s ) => '“' + ( names.get( s.id ) || s.id ) + '” (' + s.reason + ')' ).join( '; ' ) : '',
+					dismissible: true,
+					actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
+				} );
+			} ).catch( ( err ) => modalError( 'Could not delete', err ) );
+		};
+		ask( {
+			title: 'Delete ' + n + ' ' + ( n === 1 ? 'entry' : 'entries' ) + '?',
+			message: ( n === 1 ? 'Remove this ' + noun : 'Remove these ' + plural( n, noun ) ) + ' from history? ' + warning,
+			label: 'Delete',
+			danger: true,
+			onConfirm: run,
+		} );
 	}
 
 	/** A history row for one export, plus a hidden row that holds its log. */
-	function exportRows( x, body, onForget ) {
-		const logRow = el( 'tr', { class: 'pressport-export-log-row', hidden: true }, el( 'td', { colspan: 4, class: 'pressport-export-log' } ) );
-		const actions = el( 'div', { class: 'pressport-row-actions' } );
+	function exportRows( x, body, onForget, pick ) {
+		const logRow = el( 'tr', { class: 'migrateplus-export-log-row', hidden: true }, el( 'td', { colspan: 5, class: 'migrateplus-export-log' } ) );
+		const actions = el( 'div', { class: 'migrateplus-row-actions' } );
 		if ( x.url ) {
 			actions.appendChild( el( 'a', { class: 'button button-small button-primary', href: x.url, text: 'Download' } ) );
 		}
@@ -2723,7 +3114,7 @@
 				api( 'export_log', { export: x.id } ).then( ( d ) => {
 					logRow.dataset.loaded = '1';
 					cell.innerHTML = '';
-					cell.appendChild( el( 'ol', { class: 'pressport-log' }, d.log.map( ( e ) => el( 'li', { class: 'pressport-log-' + e.l }, [
+					cell.appendChild( el( 'ol', { class: 'migrateplus-log' }, d.log.map( ( e ) => el( 'li', { class: 'migrateplus-log-' + e.l }, [
 						el( 'time', { datetime: new Date( e.t * 1000 ).toISOString(), text: new Date( e.t * 1000 ).toLocaleTimeString() } ),
 						el( 'span', { text: e.m } ),
 					] ) ) ) );
@@ -2733,12 +3124,16 @@
 			}
 		} } );
 		actions.appendChild( viewBtn );
-		actions.appendChild( el( 'button', { type: 'button', class: 'pressport-link-danger', text: 'Delete', title: 'Remove from history, with its file if it is still kept.', onclick: () => {
-			// eslint-disable-next-line no-alert
-			if ( window.confirm( 'Remove this export from history?' ) ) {
-				api( 'export_forget', { export: x.id } ).then( onForget ).catch( showError );
-			}
-		} } ) );
+		actions.appendChild( el( 'button', { type: 'button', class: 'migrateplus-link-danger', text: 'Delete', title: 'Remove from history, with its file if it is still kept.', onclick: () => ask( {
+			title: 'Delete this export?',
+			message: 'Remove this export from history?',
+			label: 'Delete',
+			danger: true,
+			onConfirm: () => api( 'export_forget', { export: x.id } ).then( () => {
+				modal.close();
+				onForget();
+			} ).catch( ( err ) => modalError( 'Could not delete', err ) ),
+		} ) } ) );
 
 		const who = [ x.user, x.via === 'cli' ? 'WP-CLI' : '' ].filter( Boolean ).join( ' via ' );
 		let result = x.done.toLocaleString() + ' of ' + x.total.toLocaleString() + ' items';
@@ -2746,18 +3141,19 @@
 			result = x.done.toLocaleString() + ' item' + ( x.done === 1 ? '' : 's' ) + ( x.size ? ', ' + x.size : '' ) + ( x.url ? '' : '. File no longer kept' );
 		}
 		body.appendChild( el( 'tr', {}, [
-			el( 'td', { class: 'pressport-h-source' }, [
-				el( 'span', { class: 'pressport-source-icon is-sm pressport-icon-json', 'aria-hidden': 'true' } ),
+			pick.cell( x.id, x.label ),
+			el( 'td', { class: 'migrateplus-h-source' }, [
+				el( 'span', { class: 'migrateplus-source-icon is-sm migrateplus-icon-json', 'aria-hidden': 'true' } ),
 				el( 'div', {}, [
 					el( 'strong', { text: x.label } ),
-					el( 'span', { class: 'pressport-help' }, [
+					el( 'span', { class: 'migrateplus-help' }, [
 						who ? who + ', ' : '',
 						el( 'time', { datetime: new Date( x.created * 1000 ).toISOString(), title: formatDate( x.created ), text: relativeTime( x.created ) } ),
 					] ),
 				] ),
 			] ),
-			el( 'td', {}, el( 'span', { class: 'pressport-badge pressport-badge-' + x.status, text: EXPORT_STATUS_LABELS[ x.status ] || x.status } ) ),
-			el( 'td', { class: 'pressport-h-result' }, el( 'span', { class: 'pressport-help', text: result } ) ),
+			el( 'td', {}, el( 'span', { class: 'migrateplus-badge migrateplus-badge-' + x.status, text: EXPORT_STATUS_LABELS[ x.status ] || x.status } ) ),
+			el( 'td', { class: 'migrateplus-h-result' }, el( 'span', { class: 'migrateplus-help', text: result } ) ),
 			el( 'td', {}, actions ),
 		] ) );
 		body.appendChild( logRow );
@@ -2789,48 +3185,56 @@
 		wrap.innerHTML = '';
 		const jobs = state.historyJobs || [];
 		if ( ! jobs.length ) {
-			wrap.appendChild( el( 'div', { class: 'pressport-empty' }, [
+			wrap.appendChild( el( 'div', { class: 'migrateplus-empty' }, [
 				el( 'h2', { text: 'No imports yet' } ),
-				el( 'p', { class: 'pressport-muted', text: 'Every import you run shows up here, so you can resume it, run it again or roll it back.' } ),
+				el( 'p', { class: 'migrateplus-muted', text: 'Every import you run shows up here, so you can resume it, run it again or roll it back.' } ),
 				el( 'a', { class: 'button button-primary', href: D.importUrl, text: 'Start an import' } ),
 			] ) );
 			return;
 		}
 
 		const body = el( 'tbody' );
-		const count = el( 'span', { class: 'pressport-muted', 'aria-live': 'polite' } );
+		const count = el( 'span', { class: 'migrateplus-muted', 'aria-live': 'polite' } );
+		const pick = bulkSelection( 'job', 'import', 'Imported content is not deleted, but deleted entries can no longer be rolled back.', ( d ) => {
+			const gone = new Set( d.deleted.map( ( e ) => e.id ) );
+			state.historyJobs = ( state.historyJobs || [] ).filter( ( j ) => ! gone.has( j.id ) );
+			drawHistory( wrap );
+		} );
 		const fill = () => {
 			body.innerHTML = '';
+			pick.reset();
 			const q = state.historyQuery.trim().toLowerCase();
 			const shown = jobs.filter( ( job ) => ! q || [ job.label, job.options.post_type, STATUS_LABELS[ job.status ], job.settings.site_url, job.settings.url, job.settings.file_url ]
 				.some( ( v ) => v && String( v ).toLowerCase().includes( q ) ) );
-			shown.forEach( ( job ) => body.appendChild( historyRow( job ) ) );
+			shown.forEach( ( job ) => body.appendChild( historyRow( job, pick ) ) );
 			if ( ! shown.length ) {
-				body.appendChild( el( 'tr', {}, el( 'td', { colspan: 4, class: 'pressport-muted pressport-no-match', text: 'No imports match "' + state.historyQuery + '".' } ) ) );
+				body.appendChild( el( 'tr', {}, el( 'td', { colspan: 5, class: 'migrateplus-muted migrateplus-no-match', text: 'No imports match "' + state.historyQuery + '".' } ) ) );
 			}
 			count.textContent = shown.length === jobs.length ? jobs.length + ' import' + ( jobs.length === 1 ? '' : 's' ) : shown.length + ' of ' + jobs.length;
+			pick.sync();
 		};
 
-		wrap.appendChild( el( 'header', { class: 'pressport-history-head' }, [
-			el( 'input', { type: 'search', id: 'pressport-history-search', class: 'pressport-search', placeholder: 'Search by source, site or status', 'aria-label': 'Search history', value: state.historyQuery, oninput: ( e ) => {
+		wrap.appendChild( el( 'header', { class: 'migrateplus-history-head' }, [
+			el( 'input', { type: 'search', id: 'migrateplus-history-search', class: 'migrateplus-search', placeholder: 'Search by source, site or status', 'aria-label': 'Search history', value: state.historyQuery, oninput: ( e ) => {
 				state.historyQuery = e.target.value;
 				fill();
 			} } ),
+			pick.button,
 			count,
-			el( 'a', { class: 'button button-primary pressport-push', href: D.importUrl, text: 'Import' } ),
+			el( 'a', { class: 'button button-primary migrateplus-push', href: D.importUrl, text: 'Import' } ),
 		] ) );
-		wrap.appendChild( el( 'div', { class: 'pressport-table-scroll' }, el( 'table', { class: 'pressport-history' }, [
-			el( 'thead', {}, el( 'tr', {}, [ 'Import', 'Status', 'Result', '' ].map( ( h ) => el( 'th', { scope: 'col', text: h } ) ) ) ),
+		wrap.appendChild( el( 'div', { class: 'migrateplus-table-scroll' }, el( 'table', { class: 'migrateplus-history' }, [
+			el( 'thead', {}, el( 'tr', {}, [ pick.head() ].concat( [ 'Import', 'Status', 'Result', '' ].map( ( h ) => el( 'th', { scope: 'col', text: h } ) ) ) ) ),
 			body,
 		] ) ) );
 		fill();
 	}
 
-	function historyRow( job ) {
+	function historyRow( job, pick ) {
 		const s = job.stats;
 		const dry = Number( job.options.dry_run ) === 1;
 		const where = job.settings.site_url || job.settings.url || job.settings.file_url || '';
-		const actions = el( 'div', { class: 'pressport-row-actions' } );
+		const actions = el( 'div', { class: 'migrateplus-row-actions' } );
 		const btn = ( label, fn, cls ) => actions.appendChild( el( 'button', { type: 'button', class: 'button button-small ' + ( cls || '' ), text: label, onclick: fn } ) );
 
 		if ( [ 'running', 'ready', 'failed' ].includes( job.status ) ) {
@@ -2841,38 +3245,41 @@
 			btn( 'Run again', () => restartJob( job ) );
 		}
 		if ( ! dry && ! [ 'rolled_back', 'running' ].includes( job.status ) && importedCount( job ) > 0 ) {
-			btn( 'Roll back', () => rollback( job.id ), 'pressport-danger' );
+			btn( 'Roll back', () => rollback( job.id ), 'migrateplus-danger' );
 		}
-		actions.appendChild( el( 'button', { type: 'button', class: 'pressport-link-danger', text: 'Delete', title: 'Remove from history. Imported content is kept.', onclick: () => {
-			// eslint-disable-next-line no-alert
-			if ( window.confirm( 'Remove this import from history? Imported content is not deleted, but it can no longer be rolled back.' ) ) {
-				api( 'delete', { job: job.id } ).then( () => {
-					state.historyJobs = ( state.historyJobs || [] ).filter( ( j ) => j.id !== job.id );
-					drawHistory( root.querySelector( '.pressport-history-panel' ) );
-				} ).catch( showError );
-			}
-		} } ) );
+		actions.appendChild( el( 'button', { type: 'button', class: 'migrateplus-link-danger', text: 'Delete', title: 'Remove from history. Imported content is kept.', onclick: () => ask( {
+			title: 'Delete this import?',
+			message: 'Remove this import from history? Imported content is not deleted, but it can no longer be rolled back.',
+			label: 'Delete',
+			danger: true,
+			onConfirm: () => api( 'delete', { job: job.id } ).then( () => {
+				modal.close();
+				state.historyJobs = ( state.historyJobs || [] ).filter( ( j ) => j.id !== job.id );
+				drawHistory( root.querySelector( '.migrateplus-history-panel' ) );
+			} ).catch( ( err ) => modalError( 'Could not delete', err ) ),
+		} ) } ) );
 
 		const parts = OUTCOMES.filter( ( [ k ] ) => Number( s[ k ] ) > 0 ).map( ( [ k, label, dryLabel ] ) => Number( s[ k ] ).toLocaleString() + ' ' + ( dry ? dryLabel : label ).toLowerCase() );
 		return el( 'tr', {}, [
-			el( 'td', { class: 'pressport-h-source' }, [
-				el( 'span', { class: 'pressport-source-icon is-sm pressport-icon-' + job.source, 'aria-hidden': 'true' } ),
+			pick.cell( job.id, job.settings.file_name || job.label ),
+			el( 'td', { class: 'migrateplus-h-source' }, [
+				el( 'span', { class: 'migrateplus-source-icon is-sm migrateplus-icon-' + job.source, 'aria-hidden': 'true' } ),
 				el( 'div', {}, [
 					el( 'strong', { text: job.settings.file_name || job.label } ),
-					el( 'span', { class: 'pressport-help' }, [
+					el( 'span', { class: 'migrateplus-help' }, [
 						where ? hostOf( where ) + ' to ' : 'To ',
-						job.options.post_type + ', ',
+						( isMultiType( job ) ? job.settings.migrateplus_post_types.split( ',' ).join( ', ' ) : job.options.post_type ) + ', ',
 						el( 'time', { datetime: new Date( job.created * 1000 ).toISOString(), title: formatDate( job.created ), text: relativeTime( job.created ) } ),
 					] ),
 				] ),
 			] ),
 			el( 'td', {}, [
-				el( 'span', { class: 'pressport-badge pressport-badge-' + job.status, text: STATUS_LABELS[ job.status ] || job.status } ),
-				dry ? el( 'span', { class: 'pressport-badge pressport-badge-dry', text: 'Dry run' } ) : null,
+				el( 'span', { class: 'migrateplus-badge migrateplus-badge-' + job.status, text: STATUS_LABELS[ job.status ] || job.status } ),
+				dry ? el( 'span', { class: 'migrateplus-badge migrateplus-badge-dry', text: 'Dry run' } ) : null,
 			] ),
-			el( 'td', { class: 'pressport-h-result' }, [
+			el( 'td', { class: 'migrateplus-h-result' }, [
 				outcomeBar( s, job.total, { size: 'sm', label: 'Result' } ),
-				el( 'span', { class: 'pressport-help', text: parts.length ? parts.join( ', ' ) : 'Nothing processed yet' } ),
+				el( 'span', { class: 'migrateplus-help', text: parts.length ? parts.join( ', ' ) : 'Nothing processed yet' } ),
 			] ),
 			el( 'td', {}, actions ),
 		] );
@@ -2903,7 +3310,7 @@
 			if ( resume ) {
 				runLoop();
 			}
-		} ).catch( ( err ) => window.alert( err.message ) ); // eslint-disable-line no-alert
+		} ).catch( ( err ) => modalError( 'Could not open the import', err ) );
 	}
 
 	window.addEventListener( 'beforeunload', ( e ) => {

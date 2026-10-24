@@ -2,7 +2,7 @@
 /**
  * Media sideloading.
  *
- * @package PressPort
+ * @package MigratePlus
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -11,7 +11,7 @@ defined( 'ABSPATH' ) || exit;
  * Downloads remote images into the Media Library (deduplicated by source URL)
  * and rewrites image references inside post content.
  */
-class PressPort_Media {
+class MigratePlus_Media {
 
 	/**
 	 * Load the admin includes needed for sideloading (CLI/AJAX safe).
@@ -31,7 +31,7 @@ class PressPort_Media {
 	 * @return string|WP_Error Temp file path.
 	 */
 	public static function download( $url ) {
-		$max   = (int) PressPort_Settings::get( 'max_media_size' ) * MB_IN_BYTES;
+		$max   = (int) MigratePlus_Settings::get( 'max_media_size' ) * MB_IN_BYTES;
 		$limit = static function ( $args ) use ( $max ) {
 			$args['limit_response_size'] = $max + 1; // One byte over tells a file at the limit from a bigger one.
 			return $args;
@@ -39,15 +39,15 @@ class PressPort_Media {
 		if ( $max ) {
 			add_filter( 'http_request_args', $limit );
 		}
-		PressPort_Util::$in_request = true;
-		$tmp                        = download_url( $url, max( 60, (int) PressPort_Settings::get( 'request_timeout' ) ) );
-		PressPort_Util::$in_request = false;
+		MigratePlus_Util::$in_request = true;
+		$tmp                          = download_url( $url, max( 60, (int) MigratePlus_Settings::get( 'request_timeout' ) ) );
+		MigratePlus_Util::$in_request = false;
 		remove_filter( 'http_request_args', $limit );
 
 		if ( ! is_wp_error( $tmp ) && $max && filesize( $tmp ) > $max ) {
 			wp_delete_file( $tmp );
 			/* translators: %d: megabytes */
-			return new WP_Error( 'pressport_media_size', sprintf( __( 'Skipped: larger than the %d MB limit in Settings.', 'pressport' ), $max / MB_IN_BYTES ) );
+			return new WP_Error( 'migrateplus_media_size', sprintf( __( 'Skipped: larger than the %d MB limit in Settings.', 'migrateplus' ), $max / MB_IN_BYTES ) );
 		}
 		return $tmp;
 	}
@@ -90,7 +90,7 @@ class PressPort_Media {
 			array(
 				'post_type'        => 'attachment',
 				'post_status'      => 'any',
-				'meta_key'         => '_pressport_source_url', // phpcs:ignore WordPress.DB.SlowDBQuery
+				'meta_key'         => '_migrateplus_source_url', // phpcs:ignore WordPress.DB.SlowDBQuery
 				'meta_value'       => $url, // phpcs:ignore WordPress.DB.SlowDBQuery
 				'fields'           => 'ids',
 				'posts_per_page'   => 1,
@@ -114,7 +114,7 @@ class PressPort_Media {
 	public static function sideload( $url, $post_id, $alt = '', $base = '', $job_id = '', $reuse = true ) {
 		$url = self::absolutize( $url, $base );
 		if ( '' === $url ) {
-			return new WP_Error( 'pressport_media_url', __( 'Invalid image URL.', 'pressport' ) );
+			return new WP_Error( 'migrateplus_media_url', __( 'Invalid image URL.', 'migrateplus' ) );
 		}
 		$existing = $reuse ? self::find_existing( $url ) : 0;
 		if ( $existing ) {
@@ -157,9 +157,9 @@ class PressPort_Media {
 			}
 			return $id;
 		}
-		update_post_meta( $id, '_pressport_source_url', $url );
+		update_post_meta( $id, '_migrateplus_source_url', $url );
 		if ( $job_id ) {
-			update_post_meta( $id, '_pressport_job_id', $job_id );
+			update_post_meta( $id, '_migrateplus_job_id', $job_id );
 		}
 		if ( '' !== (string) $alt ) {
 			update_post_meta( $id, '_wp_attachment_image_alt', sanitize_text_field( $alt ) );
@@ -182,7 +182,7 @@ class PressPort_Media {
 		$url = self::absolutize( $url, $base );
 		$old = (string) get_attached_file( $attachment_id );
 		if ( '' === $url || '' === $old ) {
-			return new WP_Error( 'pressport_media_replace', __( 'Nothing to replace the file with.', 'pressport' ) );
+			return new WP_Error( 'migrateplus_media_replace', __( 'Nothing to replace the file with.', 'migrateplus' ) );
 		}
 		self::load_deps();
 		$tmp = self::download( $url );
@@ -193,7 +193,7 @@ class PressPort_Media {
 		$check = wp_check_filetype_and_ext( $tmp, $name );
 		if ( empty( $check['type'] ) ) {
 			wp_delete_file( $tmp );
-			return new WP_Error( 'pressport_media_replace', __( 'The imported file is not a type this site accepts.', 'pressport' ) );
+			return new WP_Error( 'migrateplus_media_replace', __( 'The imported file is not a type this site accepts.', 'migrateplus' ) );
 		}
 
 		// The new file goes over the unscaled original WordPress keeps for big images, or over the file itself.
@@ -212,7 +212,7 @@ class PressPort_Media {
 		}
 		if ( ! @copy( $tmp, $target ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 			wp_delete_file( $tmp );
-			return new WP_Error( 'pressport_media_replace', __( 'Could not write the new file to the uploads folder.', 'pressport' ) );
+			return new WP_Error( 'migrateplus_media_replace', __( 'Could not write the new file to the uploads folder.', 'migrateplus' ) );
 		}
 		wp_delete_file( $tmp );
 
@@ -236,7 +236,7 @@ class PressPort_Media {
 			)
 		);
 		wp_update_attachment_metadata( $attachment_id, wp_generate_attachment_metadata( $attachment_id, $target ) );
-		update_post_meta( $attachment_id, '_pressport_source_url', $url );
+		update_post_meta( $attachment_id, '_migrateplus_source_url', $url );
 		return true;
 	}
 

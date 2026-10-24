@@ -1,26 +1,27 @@
 <?php
 /**
- * Export content in a format PressPort can import.
+ * Export content in a format MigratePlus can import.
  *
- * @package PressPort
+ * @package MigratePlus
  */
 
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Writes posts to a JSON file, in batches, with everything PressPort needs
- * to rebuild them elsewhere: core fields, author email, hierarchical terms,
- * featured image URL, custom fields and ACF fields (images as URLs, related posts
- * as { id, slug, title } references, terms as names, users as emails).
+ * Writes posts to a JSON file, in batches, with everything MigratePlus needs
+ * to rebuild them elsewhere: core fields, the author's email, login and name,
+ * hierarchical terms, featured image URL, custom fields and ACF fields (images as URLs, related posts
+ * as { id, slug, title } references, terms as names, users as emails) and,
+ * when asked for, approved comments.
  *
  * JSON exports embed a field mapping, so importing the file maps itself.
  */
-class PressPort_Exporter {
+class MigratePlus_Exporter {
 
-	const STATE_PREFIX = 'pressport_export_';
+	const STATE_PREFIX = 'migrateplus_export_';
 	// Not under STATE_PREFIX: cleanup() deletes everything there after a day.
-	const LOG_PREFIX = 'pressport_exportlog_';
-	const LOG_INDEX  = 'pressport_exportlog_ids';
+	const LOG_PREFIX = 'migrateplus_exportlog_';
+	const LOG_INDEX  = 'migrateplus_exportlog_ids';
 
 	/**
 	 * Default export arguments.
@@ -28,18 +29,21 @@ class PressPort_Exporter {
 	 * @return array
 	 */
 	public static function defaults() {
-		$s = PressPort_Settings::get();
+		$s = MigratePlus_Settings::get();
 		return array(
-			'post_type'     => 'post',
-			'statuses'      => (array) $s['export_statuses'],
-			'after'         => '',
-			'before'        => '',
-			'include_acf'   => (int) $s['export_include_acf'],
-			'include_meta'  => (int) $s['export_include_meta'],
-			'include_terms' => (int) $s['export_include_terms'],
-			'include_image' => (int) $s['export_include_image'],
-			'include_woo'   => (int) $s['export_include_woo'],
-			'exclude_meta'  => self::meta_patterns( $s['export_exclude_meta'] ),
+			'post_types'       => array( 'post' ),
+			'statuses'         => (array) $s['export_statuses'],
+			'after'            => '',
+			'before'           => '',
+			'include_acf'      => (int) $s['export_include_acf'],
+			'include_meta'     => (int) $s['export_include_meta'],
+			'include_terms'    => (int) $s['export_include_terms'],
+			'include_image'    => (int) $s['export_include_image'],
+			'include_woo'      => (int) $s['export_include_woo'],
+			'include_comments' => (int) $s['export_include_comments'],
+			'include_menus'    => (int) $s['export_include_menus'],
+			'exclude_meta'     => self::meta_patterns( $s['export_exclude_meta'] ),
+			'gzip'             => MigratePlus_Util::zlib_available() ? (int) $s['export_gzip'] : 0,
 		);
 	}
 
@@ -84,51 +88,67 @@ class PressPort_Exporter {
 	 * @return array|WP_Error
 	 */
 	public static function sanitize_args( array $raw ) {
-		$args      = array_merge( self::defaults(), $raw );
-		$post_type = sanitize_key( $args['post_type'] );
-		if ( ! post_type_exists( $post_type ) ) {
-			/* translators: %s: post type */
-			return new WP_Error( 'pressport_export_type', sprintf( __( 'Unknown post type "%s".', 'pressport' ), $post_type ) );
+		$args = array_merge( self::defaults(), $raw );
+		if ( isset( $raw['post_type'] ) && ! isset( $raw['post_types'] ) ) {
+			$args['post_types'] = $raw['post_type']; // One type, or several separated by commas.
 		}
+		$types = is_array( $args['post_types'] ) ? $args['post_types'] : explode( ',', (string) $args['post_types'] );
+		$types = array_values( array_unique( array_filter( array_map( 'sanitize_key', array_map( 'trim', array_map( 'strval', $types ) ) ) ) ) );
+		if ( ! $types ) {
+			return new WP_Error( 'migrateplus_export_type', __( 'Choose at least one content type to export.', 'migrateplus' ) );
+		}
+		foreach ( $types as $type ) {
+			if ( ! post_type_exists( $type ) ) {
+				/* translators: %s: post type */
+				return new WP_Error( 'migrateplus_export_type', sprintf( __( 'Unknown post type "%s".', 'migrateplus' ), $type ) );
+			}
+		}
+		// The file is imported in this order. Media first, so featured images, ACF images and
+		// galleries further down reuse the files the media section downloaded (by their URL).
+		$types    = array_values( array_unique( array_merge( array_intersect( array( 'attachment' ), $types ), $types ) ) );
 		$allowed  = array( 'publish', 'draft', 'pending', 'private', 'future' );
 		$statuses = is_array( $args['statuses'] ) ? $args['statuses'] : explode( ',', (string) $args['statuses'] );
 		$statuses = array_values( array_intersect( array_map( 'sanitize_key', array_map( 'trim', $statuses ) ), array_merge( $allowed, array( 'any' ) ) ) );
 		if ( in_array( 'any', $statuses, true ) || ! $statuses ) {
 			$statuses = $allowed;
 		}
-		if ( 'attachment' === $post_type ) {
-			$statuses = array( 'inherit' ); // Media has no publish status of its own.
-		}
 		$date = static function ( $value ) {
 			$value = trim( (string) $value );
 			return preg_match( '/^\d{4}-\d{2}-\d{2}$/', $value ) ? $value : '';
 		};
+		if ( ! empty( $args['gzip'] ) && ! MigratePlus_Util::zlib_available() ) {
+			return new WP_Error( 'migrateplus_export_gzip', __( 'This server cannot compress the export: PHP\'s zlib extension is missing. Export it uncompressed instead.', 'migrateplus' ) );
+		}
 		return array(
-			'post_type'     => $post_type,
-			'statuses'      => $statuses,
-			'after'         => $date( $args['after'] ),
-			'before'        => $date( $args['before'] ),
-			'include_acf'   => empty( $args['include_acf'] ) ? 0 : 1,
-			'include_meta'  => empty( $args['include_meta'] ) ? 0 : 1,
-			'include_terms' => empty( $args['include_terms'] ) ? 0 : 1,
-			'include_image' => empty( $args['include_image'] ) ? 0 : 1,
-			'include_woo'   => empty( $args['include_woo'] ) ? 0 : 1,
-			'exclude_meta'  => self::meta_patterns( $args['exclude_meta'] ),
+			'post_types'       => $types,
+			'statuses'         => $statuses,
+			'after'            => $date( $args['after'] ),
+			'before'           => $date( $args['before'] ),
+			'include_acf'      => empty( $args['include_acf'] ) ? 0 : 1,
+			'include_meta'     => empty( $args['include_meta'] ) ? 0 : 1,
+			'include_terms'    => empty( $args['include_terms'] ) ? 0 : 1,
+			'include_image'    => empty( $args['include_image'] ) ? 0 : 1,
+			'include_woo'      => empty( $args['include_woo'] ) ? 0 : 1,
+			'include_comments' => empty( $args['include_comments'] ) ? 0 : 1,
+			'include_menus'    => empty( $args['include_menus'] ) ? 0 : 1,
+			'exclude_meta'     => self::meta_patterns( $args['exclude_meta'] ),
+			'gzip'             => empty( $args['gzip'] ) ? 0 : 1,
 		);
 	}
 
 	/**
-	 * WP_Query args for an export.
+	 * WP_Query args for one post type of an export.
 	 *
-	 * @param array $args  Export args.
-	 * @param int   $page  1-based page.
-	 * @param int   $limit Page size.
+	 * @param array  $args  Export args.
+	 * @param string $type  Post type.
+	 * @param int    $page  1-based page.
+	 * @param int    $limit Page size.
 	 * @return array
 	 */
-	protected static function query_args( array $args, $page, $limit ) {
+	protected static function query_args( array $args, $type, $page, $limit ) {
 		$q = array(
-			'post_type'              => $args['post_type'],
-			'post_status'            => $args['statuses'],
+			'post_type'              => $type,
+			'post_status'            => 'attachment' === $type ? array( 'inherit' ) : $args['statuses'], // Media has no publish status of its own.
 			'orderby'                => 'ID',
 			'order'                  => 'ASC',
 			'posts_per_page'         => $limit,
@@ -137,7 +157,7 @@ class PressPort_Exporter {
 			'ignore_sticky_posts'    => true,
 			'update_post_term_cache' => ! empty( $args['include_terms'] ),
 		);
-		if ( 'attachment' === $args['post_type'] ) {
+		if ( 'attachment' === $type ) {
 			// Files sold as product downloads stay private: they travel with the product export instead.
 			$q['meta_query'] = array( // phpcs:ignore WordPress.DB.SlowDBQuery
 				'relation' => 'OR',
@@ -167,14 +187,18 @@ class PressPort_Exporter {
 	}
 
 	/**
-	 * Count posts matching the export.
+	 * Posts matching the export, per post type.
 	 *
 	 * @param array $args Export args.
-	 * @return int
+	 * @return int[] post type => count, in export order.
 	 */
-	public static function count( array $args ) {
-		$q = new WP_Query( array_merge( self::query_args( $args, 1, 1 ), array( 'fields' => 'ids' ) ) );
-		return (int) $q->found_posts;
+	public static function counts( array $args ) {
+		$out = array();
+		foreach ( $args['post_types'] as $type ) {
+			$q            = new WP_Query( array_merge( self::query_args( $args, $type, 1, 1 ), array( 'fields' => 'ids' ) ) );
+			$out[ $type ] = (int) $q->found_posts;
+		}
+		return $out;
 	}
 
 	// Stateful, batched export (admin AJAX and WP-CLI share this).
@@ -187,24 +211,29 @@ class PressPort_Exporter {
 	 */
 	public static function start( array $args ) {
 		$id    = strtolower( wp_generate_password( 12, false ) );
-		$dir   = PressPort_Util::ensure_storage_dir();
+		$dir   = MigratePlus_Util::ensure_storage_dir();
 		$state = array(
 			'id'        => $id,
 			'args'      => $args,
 			'user'      => get_current_user_id(),
 			'created'   => time(),
-			'total'     => self::count( $args ),
+			'counts'    => self::counts( $args ),
 			'done'      => 0,
+			'type_pos'  => 0, // The post type being exported, in args['post_types'].
+			'type_done' => array(),
 			'last_id'   => 0,
 			'work'      => $dir . 'export-' . $id . '.jsonl', // One item per line until finished.
 			'file'      => '',
 			'meta_keys' => array(),
 			'acf_names' => array(),
 			'taxes'     => array(),
+			'menus'     => 0,
 			'complete'  => false,
 		);
+
+		$state['total'] = array_sum( $state['counts'] );
 		if ( false === file_put_contents( $state['work'], '' ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
-			return new WP_Error( 'pressport_export_write', __( 'Could not write to the uploads folder.', 'pressport' ) );
+			return new WP_Error( 'migrateplus_export_write', __( 'Could not write to the uploads folder.', 'migrateplus' ) );
 		}
 		self::save_state( $state );
 		self::log_start( $state );
@@ -272,20 +301,27 @@ class PressPort_Exporter {
 	 */
 	protected static function log_start( array $state ) {
 		$args     = $state['args'];
-		$type     = get_post_type_object( $args['post_type'] );
+		$labels   = array_map( array( __CLASS__, 'type_label' ), $args['post_types'] );
 		$user     = get_userdata( (int) $state['user'] );
-		$statuses = PressPort_Settings::export_statuses();
+		$statuses = MigratePlus_Settings::export_statuses();
 		$included = array(
-			'include_terms' => __( 'terms', 'pressport' ),
-			'include_image' => __( 'featured images', 'pressport' ),
-			'include_meta'  => __( 'custom fields', 'pressport' ),
-			'include_acf'   => __( 'ACF fields', 'pressport' ),
-			'include_woo'   => __( 'WooCommerce data', 'pressport' ),
+			'include_terms'    => __( 'terms', 'migrateplus' ),
+			'include_image'    => __( 'featured images', 'migrateplus' ),
+			'include_meta'     => __( 'custom fields', 'migrateplus' ),
+			'include_acf'      => __( 'ACF fields', 'migrateplus' ),
+			'include_woo'      => __( 'WooCommerce data', 'migrateplus' ),
+			'include_comments' => __( 'approved comments', 'migrateplus' ),
+			'include_menus'    => __( 'navigation menus', 'migrateplus' ),
 		);
+		$products = array_filter( $args['post_types'], array( 'MigratePlus_Woo', 'is_product_type' ) );
 		foreach ( $included as $key => $label ) {
-			if ( empty( $args[ $key ] ) || ( 'include_woo' === $key && ! PressPort_Woo::is_product_type( $args['post_type'] ) ) ) {
+			if ( empty( $args[ $key ] ) || ( 'include_woo' === $key && ! $products ) ) {
 				unset( $included[ $key ] );
 			}
+		}
+		$per_type = array();
+		foreach ( $state['counts'] as $type => $n ) {
+			$per_type[] = self::type_label( $type ) . ': ' . (int) $n;
 		}
 		$entry = array(
 			'id'        => $state['id'],
@@ -293,8 +329,8 @@ class PressPort_Exporter {
 			'finished'  => 0,
 			'user'      => $user ? $user->display_name : '',
 			'via'       => defined( 'WP_CLI' ) && WP_CLI ? 'cli' : 'admin',
-			'post_type' => $args['post_type'],
-			'label'     => $type ? $type->labels->name : $args['post_type'],
+			'post_type' => implode( ',', $args['post_types'] ),
+			'label'     => implode( ', ', $labels ),
 			'total'     => (int) $state['total'],
 			'done'      => 0,
 			'size'      => 0,
@@ -304,10 +340,12 @@ class PressPort_Exporter {
 		);
 		$lines = array(
 			/* translators: 1: post type, 2: count */
-			sprintf( __( 'Exporting %1$s: %2$d items match.', 'pressport' ), $entry['label'], $entry['total'] ),
-			'attachment' === $args['post_type'] ? '' : sprintf(
+			sprintf( __( 'Exporting %1$s: %2$d items match.', 'migrateplus' ), $entry['label'], $entry['total'] ),
+			/* translators: %s: count per post type */
+			count( $per_type ) > 1 ? sprintf( __( 'In import order: %s.', 'migrateplus' ), implode( ', ', $per_type ) ) : '',
+			array( 'attachment' ) === $args['post_types'] ? '' : sprintf(
 				/* translators: %s: statuses */
-				__( 'Status: %s.', 'pressport' ),
+				__( 'Status: %s.', 'migrateplus' ),
 				implode(
 					', ',
 					array_map(
@@ -320,14 +358,15 @@ class PressPort_Exporter {
 			),
 			$args['after'] || $args['before'] ? sprintf(
 				/* translators: 1: start date, 2: end date */
-				__( 'Published between %1$s and %2$s.', 'pressport' ),
-				$args['after'] ? $args['after'] : __( 'the first post', 'pressport' ),
-				$args['before'] ? $args['before'] : __( 'today', 'pressport' )
+				__( 'Published between %1$s and %2$s.', 'migrateplus' ),
+				$args['after'] ? $args['after'] : __( 'the first post', 'migrateplus' ),
+				$args['before'] ? $args['before'] : __( 'today', 'migrateplus' )
 			) : '',
 			/* translators: %s: list of what is included */
-			sprintf( __( 'Including: %s.', 'pressport' ), $included ? implode( ', ', $included ) : __( 'post fields only', 'pressport' ) ),
+			sprintf( __( 'Including: %s.', 'migrateplus' ), $included ? implode( ', ', $included ) : __( 'post fields only', 'migrateplus' ) ),
 			/* translators: %s: meta keys */
-			! empty( $args['include_meta'] ) && ! empty( $args['exclude_meta'] ) ? sprintf( __( 'Leaving out custom fields: %s.', 'pressport' ), implode( ', ', $args['exclude_meta'] ) ) : '',
+			! empty( $args['include_meta'] ) && ! empty( $args['exclude_meta'] ) ? sprintf( __( 'Leaving out custom fields: %s.', 'migrateplus' ), implode( ', ', $args['exclude_meta'] ) ) : '',
+			! empty( $args['gzip'] ) ? __( 'Writing a compressed file (.json.gz).', 'migrateplus' ) : '',
 		);
 		foreach ( array_filter( $lines ) as $line ) {
 			$entry['log'][] = self::log_line( 'info', $line );
@@ -363,13 +402,26 @@ class PressPort_Exporter {
 			$entry['log'][]    = self::log_line(
 				'success',
 				/* translators: 1: count, 2: file name, 3: size */
-				sprintf( __( 'Wrote %1$d items to %2$s (%3$s).', 'pressport' ), $entry['done'], $entry['filename'], size_format( $entry['size'] ) )
+				sprintf( __( 'Wrote %1$d items to %2$s (%3$s).', 'migrateplus' ), $entry['done'], $entry['filename'], size_format( $entry['size'] ) )
 			);
+			if ( ! empty( $state['menus'] ) ) {
+				/* translators: %d: number of menus */
+				$entry['log'][] = self::log_line( 'info', sprintf( _n( 'Included %d navigation menu.', 'Included %d navigation menus.', (int) $state['menus'], 'migrateplus' ), (int) $state['menus'] ) );
+			}
 		}
-		if ( count( $entry['log'] ) > PressPort_Job::MAX_LOG ) {
-			$entry['log'] = array_slice( $entry['log'], -PressPort_Job::MAX_LOG );
+		if ( count( $entry['log'] ) > MigratePlus_Job::MAX_LOG ) {
+			$entry['log'] = array_slice( $entry['log'], -MigratePlus_Job::MAX_LOG );
 		}
 		update_option( self::LOG_PREFIX . $entry['id'], $entry, false );
+	}
+
+	/**
+	 * @param string $type Post type.
+	 * @return string Its plural label.
+	 */
+	public static function type_label( $type ) {
+		$object = get_post_type_object( $type );
+		return $object ? $object->labels->name : $type;
 	}
 
 	/**
@@ -413,27 +465,45 @@ class PressPort_Exporter {
 		if ( $state['complete'] ) {
 			return $state;
 		}
+		// One post type per batch, in the order of args['post_types'].
+		$types = $state['args']['post_types'];
+		$type  = $types[ min( (int) $state['type_pos'], count( $types ) - 1 ) ];
 		// Page by ID, not offset: posts deleted between batches would shift later ones out of the export.
 		$after = isset( $state['last_id'] ) ? (int) $state['last_id'] : 0;
-		$ids   = array_map( 'intval', $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND ID > %d ORDER BY ID ASC LIMIT %d", $state['args']['post_type'], $after, $limit ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
-		$posts = $ids ? ( new WP_Query( array_merge( self::query_args( $state['args'], 1, $limit ), array( 'post__in' => $ids ) ) ) )->posts : array();
+		$ids   = array_map( 'intval', $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND ID > %d ORDER BY ID ASC LIMIT %d", $type, $after, $limit ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$posts = $ids ? ( new WP_Query( array_merge( self::query_args( $state['args'], $type, 1, $limit ), array( 'post__in' => $ids ) ) ) )->posts : array();
 		$lines = '';
 		$log   = array();
 		foreach ( $posts as $post ) {
-			$item   = self::export_post( $post, $state['args'] );
-			$lines .= wp_json_encode( $item, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) . "\n";
+			$item  = self::export_post( $post, $state['args'] );
+			$json  = wp_json_encode( $item, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
+			$title = '' !== $post->post_title ? $post->post_title : __( '(untitled)', 'migrateplus' );
+			if ( false === $json ) {
+				// Left out, the item would go missing from a file that says it is complete.
+				/* translators: 1: title, 2: post id, 3: JSON error */
+				self::fail( $state, sprintf( __( 'Could not write "%1$s" (#%2$d) to the export file: %3$s', 'migrateplus' ), $title, $post->ID, json_last_error_msg() ) );
+				break;
+			}
+			$lines .= $json . "\n";
 			/* translators: 1: title, 2: post id */
-			$log[]              = self::log_line( 'success', sprintf( __( 'Exported "%1$s" (#%2$d).', 'pressport' ), '' !== $post->post_title ? $post->post_title : __( '(untitled)', 'pressport' ), $post->ID ) );
+			$log[]              = self::log_line( 'success', sprintf( __( 'Exported "%1$s" (#%2$d).', 'migrateplus' ), $title, $post->ID ) );
 			$state['meta_keys'] = array_values( array_unique( array_merge( $state['meta_keys'], array_keys( $item['meta'] ) ) ) );
 			$state['acf_names'] = array_values( array_unique( array_merge( $state['acf_names'], array_keys( $item['acf'] ) ) ) );
 			$state['taxes']     = array_values( array_unique( array_merge( $state['taxes'], array_keys( $item['terms'] ) ) ) );
 			++$state['done'];
+			$state['type_done'][ $type ] = ( isset( $state['type_done'][ $type ] ) ? $state['type_done'][ $type ] : 0 ) + 1;
 		}
-		if ( '' !== $lines && false === file_put_contents( $state['work'], $lines, FILE_APPEND ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
+		// An item that could not be encoded has failed the export already.
+		if ( empty( $state['error'] ) && '' !== $lines && false === file_put_contents( $state['work'], $lines, FILE_APPEND ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
 			self::fail( $state );
-		} else {
+		} elseif ( empty( $state['error'] ) ) {
 			$state['last_id'] = $ids ? end( $ids ) : $after;
-			if ( count( $ids ) < $limit || $state['done'] >= $state['total'] ) {
+			if ( count( $ids ) < $limit ) {
+				++$state['type_pos'];
+				$state['last_id'] = 0;
+			}
+			// Not when "done" reaches "total": that was counted at the start, and posts added since would end the export before its last types.
+			if ( $state['type_pos'] >= count( $types ) ) {
 				self::finish( $state );
 			}
 		}
@@ -449,33 +519,52 @@ class PressPort_Exporter {
 	 */
 	protected static function finish( array &$state ) {
 		$args = $state['args'];
-		$name = sanitize_file_name( 'pressport-' . $args['post_type'] . '-' . gmdate( 'Y-m-d-His' ) . '.json' );
-		$dest = PressPort_Util::storage_dir() . 'export-' . $state['id'] . '-' . $name;
+		// Compressed while it is written, line by line like the plain file, so memory stays flat whatever its size.
+		$gzip = ! empty( $args['gzip'] ) && MigratePlus_Util::zlib_available();
+		// ".gz" after sanitizing: sanitize_file_name() would turn the inner ".json" into ".json_".
+		$name = sanitize_file_name( 'migrateplus-' . ( 1 === count( $args['post_types'] ) ? $args['post_types'][0] : 'content' ) . '-' . gmdate( 'Y-m-d-His' ) . '.json' ) . ( $gzip ? '.gz' : '' );
+		$dest = MigratePlus_Util::storage_dir() . 'export-' . $state['id'] . '-' . $name;
 		$in   = fopen( $state['work'], 'rb' ); // phpcs:ignore WordPress.WP.AlternativeFunctions
-		$out  = fopen( $dest, 'wb' ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$out  = $gzip ? gzopen( $dest, 'wb6' ) : fopen( $dest, 'wb' ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 		if ( ! $in || ! $out ) {
 			if ( $in ) {
 				fclose( $in ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 			}
 			if ( $out ) {
-				fclose( $out ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+				$gzip ? gzclose( $out ) : fclose( $out ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 			}
 			self::fail( $state );
 			return;
 		}
+		// "post_type" only when there is one: older MigratePlus versions import such a file as that type.
+		$types  = $args['post_types'];
 		$header = array(
-			'version'   => PRESSPORT_VERSION,
-			'exported'  => gmdate( 'c' ),
-			'site'      => home_url(),
-			'post_type' => $args['post_type'],
-			'count'     => $state['done'],
-			'mapping'   => self::mapping_for( $state ),
+			'version'  => MIGRATEPLUS_VERSION,
+			'exported' => gmdate( 'c' ),
+			'site'     => home_url(),
 		);
+		if ( 1 === count( $types ) ) {
+			$header['post_type'] = $types[0];
+		}
+		$header['post_types'] = $types;
+		$header['counts']     = (object) $state['type_done'];
+		$header['count']      = $state['done'];
+		$header['mapping']    = self::mapping_for( $state );
+		$menus                = ! empty( $args['include_menus'] ) ? MigratePlus_Menus::export() : array();
+		$menus_json           = $menus ? wp_json_encode( $menus, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) : '';
+		if ( false === $menus_json ) {
+			fclose( $in ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+			$gzip ? gzclose( $out ) : fclose( $out ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+			wp_delete_file( $dest );
+			/* translators: %s: JSON error */
+			self::fail( $state, sprintf( __( 'Could not write the navigation menus to the export file: %s', 'migrateplus' ), json_last_error_msg() ) );
+			return;
+		}
 		// A full disk must not leave a cut-off file marked complete: every write is checked.
-		$write = static function ( $data ) use ( $out ) {
-			return strlen( $data ) === fwrite( $out, $data ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$write = static function ( $data ) use ( $out, $gzip ) {
+			return strlen( $data ) === ( $gzip ? gzwrite( $out, $data ) : fwrite( $out, $data ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 		};
-		$ok    = $write( '{"pressport":' . wp_json_encode( $header, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT ) . ",\n\"items\":[\n" );
+		$ok    = $write( '{"migrateplus":' . wp_json_encode( $header, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT ) . ",\n\"items\":[\n" );
 		$first = true;
 		while ( $ok && false !== ( $line = fgets( $in ) ) ) { // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition
 			$line = rtrim( $line, "\r\n" );
@@ -485,9 +574,9 @@ class PressPort_Exporter {
 			$ok    = $write( ( $first ? '' : ",\n" ) . $line );
 			$first = false;
 		}
-		$ok = $ok && $write( "\n]}\n" );
+		$ok = $ok && $write( "\n]" . ( $menus ? ",\n\"menus\":" . $menus_json : '' ) . "}\n" );
 		fclose( $in ); // phpcs:ignore WordPress.WP.AlternativeFunctions
-		$ok = fclose( $out ) && $ok; // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$ok = ( $gzip ? gzclose( $out ) : fclose( $out ) ) && $ok; // phpcs:ignore WordPress.WP.AlternativeFunctions
 		if ( ! $ok ) {
 			wp_delete_file( $dest );
 			self::fail( $state );
@@ -496,6 +585,7 @@ class PressPort_Exporter {
 		wp_delete_file( $state['work'] );
 
 		$state['file']     = $dest;
+		$state['menus']    = count( $menus );
 		$state['filename'] = $name;
 		$state['size']     = (int) filesize( $dest );
 		$state['complete'] = true;
@@ -505,10 +595,11 @@ class PressPort_Exporter {
 	 * Stop an export whose file could not be written. It counts as complete so
 	 * batch loops end, with no file to download.
 	 *
-	 * @param array $state State (updated in place).
+	 * @param array  $state   State (updated in place).
+	 * @param string $message Why, when it is not a failed write.
 	 */
-	protected static function fail( array &$state ) {
-		$state['error']    = __( 'Could not write the export file in the uploads folder.', 'pressport' );
+	protected static function fail( array &$state, $message = '' ) {
+		$state['error']    = '' !== $message ? $message : __( 'Could not write the export file in the uploads folder.', 'migrateplus' );
 		$state['complete'] = true;
 		$state['file']     = '';
 		$state['filename'] = '';
@@ -516,28 +607,30 @@ class PressPort_Exporter {
 	}
 
 	/**
-	 * Mapping that PressPort applies automatically when it imports this export.
+	 * Mapping that MigratePlus applies automatically when it imports this export.
 	 *
 	 * @param array $state State.
 	 * @return array
 	 */
 	public static function mapping_for( array $state ) {
 		$fields = array(
-			'source_id'      => 'id',
-			'post_type'      => 'post_type',
-			'post_title'     => 'title',
-			'post_content'   => 'content',
-			'post_excerpt'   => 'excerpt',
-			'post_date'      => 'date_gmt',
-			'post_name'      => 'slug',
-			'post_status'    => 'status',
-			'post_author'    => 'author',
-			'menu_order'     => 'menu_order',
-			'comment_status' => 'comment_status',
-			'post_parent'    => 'parent.id',
-			'post_password'  => 'password',
-			'page_template'  => 'template',
-			'post_format'    => 'format',
+			'source_id'         => 'id',
+			'post_type'         => 'post_type',
+			'post_title'        => 'title',
+			'post_content'      => 'content',
+			'post_excerpt'      => 'excerpt',
+			'post_date'         => 'date_gmt',
+			'post_name'         => 'slug',
+			'post_status'       => 'status',
+			'post_author'       => 'author',
+			'post_author_login' => 'author_login',
+			'post_author_name'  => 'author_name',
+			'menu_order'        => 'menu_order',
+			'comment_status'    => 'comment_status',
+			'post_parent'       => 'parent.id',
+			'post_password'     => 'password',
+			'page_template'     => 'template',
+			'post_format'       => 'format',
 		);
 		if ( ! empty( $state['args']['include_terms'] ) ) {
 			if ( in_array( 'category', $state['taxes'], true ) ) {
@@ -547,10 +640,16 @@ class PressPort_Exporter {
 				$fields['tags'] = 'terms.post_tag';
 			}
 		}
-		if ( 'attachment' === $state['args']['post_type'] ) {
+		if ( ! empty( $state['args']['include_comments'] ) ) {
+			$fields['comments'] = 'comments';
+		}
+		// One mapping for every post type in the file: media fields are only read for media, featured images for the rest.
+		$types = $state['args']['post_types'];
+		if ( in_array( 'attachment', $types, true ) ) {
 			$fields['media_url'] = 'file';
 			$fields['media_alt'] = 'alt';
-		} elseif ( ! empty( $state['args']['include_image'] ) ) {
+		}
+		if ( array_diff( $types, array( 'attachment' ) ) && ! empty( $state['args']['include_image'] ) ) {
 			$fields['featured_image']     = 'featured_image';
 			$fields['featured_image_alt'] = 'featured_image_alt';
 		}
@@ -648,8 +747,8 @@ class PressPort_Exporter {
 		}
 
 		$acf_names = array();
-		if ( ! empty( $args['include_acf'] ) && PressPort_ACF::active() ) {
-			foreach ( PressPort_ACF::fields_for_post_type( $post->post_type, $post->ID ) as $f ) {
+		if ( ! empty( $args['include_acf'] ) && MigratePlus_ACF::active() ) {
+			foreach ( MigratePlus_ACF::fields_for_post_type( $post->post_type, $post->ID ) as $f ) {
 				$field = function_exists( 'acf_get_field' ) ? acf_get_field( $f['key'] ) : null;
 				if ( ! $field ) {
 					continue;
@@ -665,27 +764,80 @@ class PressPort_Exporter {
 
 		if ( ! empty( $args['include_meta'] ) ) {
 			foreach ( get_post_meta( $post->ID ) as $key => $values ) {
-				// Skip private keys (ACF references, edit locks, PressPort tracking) and ACF values exported above.
+				// Skip private keys (ACF references, edit locks, MigratePlus tracking) and ACF values exported above.
 				if ( '' === $key || '_' === $key[0] || isset( $acf_names[ $key ] ) || is_protected_meta( $key, 'post' ) ) {
 					continue;
 				}
 				if ( ! empty( $args['exclude_meta'] ) && self::meta_excluded( $key, $args['exclude_meta'] ) ) {
 					continue;
 				}
-				if ( PressPort_ACF::active() && 0 === strpos( (string) get_post_meta( $post->ID, '_' . $key, true ), 'field_' ) ) {
+				if ( MigratePlus_ACF::active() && 0 === strpos( (string) get_post_meta( $post->ID, '_' . $key, true ), 'field_' ) ) {
 					continue; // Sub-field rows of an ACF repeater/group, e.g. items_0_title.
 				}
-				// Arrays stay arrays; a key stored in several rows becomes { "_pressport_rows": [ ... ] }.
+				// Arrays stay arrays; a key stored in several rows becomes { "_migrateplus_rows": [ ... ] }.
 				$rows                 = array_map( 'maybe_unserialize', $values );
-				$item['meta'][ $key ] = count( $rows ) > 1 ? array( '_pressport_rows' => $rows ) : $rows[0];
+				$item['meta'][ $key ] = count( $rows ) > 1 ? array( '_migrateplus_rows' => $rows ) : $rows[0];
 			}
 		}
 
-		if ( ! empty( $args['include_woo'] ) && PressPort_Woo::is_product_type( $post->post_type ) ) {
-			PressPort_Woo::export_product( $post, $item, $args );
+		if ( ! empty( $args['include_woo'] ) && MigratePlus_Woo::is_product_type( $post->post_type ) ) {
+			MigratePlus_Woo::export_product( $post, $item, $args );
 		}
 
-		return apply_filters( 'pressport_export_item', $item, $post, $args );
+		if ( ! empty( $args['include_comments'] ) ) {
+			$item['comments'] = self::export_comments( $post, $args );
+		}
+
+		return apply_filters( 'migrateplus_export_item', $item, $post, $args );
+	}
+
+	/**
+	 * A post's approved comments, oldest first, each with its parent's id so replies
+	 * can be threaded again. Pending, spam and trashed comments stay behind: they
+	 * are moderation work on this site, not content to move.
+	 *
+	 * @param WP_Post $post Post.
+	 * @param array   $args Export args (custom field keys to leave out apply to comment meta too).
+	 * @return array[]
+	 */
+	protected static function export_comments( WP_Post $post, array $args ) {
+		$out = array();
+		foreach ( get_comments(
+			array(
+				'post_id' => $post->ID,
+				'status'  => 'approve',
+				'orderby' => 'comment_ID',
+				'order'   => 'ASC',
+			)
+		) as $c ) {
+			$user = $c->user_id ? get_userdata( (int) $c->user_id ) : false;
+			$meta = array();
+			foreach ( get_comment_meta( $c->comment_ID ) as $key => $values ) {
+				if ( '' === $key || '_' === $key[0] || is_protected_meta( $key, 'comment' ) ) {
+					continue;
+				}
+				if ( ! empty( $args['exclude_meta'] ) && self::meta_excluded( $key, $args['exclude_meta'] ) ) {
+					continue;
+				}
+				$rows         = array_map( 'maybe_unserialize', $values );
+				$meta[ $key ] = count( $rows ) > 1 ? array( '_migrateplus_rows' => $rows ) : $rows[0];
+			}
+			$out[] = array(
+				'id'           => (int) $c->comment_ID,
+				'parent'       => (int) $c->comment_parent,
+				'author'       => $c->comment_author,
+				'author_email' => $c->comment_author_email,
+				'author_url'   => $c->comment_author_url,
+				'date'         => $c->comment_date,
+				'date_gmt'     => '0000-00-00 00:00:00' === $c->comment_date_gmt ? '' : gmdate( 'c', strtotime( $c->comment_date_gmt . ' UTC' ) ),
+				'content'      => $c->comment_content,
+				'approved'     => $c->comment_approved,
+				'type'         => $c->comment_type,
+				'user_email'   => $user ? $user->user_email : '',
+				'meta'         => $meta,
+			);
+		}
+		return $out;
 	}
 
 	/**
@@ -694,7 +846,7 @@ class PressPort_Exporter {
 	 * @param int $id Post id.
 	 * @return array|null
 	 */
-	protected static function post_ref( $id ) {
+	public static function post_ref( $id ) {
 		$p = get_post( $id );
 		if ( ! $p ) {
 			return null;
@@ -714,7 +866,7 @@ class PressPort_Exporter {
 	 * @param bool    $hierarchical Hierarchical.
 	 * @return string
 	 */
-	protected static function term_path( WP_Term $term, $hierarchical ) {
+	public static function term_path( WP_Term $term, $hierarchical ) {
 		$name = html_entity_decode( $term->name, ENT_QUOTES, 'UTF-8' );
 		if ( ! $hierarchical || ! $term->parent ) {
 			return $name;
@@ -733,7 +885,7 @@ class PressPort_Exporter {
 	}
 
 	/**
-	 * Raw ACF value => portable value that PressPort_ACF::convert() reads back.
+	 * Raw ACF value => portable value that MigratePlus_ACF::convert() reads back.
 	 *
 	 * @param array $field Field.
 	 * @param mixed $raw   Raw stored value (get_field( ..., false )).

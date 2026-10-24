@@ -2,20 +2,20 @@
 /**
  * Source registry.
  *
- * @package PressPort
+ * @package MigratePlus
  */
 
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Registry of available sources. Extend with the "pressport_sources" filter:
+ * Registry of available sources. Extend with the "migrateplus_sources" filter:
  *
- *     add_filter( 'pressport_sources', function ( $sources ) {
- *         $sources['my_cms'] = 'My_CMS_Source'; // implements PressPort_Source
+ *     add_filter( 'migrateplus_sources', function ( $sources ) {
+ *         $sources['my_cms'] = 'My_CMS_Source'; // implements MigratePlus_Source
  *         return $sources;
  *     } );
  */
-class PressPort_Sources {
+class MigratePlus_Sources {
 
 	/**
 	 * Map of source id => class name.
@@ -24,9 +24,9 @@ class PressPort_Sources {
 	 */
 	public static function all() {
 		$sources = array(
-			'json' => 'PressPort_Source_JSON',
+			'json' => 'MigratePlus_Source_JSON',
 		);
-		return (array) apply_filters( 'pressport_sources', $sources );
+		return (array) apply_filters( 'migrateplus_sources', $sources );
 	}
 
 	/**
@@ -34,18 +34,18 @@ class PressPort_Sources {
 	 *
 	 * @param string $id       Source id.
 	 * @param array  $settings Settings.
-	 * @return PressPort_Source|WP_Error
+	 * @return MigratePlus_Source|WP_Error
 	 */
 	public static function create( $id, array $settings ) {
 		$all = self::all();
 		if ( empty( $all[ $id ] ) || ! class_exists( $all[ $id ] ) ) {
 			/* translators: %s: source id */
-			return new WP_Error( 'pressport_source', sprintf( __( 'Unknown source "%s".', 'pressport' ), $id ) );
+			return new WP_Error( 'migrateplus_source', sprintf( __( 'Unknown source "%s".', 'migrateplus' ), $id ) );
 		}
 		$class = $all[ $id ];
 		$obj   = new $class( $settings );
-		if ( ! $obj instanceof PressPort_Source ) {
-			return new WP_Error( 'pressport_source', __( 'Source class must implement PressPort_Source.', 'pressport' ) );
+		if ( ! $obj instanceof MigratePlus_Source ) {
+			return new WP_Error( 'migrateplus_source', __( 'Source class must implement MigratePlus_Source.', 'migrateplus' ) );
 		}
 		return $obj;
 	}

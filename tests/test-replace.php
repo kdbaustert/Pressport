@@ -2,7 +2,7 @@
 /**
  * Find & Replace: matching, serialized data, real runs and rollback.
  *
- * @package PressPort
+ * @package MigratePlus
  */
 class Test_Replace extends WP_UnitTestCase {
 
@@ -14,7 +14,7 @@ class Test_Replace extends WP_UnitTestCase {
 	 */
 	private function replace( $text, $search, $whole = true ) {
 		$count = 0;
-		return PressPort_Replace::replace_value( $text, PressPort_Replace::matcher( $search, 'NEW', false, $whole ), $count );
+		return MigratePlus_Replace::replace_value( $text, MigratePlus_Replace::matcher( $search, 'NEW', false, $whole ), $count );
 	}
 
 	/**
@@ -24,12 +24,12 @@ class Test_Replace extends WP_UnitTestCase {
 	 * @return array Final state.
 	 */
 	private function run_all( array $args ) {
-		$state = PressPort_Replace::start( $args );
+		$state = MigratePlus_Replace::start( $args );
 		$this->assertIsArray( $state );
 		while ( ! $state['complete'] ) {
-			PressPort_Replace::run_batch( $state );
+			MigratePlus_Replace::run_batch( $state );
 		}
-		PressPort_Replace::delete( $state['id'] );
+		MigratePlus_Replace::delete( $state['id'] );
 		wp_cache_flush();
 		return $state;
 	}
@@ -77,7 +77,7 @@ class Test_Replace extends WP_UnitTestCase {
 			)
 		);
 		$count = 0;
-		$out   = PressPort_Replace::replace_value( $value, PressPort_Replace::matcher( 'http://old.test', 'https://a-much-longer.example', false ), $count );
+		$out   = MigratePlus_Replace::replace_value( $value, MigratePlus_Replace::matcher( 'http://old.test', 'https://a-much-longer.example', false ), $count );
 		$data  = unserialize( $out ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions
 
 		$this->assertSame( 3, $count );
@@ -90,7 +90,7 @@ class Test_Replace extends WP_UnitTestCase {
 	public function test_objects_of_real_classes_are_kept_byte_for_byte() {
 		$value = 'a:2:{i:0;O:8:"Some_Cls":1:{s:1:"u";s:15:"http://old.test";}i:1;s:15:"http://old.test";}';
 		$count = 0;
-		$out   = PressPort_Replace::replace_value( $value, PressPort_Replace::matcher( 'http://old.test', 'https://x', false ), $count );
+		$out   = MigratePlus_Replace::replace_value( $value, MigratePlus_Replace::matcher( 'http://old.test', 'https://x', false ), $count );
 
 		$this->assertSame( 1, $count );
 		$this->assertStringContainsString( 'O:8:"Some_Cls":1:{s:1:"u";s:15:"http://old.test";}', $out );
@@ -115,7 +115,7 @@ class Test_Replace extends WP_UnitTestCase {
 
 		$this->assertSame( 1, $state['results'][ $GLOBALS['wpdb']->posts ]['rows'] );
 		$this->assertSame( 'Go to http://old.test/a', get_post( $post_id )->post_content );
-		$this->assertSame( array(), PressPort_Replace::history() );
+		$this->assertSame( array(), MigratePlus_Replace::history() );
 	}
 
 	public function test_real_run_then_rollback_restores_and_keeps_later_edits() {
@@ -124,8 +124,8 @@ class Test_Replace extends WP_UnitTestCase {
 		$option_before = $wpdb->get_var( "SELECT option_value FROM {$wpdb->options} WHERE option_name = 'pp_test_option'" );
 		$post_id       = self::factory()->post->create( array( 'post_content' => 'Link http://old.test/a and http://old.test.evil.com' ) );
 		update_post_meta( $post_id, 'plain', 'http://old.test' );
-		update_post_meta( $post_id, '_pressport_source_url', 'http://old.test/img.jpg' );
-		update_option( 'pressport_test_mark', 'http://old.test' );
+		update_post_meta( $post_id, '_migrateplus_source_url', 'http://old.test/img.jpg' );
+		update_option( 'migrateplus_test_mark', 'http://old.test' );
 
 		$this->run_all(
 			array(
@@ -139,19 +139,19 @@ class Test_Replace extends WP_UnitTestCase {
 		$this->assertSame( 'Link https://new.example/a and http://old.test.evil.com', get_post( $post_id )->post_content );
 		$this->assertSame( 'https://new.example/page', get_option( 'pp_test_option' )['link'] );
 		$this->assertSame( 'https://new.example', get_post_meta( $post_id, 'plain', true ) );
-		$this->assertSame( 'http://old.test/img.jpg', get_post_meta( $post_id, '_pressport_source_url', true ), 'PressPort tracking meta is skipped.' );
-		$this->assertSame( 'http://old.test', get_option( 'pressport_test_mark' ), 'PressPort options are skipped.' );
+		$this->assertSame( 'http://old.test/img.jpg', get_post_meta( $post_id, '_migrateplus_source_url', true ), 'MigratePlus tracking meta is skipped.' );
+		$this->assertSame( 'http://old.test', get_option( 'migrateplus_test_mark' ), 'MigratePlus options are skipped.' );
 
 		// Changed after the replacement: rollback must not overwrite it.
 		update_post_meta( $post_id, 'plain', 'edited by hand' );
 
-		$history = PressPort_Replace::history();
+		$history = MigratePlus_Replace::history();
 		$this->assertCount( 1, $history );
 		$this->assertSame( 'complete', $history[0]['status'] );
 		$this->assertTrue( $history[0]['can_undo'] );
 
 		do {
-			$entry = PressPort_Replace::rollback_batch( $history[0]['id'] );
+			$entry = MigratePlus_Replace::rollback_batch( $history[0]['id'] );
 			$this->assertIsArray( $entry );
 		} while ( 'rolled_back' !== $entry['status'] );
 		wp_cache_flush();
@@ -162,14 +162,14 @@ class Test_Replace extends WP_UnitTestCase {
 		$this->assertSame( $option_before, $wpdb->get_var( "SELECT option_value FROM {$wpdb->options} WHERE option_name = 'pp_test_option'" ) );
 		$this->assertSame( 'edited by hand', get_post_meta( $post_id, 'plain', true ) );
 
-		$this->assertWPError( PressPort_Replace::rollback_batch( $history[0]['id'] ), 'A run cannot be rolled back twice.' );
-		PressPort_Replace::forget( $history[0]['id'] );
+		$this->assertWPError( MigratePlus_Replace::rollback_batch( $history[0]['id'] ), 'A run cannot be rolled back twice.' );
+		MigratePlus_Replace::forget( $history[0]['id'] );
 	}
 
 	public function test_interrupted_run_can_be_rolled_back_once_idle() {
 		global $wpdb;
 		$post_id = self::factory()->post->create( array( 'post_content' => 'Go to http://old.test/a' ) );
-		$state   = PressPort_Replace::start(
+		$state   = MigratePlus_Replace::start(
 			array(
 				'search'  => 'http://old.test',
 				'replace' => 'https://new.example',
@@ -177,34 +177,34 @@ class Test_Replace extends WP_UnitTestCase {
 				'dry_run' => 0,
 			)
 		);
-		PressPort_Replace::run_batch( $state );
+		MigratePlus_Replace::run_batch( $state );
 		// The request died before the browser asked for the next batch: state and a "running" entry are left.
-		$entry           = PressPort_Replace::history_entry( $state['id'] );
+		$entry           = MigratePlus_Replace::history_entry( $state['id'] );
 		$entry['status'] = 'running';
-		update_option( PressPort_Replace::LOG_PREFIX . $state['id'], $entry, false );
+		update_option( MigratePlus_Replace::LOG_PREFIX . $state['id'], $entry, false );
 		$state['complete'] = false;
-		update_option( PressPort_Replace::STATE_PREFIX . $state['id'], $state, false );
+		update_option( MigratePlus_Replace::STATE_PREFIX . $state['id'], $state, false );
 
-		$this->assertWPError( PressPort_Replace::rollback_batch( $state['id'] ), 'A run that just made progress is still running.' );
-		$this->assertSame( 'running', PressPort_Replace::history()[0]['status'] );
-		$this->assertFalse( PressPort_Replace::history()[0]['can_undo'] );
+		$this->assertWPError( MigratePlus_Replace::rollback_batch( $state['id'] ), 'A run that just made progress is still running.' );
+		$this->assertSame( 'running', MigratePlus_Replace::history()[0]['status'] );
+		$this->assertFalse( MigratePlus_Replace::history()[0]['can_undo'] );
 
 		$state['created'] = time() - 600;
 		$state['updated'] = time() - 600;
-		update_option( PressPort_Replace::STATE_PREFIX . $state['id'], $state, false );
-		$history = PressPort_Replace::history();
+		update_option( MigratePlus_Replace::STATE_PREFIX . $state['id'], $state, false );
+		$history = MigratePlus_Replace::history();
 		$this->assertSame( 'stopped', $history[0]['status'] );
 		$this->assertTrue( $history[0]['can_resume'] );
 		$this->assertTrue( $history[0]['can_undo'] );
 
 		do {
-			$entry = PressPort_Replace::rollback_batch( $state['id'] );
+			$entry = MigratePlus_Replace::rollback_batch( $state['id'] );
 			$this->assertIsArray( $entry );
 		} while ( 'rolled_back' !== $entry['status'] );
 		clean_post_cache( $post_id );
 		$this->assertSame( 'Go to http://old.test/a', get_post( $post_id )->post_content );
-		$this->assertNull( PressPort_Replace::load_state( $state['id'] ), 'A run being rolled back cannot be resumed.' );
-		PressPort_Replace::forget( $state['id'] );
+		$this->assertNull( MigratePlus_Replace::load_state( $state['id'] ), 'A run being rolled back cannot be resumed.' );
+		MigratePlus_Replace::forget( $state['id'] );
 	}
 
 	public function test_failed_restore_keeps_the_rollback_file_for_a_retry() {
@@ -218,37 +218,37 @@ class Test_Replace extends WP_UnitTestCase {
 				'dry_run' => 0,
 			)
 		);
-		$id = PressPort_Replace::history()[0]['id'];
+		$id = MigratePlus_Replace::history()[0]['id'];
 
 		// The database refuses the restore.
 		$break = static function ( $query ) use ( $wpdb ) {
-			return 0 === strpos( $query, "UPDATE `{$wpdb->posts}`" ) ? 'UPDATE pressport_no_such_table SET a = 1' : $query;
+			return 0 === strpos( $query, "UPDATE `{$wpdb->posts}`" ) ? 'UPDATE migrateplus_no_such_table SET a = 1' : $query;
 		};
 		add_filter( 'query', $break );
 		$suppress = $wpdb->suppress_errors( true );
-		$result   = PressPort_Replace::rollback_batch( $id );
+		$result   = MigratePlus_Replace::rollback_batch( $id );
 		$wpdb->suppress_errors( $suppress );
 		remove_filter( 'query', $break );
 
 		$this->assertWPError( $result );
-		$entry = PressPort_Replace::history()[0];
+		$entry = MigratePlus_Replace::history()[0];
 		$this->assertSame( 'rollback_failed', $entry['status'] );
 		$this->assertTrue( $entry['can_undo'], 'The rollback file is kept.' );
 
 		do {
-			$entry = PressPort_Replace::rollback_batch( $id );
+			$entry = MigratePlus_Replace::rollback_batch( $id );
 			$this->assertIsArray( $entry );
 		} while ( 'rolled_back' !== $entry['status'] );
 		clean_post_cache( $post_id );
 		$this->assertSame( 'Go to http://old.test/a', get_post( $post_id )->post_content );
 		$this->assertSame( 0, $entry['kept'] );
 		$this->assertSame( 0, $entry['failed'] );
-		PressPort_Replace::forget( $id );
+		MigratePlus_Replace::forget( $id );
 	}
 
 	public function test_start_validates_input() {
 		$this->assertWPError(
-			PressPort_Replace::start(
+			MigratePlus_Replace::start(
 				array(
 					'search' => '',
 					'tables' => array( $GLOBALS['wpdb']->posts ),
@@ -256,7 +256,7 @@ class Test_Replace extends WP_UnitTestCase {
 			)
 		);
 		$this->assertWPError(
-			PressPort_Replace::start(
+			MigratePlus_Replace::start(
 				array(
 					'search'  => 'a',
 					'replace' => 'a',
@@ -265,7 +265,7 @@ class Test_Replace extends WP_UnitTestCase {
 			)
 		);
 		$this->assertWPError(
-			PressPort_Replace::start(
+			MigratePlus_Replace::start(
 				array(
 					'search'  => 'a',
 					'replace' => 'b',

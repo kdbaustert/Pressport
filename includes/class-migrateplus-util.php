@@ -2,7 +2,7 @@
 /**
  * Shared helpers.
  *
- * @package PressPort
+ * @package MigratePlus
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -10,10 +10,10 @@ defined( 'ABSPATH' ) || exit;
 /**
  * Static utility helpers used across sources, importer and UI.
  */
-class PressPort_Util {
+class MigratePlus_Util {
 
 	/**
-	 * True while PressPort is making an outbound request.
+	 * True while MigratePlus is making an outbound request.
 	 *
 	 * @var bool
 	 */
@@ -26,7 +26,7 @@ class PressPort_Util {
 	 * @return bool
 	 */
 	public static function allow_local_host( $external, $host, $url ) { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed -- filter signature.
-		if ( self::$in_request && PressPort_Settings::get( 'allow_local_sources' ) ) {
+		if ( self::$in_request && MigratePlus_Settings::get( 'allow_local_sources' ) ) {
 			return true;
 		}
 		return $external;
@@ -39,7 +39,7 @@ class PressPort_Util {
 	 * @return int[]
 	 */
 	public static function allow_local_port( $ports, $host = '', $url = '' ) {
-		if ( self::$in_request && PressPort_Settings::get( 'allow_local_sources' ) && $url ) {
+		if ( self::$in_request && MigratePlus_Settings::get( 'allow_local_sources' ) && $url ) {
 			$port = wp_parse_url( $url, PHP_URL_PORT );
 			if ( $port ) {
 				$ports[] = (int) $port;
@@ -55,7 +55,7 @@ class PressPort_Util {
 	 */
 	public static function storage_dir() {
 		$uploads = wp_upload_dir( null, false );
-		return trailingslashit( $uploads['basedir'] ) . 'pressport/';
+		return trailingslashit( $uploads['basedir'] ) . 'migrateplus/';
 	}
 
 	/**
@@ -75,6 +75,15 @@ class PressPort_Util {
 			file_put_contents( $dir . '.htaccess', "Require all denied\nDeny from all\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 		}
 		return $dir;
+	}
+
+	/**
+	 * Whether PHP can write and read gzip files (.json.gz exports and imports).
+	 *
+	 * @return bool
+	 */
+	public static function zlib_available() {
+		return function_exists( 'gzopen' ) && function_exists( 'gzread' ) && function_exists( 'gzwrite' );
 	}
 
 	/**
@@ -170,7 +179,7 @@ class PressPort_Util {
 	 * Turn common "share" links into direct download links.
 	 *
 	 * Handles Google Sheets, Google Drive, Dropbox and GitHub blob URLs. Other
-	 * URLs are returned unchanged. Filter with "pressport_remote_file_url".
+	 * URLs are returned unchanged. Filter with "migrateplus_remote_file_url".
 	 *
 	 * @param string $url URL.
 	 * @param string $ext Preferred extension (used for Google Sheets exports).
@@ -197,7 +206,7 @@ class PressPort_Util {
 			$direct = 'https://raw.githubusercontent.com/' . $m[1] . '/' . $m[2] . '/' . $m[3];
 		}
 
-		return (string) apply_filters( 'pressport_remote_file_url', $direct, $url );
+		return (string) apply_filters( 'migrateplus_remote_file_url', $direct, $url );
 	}
 
 	/**
@@ -212,7 +221,7 @@ class PressPort_Util {
 		$url    = esc_url_raw( trim( (string) $url ), array( 'http', 'https' ) );
 		$scheme = $url ? wp_parse_url( $url, PHP_URL_SCHEME ) : '';
 		if ( ! $url || ! in_array( $scheme, array( 'http', 'https' ), true ) ) {
-			return new WP_Error( 'pressport_remote_url', __( 'Enter a valid http:// or https:// URL.', 'pressport' ) );
+			return new WP_Error( 'migrateplus_remote_url', __( 'Enter a valid http:// or https:// URL.', 'migrateplus' ) );
 		}
 
 		$allowed = array_values( array_filter( array_map( 'strtolower', $allowed ) ) );
@@ -222,7 +231,7 @@ class PressPort_Util {
 		}
 		$fetch = self::direct_download_url( $url, $ext );
 
-		$max_mb = max( 1, (int) PressPort_Settings::get( 'max_remote_size' ) );
+		$max_mb = max( 1, (int) MigratePlus_Settings::get( 'max_remote_size' ) );
 		$limit  = $max_mb * MB_IN_BYTES;
 		$dest   = self::ensure_storage_dir() . 'remote-' . wp_generate_password( 12, false ) . '.' . $ext;
 
@@ -234,13 +243,13 @@ class PressPort_Util {
 		$response         = wp_safe_remote_get(
 			$fetch,
 			array(
-				'timeout'             => max( 60, (int) PressPort_Settings::get( 'request_timeout' ) ),
+				'timeout'             => max( 60, (int) MigratePlus_Settings::get( 'request_timeout' ) ),
 				'redirection'         => 5,
 				'stream'              => true,
 				'filename'            => $dest,
 				'limit_response_size' => $limit + 1,
 				'headers'             => $headers,
-				'user-agent'          => 'PressPort/' . PRESSPORT_VERSION . '; ' . home_url(),
+				'user-agent'          => 'MigratePlus/' . MIGRATEPLUS_VERSION . '; ' . home_url(),
 			)
 		);
 		self::$in_request = false;
@@ -254,21 +263,21 @@ class PressPort_Util {
 
 		if ( is_wp_error( $response ) ) {
 			/* translators: %s: error message */
-			return $fail( new WP_Error( 'pressport_remote_http', sprintf( __( 'Could not download the file: %s', 'pressport' ), $response->get_error_message() ) ) );
+			return $fail( new WP_Error( 'migrateplus_remote_http', sprintf( __( 'Could not download the file: %s', 'migrateplus' ), $response->get_error_message() ) ) );
 		}
 		$code = (int) wp_remote_retrieve_response_code( $response );
 		if ( $code < 200 || $code >= 300 ) {
 			/* translators: 1: HTTP status code, 2: URL */
-			return $fail( new WP_Error( 'pressport_remote_http', sprintf( __( 'Download returned HTTP %1$d for %2$s', 'pressport' ), $code, $url ) ) );
+			return $fail( new WP_Error( 'migrateplus_remote_http', sprintf( __( 'Download returned HTTP %1$d for %2$s', 'migrateplus' ), $code, $url ) ) );
 		}
 		clearstatcache( true, $dest );
 		$size = file_exists( $dest ) ? (int) filesize( $dest ) : 0;
 		if ( $size > $limit ) {
 			/* translators: %d: size limit in MB */
-			return $fail( new WP_Error( 'pressport_remote_size', sprintf( __( 'The remote file is larger than the %d MB limit. Raise "Remote file size limit" in Settings, or use WP-CLI.', 'pressport' ), $max_mb ) ) );
+			return $fail( new WP_Error( 'migrateplus_remote_size', sprintf( __( 'The remote file is larger than the %d MB limit. Raise "Remote file size limit" in Settings, or use WP-CLI.', 'migrateplus' ), $max_mb ) ) );
 		}
 		if ( 0 === $size ) {
-			return $fail( new WP_Error( 'pressport_remote_empty', __( 'The remote file is empty.', 'pressport' ) ) );
+			return $fail( new WP_Error( 'migrateplus_remote_empty', __( 'The remote file is empty.', 'migrateplus' ) ) );
 		}
 
 		// A web page instead of a file usually means a login wall or a "view" link.
@@ -277,7 +286,7 @@ class PressPort_Util {
 		if ( false !== strpos( $type, 'text/html' ) ) {
 			$head = (string) file_get_contents( $dest, false, null, 0, 512 ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 			if ( preg_match( '/^\s*(<!doctype html|<html|<head|<body)/i', $head ) ) {
-				return $fail( new WP_Error( 'pressport_remote_html', __( 'The URL returned a web page instead of a file. Use a direct download link and make sure the file is publicly shared.', 'pressport' ) ) );
+				return $fail( new WP_Error( 'migrateplus_remote_html', __( 'The URL returned a web page instead of a file. Use a direct download link and make sure the file is publicly shared.', 'migrateplus' ) ) );
 			}
 		}
 
