@@ -241,6 +241,10 @@ class MigratePlus_Source_JSON extends MigratePlus_Source_Base {
 		$this->settings['total']      = count( $records );
 		// Menus are imported after every item, from a cache of their own.
 		$menus = $export && ! empty( $doc['menus'] ) && is_array( $doc['menus'] ) ? array_values( array_filter( $doc['menus'], 'is_array' ) ) : array();
+		// "Run again" prepares a refreshed file over the last run's settings: the menus of the
+		// previous file must not carry over to one without them.
+		$old_menus = (string) $this->get( 'menus_file' );
+		unset( $this->settings['menus_file'], $this->settings['migrateplus_menus'] );
 		if ( $menus ) {
 			$menus_file = substr( $cache, 0, -5 ) . '-menus.json';
 			if ( false === file_put_contents( $menus_file, wp_json_encode( $menus ) ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
@@ -251,6 +255,10 @@ class MigratePlus_Source_JSON extends MigratePlus_Source_Base {
 			}
 			$this->settings['menus_file']        = $menus_file;
 			$this->settings['migrateplus_menus'] = count( $menus );
+		}
+		// Only now that this file's caches are written: until then a failed refresh can fall back to the last copy.
+		if ( '' !== $old_menus && 0 === strpos( wp_normalize_path( $old_menus ), wp_normalize_path( MigratePlus_Util::storage_dir() ) ) && file_exists( $old_menus ) ) {
+			wp_delete_file( $old_menus );
 		}
 		// Collect field names from the first few records; optional fields may be missing from the first one.
 		// A MigratePlus export's mapping was built from every item, so check them all or later-only fields drop out of it.

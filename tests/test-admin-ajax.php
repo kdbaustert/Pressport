@@ -165,6 +165,19 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 		$this->assertTrue( $this->ajax( 'jobs' )['success'] );
 	}
 
+	/**
+	 * @group ms-required
+	 */
+	public function test_find_and_replace_is_for_network_administrators_on_multisite() {
+		if ( ! is_multisite() ) {
+			$this->markTestSkipped( 'Needs multisite.' );
+		}
+		$this->login( 'administrator' );
+		$this->assertRefused( $this->ajax( 'replace_history' ), 'Only network administrators can use Find & Replace.' );
+		grant_super_admin( get_current_user_id() );
+		$this->assertTrue( $this->ajax( 'replace_history' )['success'] );
+	}
+
 	public function test_preview() {
 		$this->login( 'administrator' );
 		$out = $this->ajax(
@@ -354,9 +367,13 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 
 	public function test_rollback() {
 		$this->login( 'administrator' );
-		$id = $this->import_books( 3 );
+		$id    = $this->import_books( 3 );
+		$calls = 0;
 		do {
 			$out = $this->ajax( 'rollback', array( 'job' => $id ) );
+			if ( ++$calls > 10 ) {
+				$this->fail( 'The rollback was still not done after 10 batches.' );
+			}
 		} while ( ! $out['data']['done'] );
 		$this->assertSame( '', $out['data']['error'] );
 		$this->assertSame( 0, $out['data']['remaining'] );
@@ -391,6 +408,46 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 		$this->assertRefused( $this->ajax( 'delete', array( 'job' => $job->data['id'] ) ), 'An import batch for this job is running. Try again when it finishes.' );
 		MigratePlus_Runner::unlock( $job, $lock );
 		$this->assertNotNull( MigratePlus_Job::load( $job->data['id'] ) );
+	}
+
+	public function test_run_while_a_batch_holds_the_lock() {
+		$this->login( 'administrator' );
+		$job  = MigratePlus_Job::load( $this->preview_books() );
+		$lock = MigratePlus_Runner::lock( $job );
+		$out  = $this->ajax( 'run', array( 'job' => $job->data['id'] ) );
+		MigratePlus_Runner::unlock( $job, $lock );
+		$this->assertFalse( $out['success'] );
+		$this->assertSame(
+			array(
+				'message' => 'A batch for this job is already running.',
+				'code'    => 'migrateplus_locked',
+			),
+			$out['data']
+		);
+	}
+
+	public function test_media_preview_resets_in_request_when_the_request_throws() {
+		$this->login( 'administrator' );
+		$url      = 'https://old.test/image.jpg';
+		$_GET     = array(
+			'url'   => $url,
+			'sig'   => hash_hmac( 'sha256', 'migrateplus_preview|' . $url, wp_salt( 'auth' ) ),
+			'nonce' => wp_create_nonce( 'migrateplus_admin' ),
+		);
+		$_REQUEST = $_GET; // phpcs:ignore WordPress.Security.NonceVerification -- the request ajax_media_preview() reads.
+		add_filter(
+			'pre_http_request',
+			static function () {
+				throw new RuntimeException( 'Connection reset' );
+			}
+		);
+		try {
+			MigratePlus_Admin::ajax_media_preview();
+			$this->fail( 'The request did not throw.' );
+		} catch ( RuntimeException $e ) {
+			$this->assertSame( 'Connection reset', $e->getMessage() );
+		}
+		$this->assertFalse( MigratePlus_Util::$in_request );
 	}
 
 	public function test_jobs_and_job() {
@@ -573,7 +630,7 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 				'name' => 'Old site',
 			)
 		);
-		$this->assertRefused( $out, 'MigratePlus exports carry their own mapping, so there is nothing to save.' );
+		$this->assertRefused( $out, 'Migrate Plus exports carry their own mapping, so there is nothing to save.' );
 	}
 
 	public function test_export_count() {
@@ -627,6 +684,37 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 		$this->assertRefused( $out, 'You are not allowed to export Invoices.' );
 		$this->assertSame( array(), MigratePlus_Exporter::history() );
 		unregister_post_type( 'mp_invoice' );
+	}
+
+	public function test_export_refuses_types_that_are_not_content() {
+		register_post_type(
+			'acf-field-group',
+			array(
+				'show_ui' => true,
+				'label'   => 'Field Groups',
+			)
+		);
+		register_post_type(
+			'mp_hidden',
+			array(
+				'show_ui' => false,
+				'label'   => 'Hidden',
+			)
+		);
+		$this->login( 'administrator' );
+		foreach ( array(
+			'acf-field-group' => 'Field Groups',
+			'mp_hidden'       => 'Hidden',
+		) as $type => $label ) {
+			$out = $this->ajax( 'export_count', array( 'args' => wp_json_encode( array( 'post_types' => array( 'post', $type ) ) ) ) );
+			$this->assertRefused( $out, $label . ' can\'t be exported.' );
+		}
+		$this->assertTrue( MigratePlus_Admin::exportable_type( 'post' ) );
+		$this->assertTrue( MigratePlus_Admin::exportable_type( 'attachment' ) );
+		$this->assertFalse( MigratePlus_Admin::exportable_type( 'shop_order' ) );
+		$this->assertFalse( MigratePlus_Admin::exportable_type( 'wp_block' ) );
+		unregister_post_type( 'acf-field-group' );
+		unregister_post_type( 'mp_hidden' );
 	}
 
 	public function test_export_start_run_log_and_forget() {
@@ -716,8 +804,11 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 		$this->assertRefused( $this->ajax( 'export_download', array( 'export' => $id ) ), 'Export not found. It may have expired; run it again.' );
 		$this->assertRefused( $this->ajax( 'export_log', array( 'export' => $id ) ), 'This export is no longer in history.' );
 		$this->assertRefused( $this->ajax( 'export_forget', array( 'export' => $id ) ), 'You are not allowed to do this.' );
-		$this->assertSame( '', $this->ajax( 'exports' )['data']['exports'][0]['url'] );
+		$this->assertSame( array(), $this->ajax( 'exports' )['data']['exports'] );
 		$this->assertNotNull( MigratePlus_Exporter::history_entry( $id ) );
+
+		$mine = $this->finished_export();
+		$this->assertSame( array( $mine ), array_column( $this->ajax( 'exports' )['data']['exports'], 'id' ) );
 	}
 
 	public function test_export_download_before_the_export_finished() {

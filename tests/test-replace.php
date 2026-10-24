@@ -246,6 +246,75 @@ class Test_Replace extends WP_UnitTestCase {
 		MigratePlus_Replace::forget( $id );
 	}
 
+	public function test_tables_are_only_this_sites() {
+		global $wpdb;
+		// Real tables, not the suite's temporary ones: SHOW TABLE STATUS doesn't list temporary tables.
+		remove_filter( 'query', array( $this, '_create_temporary_tables' ) );
+		remove_filter( 'query', array( $this, '_drop_temporary_tables' ) );
+		$extra = array( 'staging_options', 'staging_posts', '2_posts', 'mp_plugin_log', '2024_stats' );
+		foreach ( $extra as $name ) {
+			$wpdb->query( "CREATE TABLE IF NOT EXISTS `{$wpdb->prefix}{$name}` (id INT PRIMARY KEY, v TEXT)" ); // phpcs:ignore WordPress.DB
+		}
+		$names = wp_list_pluck( MigratePlus_Replace::tables(), 'name' );
+		$start = MigratePlus_Replace::start(
+			array(
+				'search'  => 'a',
+				'replace' => 'b',
+				'tables'  => array( $wpdb->prefix . 'staging_options', $wpdb->prefix . '2_posts' ),
+				'dry_run' => 1,
+			)
+		);
+		foreach ( $extra as $name ) {
+			$wpdb->query( "DROP TABLE IF EXISTS `{$wpdb->prefix}{$name}`" ); // phpcs:ignore WordPress.DB
+		}
+
+		$this->assertContains( $wpdb->posts, $names );
+		$this->assertContains( $wpdb->users, $names, 'A single site owns its users.' );
+		$this->assertContains( $wpdb->prefix . 'mp_plugin_log', $names );
+		$this->assertContains( $wpdb->prefix . '2024_stats', $names, 'A plugin table whose name starts with a number.' );
+		$this->assertNotContains( $wpdb->prefix . 'staging_options', $names, 'Another install under wp_staging_.' );
+		$this->assertNotContains( $wpdb->prefix . 'staging_posts', $names );
+		$this->assertNotContains( $wpdb->prefix . '2_posts', $names, 'Another site of a network.' );
+		$this->assertSame( 'migrateplus_replace_tables', $start->get_error_code() );
+	}
+
+	public function test_cleanup_deletes_rollback_files_after_30_days() {
+		global $wpdb;
+		self::factory()->post->create( array( 'post_content' => 'Go to http://old.test/a' ) );
+		$args             = array(
+			'search'  => 'http://old.test',
+			'replace' => 'https://new.example',
+			'tables'  => array( $wpdb->posts ),
+			'dry_run' => 0,
+		);
+		$old              = $this->run_all( $args );
+		$recent           = $this->run_all(
+			array_merge(
+				$args,
+				array(
+					'search'  => 'https://new.example',
+					'replace' => 'https://newer.example',
+				)
+			)
+		);
+		$entry            = MigratePlus_Replace::history_entry( $old['id'] );
+		$entry['created'] = time() - 31 * DAY_IN_SECONDS;
+		update_option( MigratePlus_Replace::LOG_PREFIX . $old['id'], $entry, false );
+
+		MigratePlus_Replace::cleanup();
+
+		$this->assertFileDoesNotExist( $entry['backup'] );
+		$runs = array_column( MigratePlus_Replace::history(), null, 'id' );
+		$this->assertCount( 2, $runs, 'The run stays listed.' );
+		$this->assertFalse( $runs[ $old['id'] ]['can_undo'] );
+		$this->assertSame( 'Can no longer be rolled back: its rollback file is gone. Rollback files are deleted after 30 days.', $runs[ $old['id'] ]['undo_note'] );
+		$this->assertWPError( MigratePlus_Replace::rollback_batch( $old['id'] ) );
+		$this->assertTrue( $runs[ $recent['id'] ]['can_undo'] );
+		$this->assertSame( '', $runs[ $recent['id'] ]['undo_note'] );
+		MigratePlus_Replace::forget( $old['id'] );
+		MigratePlus_Replace::forget( $recent['id'] );
+	}
+
 	public function test_start_validates_input() {
 		$this->assertWPError(
 			MigratePlus_Replace::start(

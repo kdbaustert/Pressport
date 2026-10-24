@@ -58,7 +58,7 @@ describe('Saved mappings', () => {
   })
 
   it('shows the error when saving at the cap', async () => {
-    const cap = 'There are already 50 saved mappings, the most MigratePlus keeps. Delete one you no longer use, or save over an existing one.'
+    const cap = 'There are already 50 saved mappings, the most Migrate Plus keeps. Delete one you no longer use, or save over an existing one.'
     const env = await mappingStep({ routes: { mapping_save: fail(cap) } })
     env.type(env.$('#migrateplus-saved-name'), 'Library')
     env.click(button(env, 'Save mapping'))
@@ -90,5 +90,30 @@ describe('Saved mappings', () => {
     assert.deepEqual(env.prompts, [['New name for “Books feed”:', 'Books feed']])
     assert.equal(env.sent('mapping_rename')[0].fields.new_name, 'Novels')
     assert.equal(notice(env).textContent, 'Renamed to “Novels”.')
+  })
+
+  it('shows a field name with markup in it as text', async () => {
+    const hostile = '<img src=x onerror=alert(1)>'
+    const env = boot({ routes: { preview: { job: job({ mapping: { fields: {} } }), records: [{ [hostile]: hostile }], fields: [hostile] } } })
+    env.chooseFile(env.$('#migrateplus-import-file'), env.file('books.json'))
+    await env.flush()
+    assert.ok(env.byText('.migrateplus-preview th', hostile))
+    assert.ok(env.byText('.migrateplus-map-table option', hostile))
+    assert.equal(env.$$('img').length, 0)
+  })
+
+  it('fills the field lists of a very wide file when one is focused', async () => {
+    const fields = Array.from({ length: 301 }, (v, i) => 'f' + i)
+    const env = boot({
+      routes: { preview: { job: job({ mapping: { fields: { post_title: 'f5' } } }), records: [{ f5: 'Dune' }], fields } },
+    })
+    env.chooseFile(env.$('#migrateplus-import-file'), env.file('wide.json'))
+    await env.flush()
+    const title = env.$('.migrateplus-map-table select')
+    assert.deepEqual([...title.options].map(o => o.value), ['', 'f5'])
+    assert.equal(title.value, 'f5')
+    title.focus()
+    assert.equal(title.options.length, 302)
+    assert.equal(title.value, 'f5')
   })
 })

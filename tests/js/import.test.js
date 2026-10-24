@@ -1,6 +1,6 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { boot, job, json, fail, noNativeDialogs } from './helpers.js'
+import { boot, job, json, fail, offline, hang, noNativeDialogs } from './helpers.js'
 
 afterEach(noNativeDialogs)
 
@@ -157,7 +157,7 @@ describe('Import', () => {
 
   it('retries a run that is busy in another tab after 3 seconds', async () => {
     const env = await mappingStep({
-      run: (fields, calls) => (calls ? done(true) : fail('This import is already running in another tab.')),
+      run: (fields, calls) => (calls ? done(true) : fail('A batch for this job is already running.', 'migrateplus_locked')),
     })
     env.click(env.byText('button', 'Dry run'))
     await env.flush()
@@ -167,5 +167,87 @@ describe('Import', () => {
     env.clock.tick(1)
     await env.flush()
     assert.equal(env.sent('run').length, 2)
+  })
+
+  it('stops on an error that only mentions "already running" in its message', async () => {
+    const env = await mappingStep({ run: (fields, calls) => (calls ? done(true) : fail('Upload failed: already running out of disk space.')) })
+    env.click(env.byText('button', 'Dry run'))
+    await env.flush()
+    env.clock.tick(3000)
+    await env.flush()
+    assert.equal(env.sent('run').length, 1)
+    assert.equal(env.modal.title(), 'Import stopped')
+  })
+
+  it('retries a run after a network failure', async () => {
+    const env = await mappingStep({ run: (fields, calls) => (calls ? done(true) : offline) })
+    env.click(env.byText('button', 'Dry run'))
+    await env.flush()
+    env.clock.tick(1999)
+    await env.flush()
+    assert.equal(env.sent('run').length, 1)
+    env.clock.tick(1)
+    await env.flush()
+    assert.equal(env.sent('run').length, 2)
+    assert.equal(env.modal.title(), 'Dry run complete')
+  })
+
+  it('stops after three retries and says why', async () => {
+    const env = await mappingStep({ run: offline })
+    env.click(env.byText('button', 'Dry run'))
+    await env.flush()
+    for (const wait of [2000, 4000, 8000]) {
+      env.clock.tick(wait)
+      await env.flush()
+    }
+    assert.equal(env.sent('run').length, 4)
+    env.clock.tick(60000)
+    await env.flush()
+    assert.equal(env.sent('run').length, 4)
+    assert.equal(env.modal.title(), 'Import stopped')
+    assert.equal(env.modal.note(), 'Network error. Check your connection and try again.')
+    assert.equal(env.byText('button', 'Resume').disabled, false)
+  })
+
+  it('times out a run the server never answers, then retries it', async () => {
+    const env = await mappingStep({ run: (fields, calls) => (calls ? done(true) : hang) })
+    env.click(env.byText('button', 'Dry run'))
+    await env.flush()
+    env.clock.tick(6 * 60 * 1000 - 1)
+    await env.flush()
+    assert.equal(env.modal.title(), 'Importing content…')
+    env.clock.tick(1)
+    await env.flush()
+    env.clock.tick(2000)
+    await env.flush()
+    assert.equal(env.sent('run').length, 2)
+    assert.equal(env.modal.title(), 'Dry run complete')
+  })
+
+  it('ends the server message with a full stop before the advice', async () => {
+    const env = await mappingStep({ run: fail('Error establishing a database connection') })
+    env.click(env.byText('button', 'Dry run'))
+    await env.flush()
+    assert.equal(
+      env.$('.notice-error p').textContent,
+      'Error establishing a database connection. Fix the problem, then press Resume to pick up where it stopped.'
+    )
+  })
+
+  it('keeps focus on Pause and the log filters while batches arrive', async () => {
+    const env = await mappingStep({
+      run: (fields, calls) => (calls % 2 ? fail('A batch for this job is already running.', 'migrateplus_locked') : { done: false, job: job({ status: 'running' }) }),
+    })
+    env.click(env.byText('button', 'Dry run'))
+    await env.flush()
+    env.click(env.modal.button('Hide'))
+    for (const id of ['migrateplus-run-toggle', 'migrateplus-log-filter-error']) {
+      const before = env.$('#' + id)
+      before.focus()
+      env.clock.tick(3000)
+      await env.flush()
+      assert.notEqual(env.$('#' + id), before, 'not re-rendered')
+      assert.equal(env.document.activeElement, env.$('#' + id))
+    }
   })
 })

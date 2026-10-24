@@ -17,6 +17,8 @@ class MigratePlus_Replace {
 	const SAMPLES    = 20; // Example changes kept per table.
 	// A run whose last batch started longer ago than this has nobody driving it: it can be resumed or rolled back.
 	const IDLE = 2 * MINUTE_IN_SECONDS;
+	// Rollback files hold every original value a run changed, password hashes and secrets included, so they don't stay forever.
+	const BACKUP_DAYS = 30;
 
 	/**
 	 * This site's tables, with approximate row counts and sizes.
@@ -25,13 +27,71 @@ class MigratePlus_Replace {
 	 */
 	public static function tables() {
 		global $wpdb;
-		$out = array();
-		foreach ( (array) $wpdb->get_results( $wpdb->prepare( 'SHOW TABLE STATUS LIKE %s', $wpdb->esc_like( $wpdb->prefix ) . '%' ), ARRAY_A ) as $row ) { // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$rows = (array) $wpdb->get_results( $wpdb->prepare( 'SHOW TABLE STATUS LIKE %s', $wpdb->esc_like( $wpdb->prefix ) . '%' ), ARRAY_A ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$own  = array_flip( self::own_tables( wp_list_pluck( $rows, 'Name' ) ) );
+		$out  = array();
+		foreach ( $rows as $row ) {
+			if ( ! isset( $own[ $row['Name'] ] ) ) {
+				continue;
+			}
 			$out[] = array(
 				'name' => $row['Name'],
 				'rows' => (int) $row['Rows'],
 				'size' => (int) $row['Data_length'] + (int) $row['Index_length'],
 			);
+		}
+		return $out;
+	}
+
+	/**
+	 * Which of the tables starting with this site's prefix belong to this site.
+	 * LIKE 'wp_%' also matches the network's tables on multisite's main site
+	 * (wp_users, wp_sitemeta, every wp_2_*), and on any install the tables of
+	 * another one sharing the database under a longer prefix (wp_staging_*):
+	 * editing either would reach past this site, e.g. to make someone super admin.
+	 *
+	 * Kept: WordPress's tables for this site (plus users and usermeta on a single
+	 * site, which owns them), and any other table whose name is the prefix and
+	 * then a name that is neither another network site's number (wp_2_…) nor
+	 * inside the prefix of another install. Another install is recognised by its
+	 * own options and posts tables: {prefix}{x}_options next to {prefix}{x}_posts
+	 * means {prefix}{x}_ is a WordPress prefix of its own.
+	 *
+	 * @param string[] $names Table names starting with $wpdb->prefix.
+	 * @return string[]
+	 */
+	protected static function own_tables( array $names ) {
+		global $wpdb;
+		$core    = $wpdb->tables( 'blog' );
+		$network = $wpdb->tables( 'global' );
+		if ( ! is_multisite() ) {
+			$core    = array_merge( $core, $network );
+			$network = array();
+		}
+		$others = array();
+		foreach ( $names as $name ) {
+			if ( preg_match( '/^(.+_)options$/', $name, $m ) && $m[1] !== $wpdb->prefix && in_array( $m[1] . 'posts', $names, true ) ) {
+				$others[] = $m[1];
+			}
+		}
+		$out = array();
+		foreach ( $names as $name ) {
+			if ( 0 !== strpos( $name, $wpdb->prefix ) || in_array( $name, $network, true ) ) {
+				continue;
+			}
+			if ( ! in_array( $name, $core, true ) ) {
+				// Another site of a network (wp_2_posts). On a single site only a numbered copy of a
+				// core table counts, left from a network, so a plugin's wp_2024_stats stays in.
+				if ( preg_match( '/^\d+_(.+)$/', substr( $name, strlen( $wpdb->prefix ) ), $m ) && ( is_multisite() || in_array( $m[1], $wpdb->tables( 'blog', false ), true ) ) ) {
+					continue;
+				}
+				foreach ( $others as $other ) {
+					if ( 0 === strpos( $name, $other ) ) {
+						continue 2;
+					}
+				}
+			}
+			$out[] = $name;
 		}
 		return $out;
 	}
@@ -332,7 +392,14 @@ class MigratePlus_Replace {
 				$entry['status'] = 'stopped';
 			}
 			$entry['can_resume'] = $state && empty( $state['complete'] ) && 'stopped' === $entry['status'];
-			$entry['can_undo']   = in_array( $entry['status'], array( 'complete', 'stopped', 'failed', 'rolling_back', 'rollback_failed' ), true ) && $entry['rows'] && is_readable( $entry['backup'] );
+			$undoable            = in_array( $entry['status'], array( 'complete', 'stopped', 'failed', 'rolling_back', 'rollback_failed' ), true ) && $entry['rows'];
+			$entry['can_undo']   = $undoable && is_readable( $entry['backup'] );
+			// Without this the row just loses its button, and nothing says why.
+			$entry['undo_note'] = $undoable && ! $entry['can_undo'] ? sprintf(
+				/* translators: %d: number of days */
+				__( 'Can no longer be rolled back: its rollback file is gone. Rollback files are deleted after %d days.', 'migrateplus' ),
+				self::BACKUP_DAYS
+			) : '';
 			unset( $entry['backup'] );
 			$out[] = $entry;
 		}
@@ -678,7 +745,9 @@ class MigratePlus_Replace {
 	}
 
 	/**
-	 * Remove runs older than a day (runs with the daily cleanup).
+	 * Remove runs older than a day, and rollback files older than BACKUP_DAYS
+	 * (runs with the daily cleanup). The history entry stays, so the run is still
+	 * listed, but it can no longer be rolled back.
 	 */
 	public static function cleanup() {
 		global $wpdb;
@@ -687,6 +756,16 @@ class MigratePlus_Replace {
 			$state = get_option( $name );
 			if ( ! is_array( $state ) || empty( $state['created'] ) || $state['created'] < time() - DAY_IN_SECONDS ) {
 				delete_option( $name );
+			}
+		}
+		foreach ( (array) get_option( self::LOG_INDEX, array() ) as $id ) {
+			$entry = self::history_entry( $id );
+			// A rollback in progress needs its file to finish.
+			if ( ! $entry || 'rolling_back' === $entry['status'] || (int) $entry['created'] >= time() - self::BACKUP_DAYS * DAY_IN_SECONDS ) {
+				continue;
+			}
+			if ( $entry['backup'] && file_exists( $entry['backup'] ) ) {
+				wp_delete_file( $entry['backup'] );
 			}
 		}
 	}

@@ -513,4 +513,324 @@ class Test_Woo extends WP_UnitTestCase {
 		$this->assertSame( array( $media ), $new->get_gallery_image_ids() );
 		$this->assertSame( array( $doc['items'][0]['file'] ), $this->requests );
 	}
+
+	/**
+	 * A custom attribute: the Size the product itself defines.
+	 *
+	 * @param string[] $options Values.
+	 * @return WC_Product_Attribute
+	 */
+	protected function size( array $options ) {
+		$size = new WC_Product_Attribute();
+		$size->set_name( 'Size' );
+		$size->set_options( $options );
+		$size->set_variation( true );
+		return $size;
+	}
+
+	public function test_variations_of_a_custom_attribute_keep_its_key_when_a_global_one_shares_the_name() {
+		wc_create_attribute(
+			array(
+				'name' => 'Size',
+				'slug' => 'size',
+			)
+		);
+		register_taxonomy( 'pa_size', 'product' );
+		$tee = $this->product(
+			'Tee',
+			array(
+				'attributes'         => array( $this->size( array( 'S', 'M' ) ) ),
+				'default_attributes' => array( 'size' => 'M' ),
+			),
+			'WC_Product_Variable'
+		);
+		$this->product(
+			'',
+			array(
+				'parent_id'     => $tee->get_id(),
+				'sku'           => 'TEE-M',
+				'regular_price' => '20.00',
+				'attributes'    => array( 'size' => 'M' ),
+			),
+			'WC_Product_Variation'
+		);
+
+		$doc = $this->export_doc();
+		$this->remove( $tee );
+		$this->import_doc( $doc )->delete();
+
+		$this->assertSame( array( 'size' => 'M' ), wc_get_product( wc_get_product_id_by_sku( 'TEE-M' ) )->get_attributes() );
+		$this->assertSame( array( 'size' => 'M' ), $this->imported( $tee->get_id() )->get_default_attributes() );
+		$this->assertSame( array(), get_terms( array( 'taxonomy' => 'pa_size', 'hide_empty' => false ) ) ); // phpcs:ignore WordPress.Arrays.ArrayDeclarationSpacing.AssociativeArrayFound
+	}
+
+	public function test_variations_keep_inheriting_what_they_leave_to_the_parent() {
+		$photo = self::factory()->attachment->create_object( 'tee.png', 0, array( 'post_mime_type' => 'image/png' ) );
+		$tee   = $this->product(
+			'Tee',
+			array(
+				'sku'            => 'TEE',
+				'image_id'       => $photo,
+				'tax_class'      => 'reduced-rate',
+				'manage_stock'   => true,
+				'stock_quantity' => 5,
+				'backorders'     => 'notify',
+				'weight'         => '0.3',
+				'length'         => '30',
+				'width'          => '20',
+				'height'         => '2',
+				'attributes'     => array( $this->size( array( 'S' ) ) ),
+			),
+			'WC_Product_Variable'
+		);
+		$this->product(
+			'',
+			array(
+				'parent_id'     => $tee->get_id(),
+				'sku'           => 'TEE-S',
+				'regular_price' => '20.00',
+				'attributes'    => array( 'size' => 'S' ),
+			),
+			'WC_Product_Variation'
+		);
+
+		$doc = $this->export_doc();
+		$row = $doc['items'][0]['woo']['variations'][0];
+		$this->assertSame( array( '', '', '', '', 'parent', 'no', '', '' ), array( $row['weight'], $row['length'], $row['width'], $row['height'], $row['tax_class'], $row['backorders'], $row['low_stock_amount'], $row['image'] ) );
+
+		$this->remove( $tee );
+		$this->import_doc( $doc )->delete();
+		$variation = wc_get_product( wc_get_product_id_by_sku( 'TEE-S' ) );
+		$this->assertSame( array( '', 'parent', 0 ), array( $variation->get_weight( 'edit' ), $variation->get_tax_class( 'edit' ), $variation->get_image_id( 'edit' ) ) );
+		$this->assertSame( array( '0.3', 'reduced-rate', 'notify' ), array( $variation->get_weight(), $variation->get_tax_class(), $variation->get_backorders() ) );
+	}
+
+	public function test_up_sells_and_coupons_can_point_at_a_variation() {
+		// Created first, so the variation it up-sells comes later in the file.
+		$mug   = $this->product( 'Mug', array( 'sku' => 'MUG-1' ) );
+		$tee   = $this->product( 'Tee', array( 'sku' => 'TEE', 'attributes' => array( $this->size( array( 'S', 'M' ) ) ) ), 'WC_Product_Variable' ); // phpcs:ignore WordPress.Arrays.ArrayDeclarationSpacing.AssociativeArrayFound
+		$small = $this->product(
+			'',
+			array(
+				'parent_id'     => $tee->get_id(),
+				'regular_price' => '20.00',
+				'attributes'    => array( 'size' => 'S' ),
+			),
+			'WC_Product_Variation'
+		);
+		$mug->set_upsell_ids( array( $small->get_id() ) );
+		$mug->save();
+		$coupon = new WC_Coupon();
+		$coupon->set_props(
+			array(
+				'code'        => 'smalltee',
+				'amount'      => '5',
+				'product_ids' => array( $small->get_id() ),
+			)
+		);
+		$coupon->save();
+
+		$doc = $this->export_doc( array( 'post_types' => 'product,shop_coupon' ) );
+		// The variation has no SKU of its own; in view context it would report the parent's.
+		$this->assertSame( array(), $doc['items'][0]['woo']['upsell_skus'] );
+		$this->remove( $mug, $tee, $coupon );
+		$this->import_doc( $doc )->delete();
+
+		$children = $this->imported( $tee->get_id() )->get_children();
+		$this->assertCount( 1, $children );
+		$this->assertSame( $children, $this->imported( $mug->get_id() )->get_upsell_ids() );
+		$this->assertSame( $children, ( new WC_Coupon( 'smalltee' ) )->get_product_ids() );
+	}
+
+	public function test_downloads_stored_as_server_paths_are_copied_through_the_signed_link() {
+		$uploads = wp_upload_dir();
+		$name    = 'manual-' . wp_generate_password( 6, false ) . '.pdf';
+		$path    = $uploads['basedir'] . '/woocommerce_uploads/' . $name;
+		wp_mkdir_p( dirname( $path ) );
+		file_put_contents( $path, "%PDF-1.4\n%%EOF\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$download = new WC_Product_Download();
+		$download->set_id( 'manual' );
+		$download->set_name( 'Manual' );
+		$download->set_file( $path );
+		$kettle = $this->product(
+			'Kettle manual',
+			array(
+				'virtual'      => true,
+				'downloadable' => true,
+				'downloads'    => array( $download ),
+			)
+		);
+
+		$doc = $this->export_doc();
+		wp_delete_file( $path );
+		$row = $doc['items'][0]['woo']['downloads'][0];
+		$this->assertSame( $path, $row['file'] );
+		$this->remove( $kettle );
+		$this->import_doc( $doc )->delete();
+
+		$this->assertSame( array( $row['fetch'] ), $this->requests );
+		$files = $this->imported( $kettle->get_id() )->get_downloads();
+		$this->assertStringStartsWith( $uploads['baseurl'] . '/woocommerce_uploads/', reset( $files )->get_file() );
+	}
+
+	public function test_an_export_imported_back_into_its_own_site_keeps_its_download_files() {
+		$uploads = wp_upload_dir();
+		$name    = 'guide-' . wp_generate_password( 6, false ) . '.pdf';
+		$url     = $uploads['baseurl'] . '/woocommerce_uploads/' . $name;
+		$path    = $uploads['basedir'] . '/woocommerce_uploads/' . $name;
+		wp_mkdir_p( dirname( $path ) );
+		file_put_contents( $path, "%PDF-1.4\n%%EOF\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$download = new WC_Product_Download();
+		$download->set_id( 'guide' );
+		$download->set_name( 'Guide' );
+		$download->set_file( $url );
+		$kettle = $this->product(
+			'Kettle guide',
+			array(
+				'virtual'      => true,
+				'downloadable' => true,
+				'downloads'    => array( $download ),
+			)
+		);
+
+		// The file stays where it is, as on the site the export was made on: its signed link may have
+		// expired by the time the file comes back, so nothing should be fetched. Exported as this site,
+		// not through export_doc(), which makes the file look as if old.test wrote it.
+		$state = MigratePlus_Exporter::start(
+			MigratePlus_Exporter::sanitize_args(
+				array(
+					'post_type'   => 'product',
+					'include_woo' => 1,
+				)
+			)
+		);
+		while ( empty( $state['complete'] ) ) {
+			MigratePlus_Exporter::run_batch( $state, 1 );
+		}
+		$doc = json_decode( (string) file_get_contents( $state['file'] ), true ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		MigratePlus_Exporter::forget( $state['id'] );
+		$this->assertNotSame( '', $doc['items'][0]['woo']['downloads'][0]['fetch'] );
+		$this->remove( $kettle );
+		$this->import_doc( $doc )->delete();
+		wp_delete_file( $path );
+
+		$this->assertSame( array(), $this->requests );
+		$files = $this->imported( $kettle->get_id() )->get_downloads();
+		$this->assertSame( $url, reset( $files )->get_file() );
+	}
+
+	public function test_imported_downloads_on_this_server_must_be_in_uploads() {
+		$uploads = wp_upload_dir();
+		$name    = 'manual-' . wp_generate_password( 6, false ) . '.pdf';
+		wp_mkdir_p( $uploads['basedir'] . '/woocommerce_uploads' );
+		file_put_contents( $uploads['basedir'] . '/woocommerce_uploads/' . $name, "%PDF-1.4\n%%EOF\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$post     = self::factory()->post->create( array( 'post_type' => 'product' ) );
+		$manual   = $uploads['baseurl'] . '/woocommerce_uploads/' . $name;
+		$warnings = array();
+
+		MigratePlus_Woo::import(
+			$post,
+			array(
+				'woo' => array(
+					'downloadable' => true,
+					'downloads'    => array(
+						array(
+							'name' => 'Config',
+							'file' => site_url( '/wp-config-sample.php' ),
+						),
+						array(
+							'name' => 'Loader',
+							'file' => ABSPATH . 'wp-load.php',
+						),
+						array(
+							'name' => 'Manual',
+							'file' => $manual,
+						),
+					),
+				),
+			),
+			new MigratePlus_Job( array( 'source' => 'json' ) ),
+			array(),
+			'',
+			$warnings
+		);
+		wp_delete_file( $uploads['basedir'] . '/woocommerce_uploads/' . $name );
+
+		$this->assertSame(
+			array(
+				'Downloadable file "' . site_url( '/wp-config-sample.php' ) . '" was left off: it is not a file in this site\'s uploads folder.',
+				'Downloadable file "' . ABSPATH . 'wp-load.php" was left off: it is not a file in this site\'s uploads folder.',
+			),
+			$warnings
+		);
+		$files = wc_get_product( $post )->get_downloads();
+		$this->assertCount( 1, $files );
+		$this->assertSame( $manual, reset( $files )->get_file() );
+	}
+
+	public function test_attribute_values_with_no_term_here_are_named() {
+		register_taxonomy( 'pa_color', 'product' );
+		$grey     = wp_insert_term( 'Grey', 'pa_color' );
+		$post     = self::factory()->post->create( array( 'post_type' => 'product' ) );
+		$warnings = array();
+
+		MigratePlus_Woo::import(
+			$post,
+			array(
+				'woo' => array(
+					'attributes' => array(
+						array(
+							'name'     => 'Color',
+							'taxonomy' => 'pa_color',
+							'options'  => array( 'Grey', 'Teal', 'Rust' ),
+						),
+					),
+				),
+			),
+			new MigratePlus_Job( array( 'source' => 'json' ) ),
+			array( 'create_terms' => 0 ),
+			'',
+			$warnings
+		);
+
+		$this->assertSame( array( 'Attribute "Color" was added without "Teal", "Rust": no term on this site matches. Turn on "Create missing categories and terms" to create them.' ), $warnings );
+		$this->assertSame( array( $grey['term_id'] ), array_map( 'intval', wc_get_product( $post )->get_attributes()['pa_color']->get_options() ) );
+	}
+
+	public function test_signed_links_only_serve_files_in_uploads() {
+		$uploads   = wp_upload_dir();
+		$name      = 'guide-' . wp_generate_password( 6, false ) . '.pdf';
+		$files     = array(
+			'woocommerce_uploads' => $uploads['basedir'] . '/woocommerce_uploads/' . $name,
+			'migrateplus'         => MigratePlus_Util::ensure_storage_dir() . $name,
+			'wp-content'          => WP_CONTENT_DIR . '/' . $name,
+		);
+		$downloads = array();
+		foreach ( $files as $key => $path ) {
+			wp_mkdir_p( dirname( $path ) );
+			file_put_contents( $path, "%PDF-1.4\n%%EOF\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+			$download = new WC_Product_Download();
+			$download->set_id( $key );
+			$download->set_name( $key );
+			$download->set_file( $path );
+			$downloads[] = $download;
+		}
+		$this->product(
+			'Guide',
+			array(
+				'virtual'      => true,
+				'downloadable' => true,
+				'downloads'    => $downloads,
+			)
+		);
+
+		$doc = $this->export_doc();
+		array_map( 'wp_delete_file', $files );
+
+		$rows = $doc['items'][0]['woo']['downloads'];
+		$this->assertSame( array( 'woocommerce_uploads', 'migrateplus', 'wp-content' ), array_column( $rows, 'name' ) );
+		$this->assertStringContainsString( 'action=migrateplus_file', $rows[0]['fetch'] );
+		$this->assertArrayNotHasKey( 'fetch', $rows[1] );
+		$this->assertArrayNotHasKey( 'fetch', $rows[2] );
+	}
 }

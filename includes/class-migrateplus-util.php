@@ -20,6 +20,13 @@ class MigratePlus_Util {
 	public static $in_request = false;
 
 	/**
+	 * Nesting depth at which flatten() stops and writes the rest as JSON text.
+	 *
+	 * @var int
+	 */
+	const MAX_DEPTH = 6;
+
+	/**
 	 * @param bool   $external Whether WordPress considers the host external.
 	 * @param string $host     Host.
 	 * @param string $url      URL.
@@ -71,8 +78,11 @@ class MigratePlus_Util {
 		if ( ! file_exists( $dir . 'index.php' ) ) {
 			file_put_contents( $dir . 'index.php', "<?php\n// Silence is golden.\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 		}
-		if ( ! file_exists( $dir . '.htaccess' ) ) {
-			file_put_contents( $dir . '.htaccess', "Require all denied\nDeny from all\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		// Options -Indexes as well, so Apache never lists the folder. Rewritten when it differs, so
+		// folders made by older versions get the line too.
+		$htaccess = "Options -Indexes\nRequire all denied\nDeny from all\n";
+		if ( ! file_exists( $dir . '.htaccess' ) || file_get_contents( $dir . '.htaccess' ) !== $htaccess ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
+			file_put_contents( $dir . '.htaccess', $htaccess ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 		}
 		return $dir;
 	}
@@ -103,19 +113,17 @@ class MigratePlus_Util {
 		}
 		foreach ( $data as $key => $value ) {
 			$full = '' === $prefix ? (string) $key : $prefix . '.' . $key;
-			if ( is_array( $value ) && $depth < 6 ) {
+			if ( is_array( $value ) && $depth < self::MAX_DEPTH ) {
 				if ( self::is_scalar_list( $value ) ) {
 					$out[ $full ] = array_values( $value );
 				} else {
 					$out += self::flatten( $value, $full, $depth + 1 );
 				}
 			} elseif ( is_array( $value ) ) {
-				$out[ $full ] = wp_json_encode( $value );
-			} elseif ( is_bool( $value ) ) {
-				$out[ $full ] = $value ? '1' : '0';
-			} elseif ( null === $value ) {
-				$out[ $full ] = '';
+				$out[ $full ] = wp_json_encode( $value ); // MigratePlus_ACF::read() decodes it again.
 			} else {
+				// Booleans and null as they are: MigratePlus_ACF::read() rebuilds nested values from
+				// these keys, and an array saved as meta would otherwise get "1", "0" and "" in their place.
 				$out[ $full ] = $value;
 			}
 		}
@@ -239,20 +247,24 @@ class MigratePlus_Util {
 			@set_time_limit( 600 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 		}
 
+		// Reset in finally: left on after an exception, the next request anything makes would get the local-host allowance.
 		self::$in_request = true;
-		$response         = wp_safe_remote_get(
-			$fetch,
-			array(
-				'timeout'             => max( 60, (int) MigratePlus_Settings::get( 'request_timeout' ) ),
-				'redirection'         => 5,
-				'stream'              => true,
-				'filename'            => $dest,
-				'limit_response_size' => $limit + 1,
-				'headers'             => $headers,
-				'user-agent'          => 'MigratePlus/' . MIGRATEPLUS_VERSION . '; ' . home_url(),
-			)
-		);
-		self::$in_request = false;
+		try {
+			$response = wp_safe_remote_get(
+				$fetch,
+				array(
+					'timeout'             => max( 60, (int) MigratePlus_Settings::get( 'request_timeout' ) ),
+					'redirection'         => 5,
+					'stream'              => true,
+					'filename'            => $dest,
+					'limit_response_size' => $limit + 1,
+					'headers'             => $headers,
+					'user-agent'          => 'MigratePlus/' . MIGRATEPLUS_VERSION . '; ' . home_url(),
+				)
+			);
+		} finally {
+			self::$in_request = false;
+		}
 
 		$fail = static function ( WP_Error $error ) use ( $dest ) {
 			if ( file_exists( $dest ) ) {
@@ -302,6 +314,11 @@ class MigratePlus_Util {
 	public static function stringify( $value ) {
 		if ( is_array( $value ) ) {
 			return implode( ', ', array_map( array( __CLASS__, 'stringify' ), $value ) );
+		}
+		// flatten() keeps true/false now; (string) false is '', which would read as "no value"
+		// (a "published": false status falls back to the default) rather than as 0.
+		if ( is_bool( $value ) ) {
+			return $value ? '1' : '0';
 		}
 		return null === $value ? '' : (string) $value;
 	}

@@ -21,6 +21,11 @@
 	--pp-hull: #c23a2b;
 	--pp-hull-wash: #fbebe9;
 	--pp-skip: #a3abbd;
+	/* The outcome bars and their keys: brighter than the accents above. */
+	--pp-out-created: #00e676;
+	--pp-out-updated: #ffc400;
+	--pp-out-skipped: #b0bec5;
+	--pp-out-failed: #ff1744;
 	--pp-r-lg: 12px;
 	--pp-r: 8px;
 	--pp-r-sm: 6px;
@@ -78,6 +83,22 @@
 .migrateplus-modal .button.migrateplus-danger:not(.button-primary) { color: #b32d2e; border-color: #b32d2e; background: #f6f7f7; }
 .migrateplus-app .button.migrateplus-danger:not(.button-primary):hover,
 .migrateplus-modal .button.migrateplus-danger:not(.button-primary):hover { background: #b32d2e; color: #fff; border-color: #b32d2e; }
+/* History's Roll back: filled yellow so it reads apart from the red Delete beside it. Dark text,
+   because white or yellow text on #ffcc00 is unreadable. */
+.migrateplus-app .button.migrateplus-rollback { color: #1d2327; border-color: #e0b400; background: #ffcc00; }
+.migrateplus-app .button.migrateplus-rollback:hover,
+.migrateplus-app .button.migrateplus-rollback:focus { background: #e0b400; color: #1d2327; border-color: #c29c00; }
+.migrateplus-app .button.migrateplus-rollback:focus { box-shadow: 0 0 0 1px #fff, 0 0 0 3px #c29c00; }
+/* History's View log: filled #00a6ee with white text. */
+.migrateplus-app .button.migrateplus-view { color: #fff; border-color: #0094d4; background: #00a6ee; }
+.migrateplus-app .button.migrateplus-view:hover,
+.migrateplus-app .button.migrateplus-view:focus { background: #0094d4; color: #fff; border-color: #0080b8; }
+.migrateplus-app .button.migrateplus-view:focus { box-shadow: 0 0 0 1px #fff, 0 0 0 3px #0080b8; }
+/* History's Run again: filled #0078f6 with white text. */
+.migrateplus-app .button.migrateplus-run-again { color: #fff; border-color: #0068d6; background: #0078f6; }
+.migrateplus-app .button.migrateplus-run-again:hover,
+.migrateplus-app .button.migrateplus-run-again:focus { background: #0068d6; color: #fff; border-color: #0058b6; }
+.migrateplus-app .button.migrateplus-run-again:focus { box-shadow: 0 0 0 1px #fff, 0 0 0 3px #0058b6; }
 .migrateplus-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0; }
 .migrateplus-app .migrateplus-push { margin-left: auto; }
 
@@ -293,9 +314,10 @@
 	content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; margin: 0;
 	border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .2); transition: transform .15s; float: none;
 }
-.migrateplus-app input.migrateplus-switch:checked { background: var(--pp-tide); }
+/* Blue like the primary buttons: WordPress sets this per admin color scheme. */
+.migrateplus-app input.migrateplus-switch:checked { background: var(--wp-admin-theme-color, #2271b1); }
 .migrateplus-app input.migrateplus-switch:checked::before { content: ""; transform: translateX(14px); }
-.migrateplus-app input.migrateplus-switch:focus { box-shadow: var(--pp-focus); outline: none; }
+.migrateplus-app input.migrateplus-switch:focus { box-shadow: 0 0 0 2px var(--pp-paper), 0 0 0 4px var(--wp-admin-theme-color, #2271b1); outline: none; }
 
 /* Sticky action bar */
 .migrateplus-actionbar {
@@ -360,10 +382,10 @@
 .migrateplus-obar.is-sm { height: 6px; width: 160px; max-width: 100%; }
 .migrateplus-obar-seg { display: block; flex: none; height: 100%; width: 0; transition: width .4s ease; }
 .migrateplus-obar-seg + .migrateplus-obar-seg { box-shadow: -1px 0 0 var(--pp-paper); }
-.migrateplus-obar-seg.is-created { background: var(--pp-tide); }
-.migrateplus-obar-seg.is-updated { background: var(--pp-buoy); }
-.migrateplus-obar-seg.is-skipped { background: var(--pp-skip); }
-.migrateplus-obar-seg.is-failed { background: var(--pp-hull); }
+.migrateplus-obar-seg.is-created { background: var(--pp-out-created); }
+.migrateplus-obar-seg.is-updated { background: var(--pp-out-updated); }
+.migrateplus-obar-seg.is-skipped { background: var(--pp-out-skipped); }
+.migrateplus-obar-seg.is-failed { background: var(--pp-out-failed); }
 .migrateplus-obar-runner { display: none; }
 .migrateplus-obar.is-indeterminate .migrateplus-obar-runner {
 	display: block; position: absolute; top: 0; bottom: 0; left: 0; width: 30%;
@@ -375,10 +397,10 @@
 
 .migrateplus-legend { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 14px 0 18px; padding: 0; list-style: none; }
 .migrateplus-legend li { margin: 0; padding: 10px 12px; border-radius: var(--pp-r); background: #f7f8fa; border-top: 3px solid transparent; }
-.migrateplus-legend li.is-created { border-top-color: var(--pp-tide); }
-.migrateplus-legend li.is-updated { border-top-color: var(--pp-buoy); }
-.migrateplus-legend li.is-skipped { border-top-color: var(--pp-skip); }
-.migrateplus-legend li.is-failed { border-top-color: var(--pp-hull); }
+.migrateplus-legend li.is-created { border-top-color: var(--pp-out-created); }
+.migrateplus-legend li.is-updated { border-top-color: var(--pp-out-updated); }
+.migrateplus-legend li.is-skipped { border-top-color: var(--pp-out-skipped); }
+.migrateplus-legend li.is-failed { border-top-color: var(--pp-out-failed); }
 .migrateplus-legend li.is-failed:not(.is-zero) { background: var(--pp-hull-wash); }
 .migrateplus-legend strong { display: block; font-size: 22px; line-height: 1.15; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--pp-ink); }
 .migrateplus-legend li.is-zero strong { color: #a3abbd; }
@@ -441,8 +463,9 @@
 .migrateplus-h-result { min-width: 200px; }
 .migrateplus-h-result .migrateplus-help { margin-top: 6px; }
 .migrateplus-row-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: flex-end; }
-.migrateplus-link-danger { border: 0; background: none; padding: 4px 6px; cursor: pointer; color: var(--pp-muted); font-size: 12px; text-decoration: underline; text-underline-offset: 2px; }
-.migrateplus-link-danger:hover { color: #b32d2e; }
+.migrateplus-link-danger { border: 0; background: none; padding: 4px 6px; cursor: pointer; color: #b32d2e; font-size: 12px; text-decoration: underline; text-underline-offset: 2px; }
+.migrateplus-link-danger:hover { color: #8a2424; }
+.migrateplus-link-danger:disabled { color: var(--pp-muted); cursor: default; opacity: .6; }
 .migrateplus-link-danger:focus-visible { outline: none; box-shadow: var(--pp-focus); border-radius: 3px; }
 .migrateplus-history td.migrateplus-no-match { text-align: center; padding: 28px; }
 .migrateplus-history-title { margin: 0; font-size: 14px; }
@@ -588,9 +611,9 @@ body.migrateplus-modal-open { overflow: hidden; }
 	border: 1px solid var(--pp-line-2); border-top-width: 1px; border-radius: 999px; background: var(--pp-paper);
 }
 .migrateplus-modal .migrateplus-modal-stats li::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--pp-skip); }
-.migrateplus-modal .migrateplus-modal-stats li.is-created::before { background: var(--pp-tide); }
-.migrateplus-modal .migrateplus-modal-stats li.is-updated::before { background: var(--pp-buoy); }
-.migrateplus-modal .migrateplus-modal-stats li.is-failed::before { background: var(--pp-hull); }
+.migrateplus-modal .migrateplus-modal-stats li.is-created::before { background: var(--pp-out-created); }
+.migrateplus-modal .migrateplus-modal-stats li.is-updated::before { background: var(--pp-out-updated); }
+.migrateplus-modal .migrateplus-modal-stats li.is-failed::before { background: var(--pp-out-failed); }
 .migrateplus-modal .migrateplus-modal-stats li.is-failed:not(.is-zero) { border-color: #f0c5c0; background: var(--pp-hull-wash); }
 .migrateplus-modal .migrateplus-modal-stats strong { display: inline; font-size: 13px; font-weight: 700; }
 .migrateplus-modal .migrateplus-modal-stats span { font-size: 12px; }

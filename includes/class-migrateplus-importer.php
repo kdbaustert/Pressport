@@ -39,10 +39,10 @@ class MigratePlus_Importer {
 			'post_status'        => array( __( 'Status', 'migrateplus' ), __( 'publish/draft/pending/private, or true/false, 1/0.', 'migrateplus' ) ),
 			'post_author'        => array( __( 'Author', 'migrateplus' ), __( 'Matched by email, login, slug, then display name.', 'migrateplus' ) ),
 			'post_author_login'  => array( __( 'Author login', 'migrateplus' ), __( 'Tried when no user has the author\'s email: the same person often has a different email on each site.', 'migrateplus' ) ),
-			'post_author_name'   => array( __( 'Author display name', 'migrateplus' ), __( 'Tried after email and login, and used as the name of an author MigratePlus creates.', 'migrateplus' ) ),
+			'post_author_name'   => array( __( 'Author display name', 'migrateplus' ), __( 'Tried after email and login, and used as the name of an author Migrate Plus creates.', 'migrateplus' ) ),
 			'menu_order'         => array( __( 'Menu order', 'migrateplus' ), '' ),
 			'comment_status'     => array( __( 'Comment status', 'migrateplus' ), __( 'open or closed', 'migrateplus' ) ),
-			'comments'           => array( __( 'Comments', 'migrateplus' ), __( 'The list of comments in a MigratePlus export. Added to the post when "Import comments" is on.', 'migrateplus' ) ),
+			'comments'           => array( __( 'Comments', 'migrateplus' ), __( 'The list of comments in a Migrate Plus export. Added to the post when "Import comments" is on.', 'migrateplus' ) ),
 			'post_parent'        => array( __( 'Parent', 'migrateplus' ), __( 'Source ID of the parent item. A parent imported later is linked when it arrives.', 'migrateplus' ) ),
 			'post_password'      => array( __( 'Password', 'migrateplus' ), __( 'Password-protects the post.', 'migrateplus' ) ),
 			'page_template'      => array( __( 'Page template', 'migrateplus' ), __( 'Template file or slug, e.g. templates/full-width.php.', 'migrateplus' ) ),
@@ -149,6 +149,14 @@ class MigratePlus_Importer {
 				'post_status' => $opts['default_status'],
 				'post_author' => (int) $opts['default_author'],
 			);
+			// A new post gets an empty title or content when the record has none. Media get theirs in
+			// save_media(), which only finds out there whether the file is already in the Media Library.
+			if ( 'attachment' !== $type ) {
+				$postarr += array(
+					'post_title'   => '',
+					'post_content' => '',
+				);
+			}
 		}
 
 		// Parent: the post imported from the parent's source ID. A parent that is not here yet links up when it is imported.
@@ -156,13 +164,45 @@ class MigratePlus_Importer {
 		$parent     = MigratePlus_Util::stringify( self::value( $record, $mapping, 'post_parent' ) );
 		$parent_uid = '0' !== $parent ? self::uid( $job, $parent ) : '';
 		$parent_uid = $parent_uid !== $uid ? $parent_uid : '';
-		$parent_id  = $parent_uid ? self::find_by_uid( $parent_uid, array_keys( get_post_types() ) ) : 0;
+		$parent_id  = $parent_uid ? self::find_by_uid( $parent_uid, array_keys( get_post_types() ), $job->data['id'] ) : 0;
+		if ( ! $parent_id && $parent_uid && ! empty( $opts['skip_existing'] ) ) {
+			// A parent skipped as "already on this site" was matched by its slug and never got a uid,
+			// so nothing would ever link this post to it: find it the same way.
+			$parent_id = self::find_parent_by_slug( $record, $mapping );
+		}
 		if ( $parent_id ) {
 			$postarr['post_parent'] = $parent_id;
 		}
 
 		$postarr = apply_filters( 'migrateplus_post_data', $postarr, $record, $job );
 		$content = isset( $postarr['post_content'] ) ? (string) $postarr['post_content'] : '';
+
+		$warnings = array();
+		// WP-CLI without --user has no user to check, and runs with the shell account's access.
+		$user = get_current_user_id();
+		if ( $user ) {
+			$caps = get_post_type_object( $type )->cap;
+			if ( $updating && ! current_user_can( 'edit_post', $existing ) ) {
+				/* translators: 1: title, 2: post id */
+				return self::result( 'failed', $existing, sprintf( __( 'Not updated: you are not allowed to edit "%1$s" (#%2$d).', 'migrateplus' ), $label, $existing ) );
+			}
+			$status = isset( $postarr['post_status'] ) ? $postarr['post_status'] : '';
+			if ( ! $updating && 'attachment' !== $type && in_array( $status, array( 'publish', 'future' ), true ) && ! current_user_can( $caps->publish_posts ) ) {
+				$postarr['post_status'] = 'pending';
+				$warnings[]             = __( 'You are not allowed to publish, so it was saved as pending review.', 'migrateplus' );
+			}
+			// Updating, the author to compare with is the one the post has: keeping it needs no permission.
+			$current = $updating ? (int) get_post_field( 'post_author', $existing ) : $user;
+			if ( isset( $postarr['post_author'] ) && (int) $postarr['post_author'] !== $current && (int) $postarr['post_author'] !== $user && ! current_user_can( $caps->edit_others_posts ) ) {
+				if ( $updating ) {
+					unset( $postarr['post_author'] );
+					$warnings[] = __( 'You are not allowed to give it another author, so it keeps its author.', 'migrateplus' );
+				} else {
+					$postarr['post_author'] = $user;
+					$warnings[]             = __( 'You are not allowed to give it another author, so you are its author.', 'migrateplus' );
+				}
+			}
+		}
 
 		if ( $dry ) {
 			/* translators: 1: action, 2: title */
@@ -184,7 +224,7 @@ class MigratePlus_Importer {
 		}
 		if ( $uid ) {
 			update_post_meta( $post_id, '_migrateplus_source_uid', $uid );
-			update_post_meta( $post_id, '_migrateplus_source_id', $source_id );
+			update_post_meta( $post_id, '_migrateplus_source_id', wp_slash( $source_id ) );
 			MigratePlus_ACF::link_pending( $post_id, $uid );
 			// Children imported before this post have been waiting for it as their parent.
 			$children = get_posts(
@@ -215,16 +255,15 @@ class MigratePlus_Importer {
 			delete_post_meta( $post_id, '_migrateplus_parent_uid' );
 		}
 		// Before the custom fields: ACF groups can be shown by page template or post format.
-		$template = MigratePlus_Util::stringify( self::value( $record, $mapping, 'page_template' ) );
-		if ( '' !== $template ) {
-			update_post_meta( $post_id, '_wp_page_template', sanitize_text_field( $template ) );
+		$template = sanitize_text_field( MigratePlus_Util::stringify( self::value( $record, $mapping, 'page_template' ) ) );
+		if ( '' !== $template && ! self::protected_meta( '_wp_page_template', $template, $type, $job ) ) {
+			update_post_meta( $post_id, '_wp_page_template', wp_slash( $template ) );
 		}
 		$format = MigratePlus_Util::stringify( self::value( $record, $mapping, 'post_format' ) );
 		if ( '' !== $format && post_type_supports( $type, 'post-formats' ) ) {
 			set_post_format( $post_id, $format );
 		}
 
-		$warnings = array();
 		if ( '' !== $author ) {
 			$warnings[] = sprintf(
 				$updating
@@ -287,6 +326,9 @@ class MigratePlus_Importer {
 			if ( $legacy_meta && is_string( $value ) && 0 === strpos( $row['source'], 'meta.' ) ) {
 				$decoded = json_decode( $value, true );
 				$value   = is_array( $decoded ) ? $decoded : $value;
+			}
+			if ( self::protected_meta( $key, $value, $type, $job ) ) {
+				continue;
 			}
 			$rows = self::meta_rows( $value );
 			if ( null !== $rows ) {
@@ -377,6 +419,77 @@ class MigratePlus_Importer {
 			}
 		}
 		return '';
+	}
+
+	/**
+	 * Whether a custom field is one WordPress, WooCommerce or Migrate Plus keeps for
+	 * itself, which a mapping must not write: a file path, an attachment's sizes or a
+	 * menu item's target written raw would break the post, and the tracking keys would
+	 * break rollback and "imported before". Not every key starting with an underscore:
+	 * SEO plugins keep their fields that way (_yoast_wpseo_*). The featured image has
+	 * its own field. A page template is fine when the theme has it. The first time a
+	 * job skips a key, its log says so.
+	 *
+	 * @param string          $key   Meta key.
+	 * @param mixed           $value Value to write.
+	 * @param string          $type  Post type.
+	 * @param MigratePlus_Job $job   Job (its log, and the keys it already reported).
+	 * @return bool
+	 */
+	protected static function protected_meta( $key, $value, $type, MigratePlus_Job $job ) {
+		$exact    = array( '_wp_attached_file', '_wp_attachment_metadata', '_wp_attachment_backup_sizes', '_thumbnail_id', '_edit_lock', '_edit_last', '_wp_old_slug', '_downloadable_files', '_product_attributes', '_product_version' );
+		$prefixes = array( '_wp_trash_meta_', '_menu_item_', '_migrateplus_' );
+		$blocked  = in_array( $key, $exact, true );
+		foreach ( $prefixes as $prefix ) {
+			$blocked = $blocked || 0 === strpos( $key, $prefix );
+		}
+		if ( '_wp_page_template' === $key ) {
+			// The theme's list, not get_page_templates(): that is an admin function, missing from WP-CLI and cron.
+			$blocked = ! is_string( $value ) || ( 'default' !== $value && ! array_key_exists( $value, wp_get_theme()->get_page_templates( null, $type ) ) );
+		}
+		if ( ! $blocked ) {
+			return false;
+		}
+		$reported = isset( $job->data['protected_meta'] ) ? (array) $job->data['protected_meta'] : array();
+		if ( ! in_array( $key, $reported, true ) ) {
+			$job->data['protected_meta'][] = $key;
+			$job->log(
+				'warning',
+				'_wp_page_template' === $key
+					/* translators: %s: page template */
+					? sprintf( __( 'Page template "%s" is not in the active theme, so it was not set.', 'migrateplus' ), is_string( $value ) ? $value : '' )
+					/* translators: %s: meta key */
+					: sprintf( __( 'Custom field "%s" is kept by WordPress, WooCommerce or Migrate Plus, so it was not imported.', 'migrateplus' ), $key )
+			);
+		}
+		return true;
+	}
+
+	/**
+	 * The post a record's parent names by slug: the record carries the parent as
+	 * { id, slug, type } (mapped from "parent.id"), as menu items carry their target.
+	 *
+	 * @param array $record  Flat record.
+	 * @param array $mapping Mapping.
+	 * @return int 0 when the record names no slug or no post has it.
+	 */
+	protected static function find_parent_by_slug( array $record, array $mapping ) {
+		$source = isset( $mapping['fields']['post_parent'] ) ? (string) $mapping['fields']['post_parent'] : '';
+		if ( ! preg_match( '/^(.+)\.id$/', $source, $m ) || empty( $record[ $m[1] . '.slug' ] ) ) {
+			return 0;
+		}
+		$type = isset( $record[ $m[1] . '.type' ] ) ? sanitize_key( MigratePlus_Util::stringify( $record[ $m[1] . '.type' ] ) ) : '';
+		$ids  = get_posts(
+			array(
+				'post_type'        => post_type_exists( $type ) ? $type : array_keys( get_post_types() ),
+				'name'             => sanitize_title( MigratePlus_Util::stringify( $record[ $m[1] . '.slug' ] ) ),
+				'post_status'      => array( 'publish', 'future', 'draft', 'pending', 'private' ),
+				'fields'           => 'ids',
+				'posts_per_page'   => 1,
+				'suppress_filters' => true,
+			)
+		);
+		return $ids ? (int) $ids[0] : 0;
 	}
 
 	/**
@@ -500,6 +613,12 @@ class MigratePlus_Importer {
 					)
 				);
 			}
+		}
+		// WooCommerce works a product's rating out inside wp_insert_comment(), before the review's
+		// "rating" meta above exists (comment_meta passed to it is saved after the recount too). Recount
+		// now. A no-op for other post types.
+		if ( class_exists( 'WC_Comments' ) ) {
+			WC_Comments::clear_transients( $post_id );
 		}
 		return $added;
 	}
@@ -695,14 +814,10 @@ class MigratePlus_Importer {
 		if ( ! $post || 'attachment' === $type || MigratePlus_Woo::is_product_type( $type ) ) {
 			return array();
 		}
-		$mapping = $job->data['mapping'];
 		$postarr = apply_filters( 'migrateplus_post_data', array( 'ID' => (int) $post_id ) + self::post_fields( $record, $job, $type, false ), $record, $job );
-		// Title and content are always set; the others only when the record has them.
-		$new    = static function ( $key, $target = '' ) use ( $postarr, $record, $mapping ) {
-			if ( ! isset( $postarr[ $key ] ) || ( '' !== $target && null === self::value( $record, $mapping, $target ) ) ) {
-				return null;
-			}
-			return (string) $postarr[ $key ];
+		// Each field is set only when the record has it, as an update writes it.
+		$new    = static function ( $key ) use ( $postarr ) {
+			return isset( $postarr[ $key ] ) ? (string) $postarr[ $key ] : null;
 		};
 		$author = static function ( $id ) {
 			$user = get_userdata( (int) $id );
@@ -711,8 +826,8 @@ class MigratePlus_Importer {
 
 		// field => [ label, current value, imported value or null when not mapped / not set ].
 		$fields  = array(
-			'title'   => array( __( 'Title', 'migrateplus' ), $post->post_title, $new( 'post_title', 'post_title' ) ),
-			'content' => array( __( 'Content', 'migrateplus' ), $post->post_content, $new( 'post_content', 'post_content' ) ),
+			'title'   => array( __( 'Title', 'migrateplus' ), $post->post_title, $new( 'post_title' ) ),
+			'content' => array( __( 'Content', 'migrateplus' ), $post->post_content, $new( 'post_content' ) ),
 			'excerpt' => array( __( 'Excerpt', 'migrateplus' ), $post->post_excerpt, $new( 'post_excerpt' ) ),
 			'status'  => array( __( 'Status', 'migrateplus' ), $post->post_status, $new( 'post_status' ) ),
 			'date'    => array( __( 'Publish date', 'migrateplus' ), $post->post_date, $new( 'post_date' ) ),
@@ -750,20 +865,30 @@ class MigratePlus_Importer {
 	protected static function post_fields( array $record, MigratePlus_Job $job, $type, $create_authors ) {
 		$mapping = $job->data['mapping'];
 		$opts    = array_merge( MigratePlus_Job::default_options(), (array) $job->data['options'] );
-		$content = MigratePlus_Util::stringify( self::value( $record, $mapping, 'post_content' ) );
-		if ( ! empty( $opts['rewrite_links'] ) ) {
-			$content = self::rewrite_links( $content, self::base_url( $job ) );
-		}
 
-		$postarr = array(
-			'post_type'    => $type,
-			'post_title'   => wp_strip_all_tags( html_entity_decode( MigratePlus_Util::stringify( self::value( $record, $mapping, 'post_title' ) ), ENT_QUOTES, 'UTF-8' ) ),
-			'post_content' => $content,
-		);
+		// Title and content only when the record has them, so an update leaves the ones it lacks alone.
+		$postarr = array( 'post_type' => $type );
+		$title   = self::value( $record, $mapping, 'post_title' );
+		if ( null !== $title ) {
+			// Only real tags (and script/style with their contents) are removed, after decoding: stripping
+			// everything from a "<" on would turn "I <3 PHP" into "I".
+			$title                 = html_entity_decode( MigratePlus_Util::stringify( $title ), ENT_QUOTES, 'UTF-8' );
+			$title                 = preg_replace( '@<(script|style)[^>]*?>.*?</\\1>@si', '', $title );
+			$postarr['post_title'] = trim( (string) preg_replace( '#<!--.*?-->|</?[a-zA-Z][^<>]*>#s', '', $title ) );
+		}
+		$content = self::value( $record, $mapping, 'post_content' );
+		if ( null !== $content ) {
+			$content = MigratePlus_Util::stringify( $content );
+			if ( ! empty( $opts['rewrite_links'] ) ) {
+				$content = self::rewrite_links( $content, self::base_url( $job ) );
+			}
+			$postarr['post_content'] = $content;
+		}
 
 		$excerpt = self::value( $record, $mapping, 'post_excerpt' );
 		if ( null !== $excerpt ) {
-			$postarr['post_excerpt'] = wp_strip_all_tags( MigratePlus_Util::stringify( $excerpt ) );
+			// Excerpts may hold HTML (a Migrate Plus export carries it as written): keep what a post may contain.
+			$postarr['post_excerpt'] = wp_kses_post( MigratePlus_Util::stringify( $excerpt ) );
 		}
 
 		$status = self::value( $record, $mapping, 'post_status' );
@@ -926,9 +1051,16 @@ class MigratePlus_Importer {
 				return $id;
 			}
 			$postarr['ID'] = $id;
+			if ( ! $updating ) {
+				// A new item, so a title or description the record lacks is empty, as for any new post.
+				$postarr += array(
+					'post_title'   => '',
+					'post_content' => '',
+				);
+			}
 		}
 		if ( '' !== $alt ) {
-			update_post_meta( $postarr['ID'], '_wp_attachment_image_alt', sanitize_text_field( $alt ) );
+			update_post_meta( $postarr['ID'], '_wp_attachment_image_alt', wp_slash( sanitize_text_field( $alt ) ) );
 		}
 		$result = wp_update_post( wp_slash( $postarr ), true );
 		return is_wp_error( $result ) ? $result : (int) $postarr['ID'];
@@ -968,24 +1100,42 @@ class MigratePlus_Importer {
 	}
 
 	/**
-	 * Find a post previously imported with this uid.
+	 * Find a post previously imported with this uid. "Import as copies" leaves several
+	 * posts with the same uid: the one the given job made, else the newest.
 	 *
-	 * @param string          $uid  Uid.
-	 * @param string|string[] $type Post type, or several.
+	 * @param string          $uid    Uid.
+	 * @param string|string[] $type   Post type, or several.
+	 * @param string          $job_id Prefer the post this job imported.
 	 * @return int
 	 */
-	public static function find_by_uid( $uid, $type ) {
-		$ids = get_posts(
-			array(
-				'post_type'        => $type,
-				'post_status'      => 'any',
-				'meta_key'         => '_migrateplus_source_uid', // phpcs:ignore WordPress.DB.SlowDBQuery
-				'meta_value'       => $uid, // phpcs:ignore WordPress.DB.SlowDBQuery
-				'fields'           => 'ids',
-				'posts_per_page'   => 1,
-				'suppress_filters' => true,
-			)
+	public static function find_by_uid( $uid, $type, $job_id = '' ) {
+		$args = array(
+			'post_type'        => $type,
+			'post_status'      => 'any',
+			'meta_key'         => '_migrateplus_source_uid', // phpcs:ignore WordPress.DB.SlowDBQuery
+			'meta_value'       => $uid, // phpcs:ignore WordPress.DB.SlowDBQuery
+			'fields'           => 'ids',
+			'posts_per_page'   => 1,
+			'orderby'          => 'ID',
+			'order'            => 'DESC',
+			'suppress_filters' => true,
 		);
+		if ( '' !== (string) $job_id ) {
+			$ids = get_posts(
+				$args + array(
+					'meta_query' => array( // phpcs:ignore WordPress.DB.SlowDBQuery
+						array(
+							'key'   => '_migrateplus_job_id',
+							'value' => (string) $job_id,
+						),
+					),
+				)
+			);
+			if ( $ids ) {
+				return (int) $ids[0];
+			}
+		}
+		$ids = get_posts( $args );
 		return $ids ? (int) $ids[0] : 0;
 	}
 

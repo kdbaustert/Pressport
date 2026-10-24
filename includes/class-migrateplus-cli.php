@@ -12,10 +12,10 @@ defined( 'ABSPATH' ) || exit;
  *
  * ## EXAMPLES
  *
- *     # Preview a MigratePlus export and see the mapping it carries
+ *     # Preview a Migrate Plus export and see the mapping it carries
  *     wp migrateplus preview json --file=./migrateplus-product.json
  *
- *     # Import a MigratePlus export, updating anything imported before
+ *     # Import a Migrate Plus export, updating anything imported before
  *     wp migrateplus import json --file=./migrateplus-product.json --duplicate=update
  *
  *     # Import any JSON file with a custom mapping file
@@ -43,7 +43,23 @@ class MigratePlus_CLI {
 	 *
 	 * @var string[]
 	 */
-	protected $reserved = array( 'config', 'map', 'mapping', 'post_type', 'status', 'author', 'duplicate', 'batch_size', 'featured-images', 'content-images', 'create-authors', 'create-terms', 'rewrite-links', 'force-status', 'comments', 'menus', 'dry-run' );
+	protected $reserved = array( 'config', 'map', 'mapping', 'post_type', 'status', 'author', 'duplicate', 'duplicates', 'batch_size', 'featured-images', 'content-images', 'create-authors', 'create-terms', 'rewrite-links', 'force-status', 'comments', 'menus', 'dry-run', 'yes' );
+
+	/**
+	 * Import switches and the option each sets.
+	 *
+	 * @var string[]
+	 */
+	protected $switches = array(
+		'featured-images' => 'import_featured_image',
+		'content-images'  => 'import_content_images',
+		'create-authors'  => 'create_authors',
+		'create-terms'    => 'create_terms',
+		'rewrite-links'   => 'rewrite_links',
+		'comments'        => 'import_comments',
+		'menus'           => 'import_menus',
+		'dry-run'         => 'dry_run',
+	);
 
 	/**
 	 * Show the fields, suggested mapping and first record from a source.
@@ -96,31 +112,34 @@ class MigratePlus_CLI {
 	 * : JSON mapping file: { "fields": { "post_title": "title", ... }, "meta": [{ "key": "...", "source": "..." }], "taxonomies": [{ "taxonomy": "...", "source": "..." }], "acf": { "field_name_or_key": "source_field" } }. Defaults to the suggested mapping.
 	 *
 	 * [--mapping=<name>]
-	 * : A saved mapping (see wp migrateplus mapping list): its field mapping and import options. Not for MigratePlus exports, which carry their own. Mapping and options in --config, --map and the flags below take precedence.
+	 * : A saved mapping (see wp migrateplus mapping list): its field mapping and import options. Not for Migrate Plus exports, which carry their own. Mapping and options in --config, --map and the flags below take precedence.
 	 *
 	 * [--post_type=<type>]
-	 * : Destination post type. Defaults to the MigratePlus setting.
+	 * : Destination post type. Defaults to the Migrate Plus setting.
 	 *
 	 * [--status=<status>]
 	 * : Default status: publish, draft, pending, private.
 	 *
 	 * [--force-status=<status>]
-	 * : Give every imported post this status (publish, draft, pending or private), also posts it updates. Pass "keep" to use each record's own status. Defaults to the MigratePlus setting.
+	 * : Give every imported post this status (publish, draft, pending or private), also posts it updates. Pass "keep" to use each record's own status. Defaults to the Migrate Plus setting.
 	 *
 	 * [--author=<id|login|email>]
 	 * : Default author.
 	 *
 	 * [--duplicate=<mode>]
-	 * : skip, update or create. Defaults to the MigratePlus setting.
+	 * : skip, update or create. Defaults to the Migrate Plus setting.
 	 *
 	 * [--duplicates=<choice>]
-	 * : What to do with records already on this site (imported before, or the same slug, SKU or media file name): skip, import (as copies), or update (the posts and pages whose title, content, excerpt, status, date, slug or author differ; the rest are skipped). Asks when left out; skips without asking in a dry run or when there is no terminal to ask in.
+	 * : What to do with records already on this site (imported before, or the same slug, SKU or media file name): skip, import (as copies), or update (the posts and pages whose title, content, excerpt, status, date, slug or author differ; the rest are skipped). Asks when left out. In a dry run, with --yes, or when there is no terminal to ask in, it doesn't ask: --duplicate=create imports them as copies, otherwise they are skipped.
+	 *
+	 * [--yes]
+	 * : Don't ask about records already on this site.
 	 *
 	 * [--batch_size=<n>]
-	 * : Records per batch. Defaults to the MigratePlus setting.
+	 * : Records per batch. Defaults to the Migrate Plus setting.
 	 *
 	 * [--[no-]featured-images]
-	 * : Download featured images. Defaults to the MigratePlus setting.
+	 * : Download featured images. Defaults to the Migrate Plus setting.
 	 *
 	 * [--content-images]
 	 * : Download images found inside content.
@@ -129,16 +148,16 @@ class MigratePlus_CLI {
 	 * : Create users for unknown authors.
 	 *
 	 * [--[no-]create-terms]
-	 * : Create missing categories and terms. Defaults to the MigratePlus setting.
+	 * : Create missing categories and terms. Defaults to the Migrate Plus setting.
 	 *
 	 * [--[no-]rewrite-links]
-	 * : Point links to the old site at this one (MigratePlus exports only). Defaults to the MigratePlus setting.
+	 * : Point links to the old site at this one (Migrate Plus exports only). Defaults to the Migrate Plus setting.
 	 *
 	 * [--[no-]comments]
-	 * : Add the comments a MigratePlus export carries. Defaults to the MigratePlus setting.
+	 * : Add the comments a Migrate Plus export carries. Defaults to the Migrate Plus setting.
 	 *
 	 * [--[no-]menus]
-	 * : Import the navigation menus a MigratePlus export carries, after its posts. Defaults to the MigratePlus setting.
+	 * : Import the navigation menus a Migrate Plus export carries, after its posts. Defaults to the Migrate Plus setting.
 	 *
 	 * [--dry-run]
 	 * : Show what would happen without saving.
@@ -156,6 +175,9 @@ class MigratePlus_CLI {
 		$config = array();
 		if ( ! empty( $assoc['config'] ) ) {
 			$config = $this->read_json( $assoc['config'] );
+			if ( ! empty( $config['mapping'] ) ) {
+				$this->check_mapping( $config['mapping'], $assoc['config'] );
+			}
 		}
 		$source = isset( $args[0] ) ? $args[0] : ( isset( $config['source'] ) ? $config['source'] : '' );
 		if ( '' === $source ) {
@@ -167,10 +189,14 @@ class MigratePlus_CLI {
 			if ( ! $saved ) {
 				WP_CLI::error( sprintf( 'No saved mapping called "%s". See: wp migrateplus mapping list', $assoc['mapping'] ) );
 			}
-			$config += array(
-				'mapping' => $saved['mapping'],
-				'options' => $saved['options'],
-			);
+			$config += array( 'mapping' => $saved['mapping'] );
+			// Option by option, so --config only overrides the ones it names.
+			$config['options'] = array_merge( (array) $saved['options'], isset( $config['options'] ) ? (array) $config['options'] : array() );
+		}
+		// Read and checked before preview() saves a job, like the options below.
+		$map = ! empty( $assoc['map'] ) ? $this->read_json( $assoc['map'] ) : null;
+		if ( $map ) {
+			$this->check_mapping( $map, $assoc['map'] );
 		}
 		$settings = array_merge( isset( $config['settings'] ) ? (array) $config['settings'] : array(), $this->settings_from( $assoc, $source ) );
 
@@ -200,6 +226,11 @@ class MigratePlus_CLI {
 		if ( ! empty( $given['force_status'] ) && ! in_array( $given['force_status'], array( 'publish', 'draft', 'pending', 'private' ), true ) ) {
 			WP_CLI::error( '--force-status must be publish, draft, pending, private or keep.' );
 		}
+		foreach ( $this->switches as $flag => $key ) {
+			if ( isset( $assoc[ $flag ] ) ) {
+				$given[ $key ] = $this->switch_value( $assoc[ $flag ], $flag );
+			}
+		}
 
 		$preview = MigratePlus_Runner::preview( $source, $settings, 1 );
 		if ( is_wp_error( $preview ) ) {
@@ -208,32 +239,29 @@ class MigratePlus_CLI {
 		$job = $preview['job'];
 		if ( $saved && isset( $job->data['settings']['migrateplus_mapping'] ) ) {
 			$job->delete();
-			WP_CLI::error( 'This file is a MigratePlus export: it carries its own mapping, so it is imported without --mapping.' );
+			WP_CLI::error( 'This file is a Migrate Plus export: it carries its own mapping, so it is imported without --mapping.' );
 		}
 
 		$mapping = $job->data['mapping'];
 		if ( ! empty( $config['mapping'] ) ) {
 			$mapping = $config['mapping'];
 		}
-		if ( ! empty( $assoc['map'] ) ) {
-			$mapping = $this->read_json( $assoc['map'] );
+		if ( $map ) {
+			$mapping = $map;
 		}
-		$job->data['mapping'] = array_merge(
-			array(
-				'fields'     => array(),
-				'meta'       => array(),
-				'taxonomies' => array(),
-				'acf'        => array(),
-			),
-			(array) $mapping
-		);
+		// As the mapping screen saves it: known fields only, and something to give each post a title or content.
+		$job->data['mapping'] = MigratePlus_Mappings::clean_mapping( (array) $mapping );
+		$menus_only           = 0 === (int) $job->data['total'] && ! empty( $job->data['settings']['menus_file'] );
+		if ( ! $menus_only && empty( $job->data['mapping']['fields']['post_title'] ) && empty( $job->data['mapping']['fields']['post_content'] ) ) {
+			$this->abandon( $job, 'Map at least the Title or Content field (post_title or post_content under "fields").' );
+		}
 
 		// The previewed job's options: the defaults, plus the post type a MigratePlus export came from.
 		$options = array_merge( $job->data['options'], $given );
 		if ( isset( $assoc['author'] ) ) {
 			$user = is_numeric( $assoc['author'] ) ? get_userdata( (int) $assoc['author'] ) : ( get_user_by( 'login', $assoc['author'] ) ? get_user_by( 'login', $assoc['author'] ) : get_user_by( 'email', $assoc['author'] ) );
 			if ( ! $user ) {
-				WP_CLI::error( 'Default author not found.' );
+				$this->abandon( $job, 'Default author not found.' );
 			}
 			$options['default_author'] = $user->ID;
 		}
@@ -247,22 +275,21 @@ class MigratePlus_CLI {
 			);
 			$options['default_author'] = $admins ? (int) $admins[0] : 0;
 		}
-		$options['import_featured_image'] = (int) WP_CLI\Utils\get_flag_value( $assoc, 'featured-images', ! empty( $options['import_featured_image'] ) );
-		$options['import_content_images'] = (int) WP_CLI\Utils\get_flag_value( $assoc, 'content-images', ! empty( $options['import_content_images'] ) );
-		$options['create_authors']        = (int) WP_CLI\Utils\get_flag_value( $assoc, 'create-authors', ! empty( $options['create_authors'] ) );
-		$options['create_terms']          = (int) WP_CLI\Utils\get_flag_value( $assoc, 'create-terms', ! empty( $options['create_terms'] ) );
-		$options['rewrite_links']         = (int) WP_CLI\Utils\get_flag_value( $assoc, 'rewrite-links', ! empty( $options['rewrite_links'] ) );
-		$options['import_comments']       = (int) WP_CLI\Utils\get_flag_value( $assoc, 'comments', ! empty( $options['import_comments'] ) );
-		$options['import_menus']          = (int) WP_CLI\Utils\get_flag_value( $assoc, 'menus', ! empty( $options['import_menus'] ) );
-		$options['dry_run']               = (int) WP_CLI\Utils\get_flag_value( $assoc, 'dry-run', ! empty( $options['dry_run'] ) );
+		// The flags are already in $options, from $given.
+		foreach ( $this->switches as $key ) {
+			$options[ $key ] = empty( $options[ $key ] ) ? 0 : 1;
+		}
 
 		if ( ! post_type_exists( $options['post_type'] ) ) {
-			WP_CLI::error( sprintf( 'Post type "%s" does not exist.', $options['post_type'] ) );
+			$this->abandon( $job, sprintf( 'Post type "%s" does not exist.', $options['post_type'] ) );
 		}
 		$job->data['options'] = $options;
-		// A dry run checks for duplicates too, so its counts match the real run's, but never asks: it skips them unless --duplicates says otherwise.
-		$choice               = isset( $assoc['duplicates'] ) ? $assoc['duplicates'] : ( empty( $options['dry_run'] ) ? '' : 'skip' );
-		$job->data['options'] = $this->ask_duplicates( $job, $choice );
+		// Without a --duplicates answer, an explicit --duplicate=create means copies; anything else skips them.
+		$fallback = isset( $given['duplicate'] ) && 'create' === $given['duplicate'] ? 'import' : 'skip';
+		// A dry run checks for duplicates too, so its counts match the real run's, but never asks.
+		$ask                  = empty( $options['dry_run'] ) && empty( $assoc['yes'] ) && $this->interactive();
+		$choice               = isset( $assoc['duplicates'] ) ? $assoc['duplicates'] : ( $ask ? '' : $fallback );
+		$job->data['options'] = $this->ask_duplicates( $job, $choice, isset( $assoc['duplicates'] ) || $ask );
 		$job->data['status']  = 'ready';
 		$job->save();
 
@@ -275,15 +302,16 @@ class MigratePlus_CLI {
 	/**
 	 * Report records already on this site and settle whether to skip them.
 	 *
-	 * @param MigratePlus_Job $job    Job with the options it will run with.
-	 * @param string          $choice "skip", "import", "update", or '' to ask.
+	 * @param MigratePlus_Job $job      Job with the options it will run with.
+	 * @param string          $choice   "skip", "import", "update", or '' to ask.
+	 * @param bool            $answered Whether the choice is the user's (--duplicates or the prompt), not the default.
 	 * @return array Options.
 	 */
-	protected function ask_duplicates( MigratePlus_Job $job, $choice ) {
+	protected function ask_duplicates( MigratePlus_Job $job, $choice, $answered ) {
 		$options = $job->data['options'];
 		$found   = MigratePlus_Runner::find_duplicates( $job );
 		if ( is_wp_error( $found ) ) {
-			WP_CLI::error( $found->get_error_message() );
+			$this->abandon( $job, $found->get_error_message() );
 		}
 		if ( ! $found['count'] ) {
 			return $options;
@@ -299,19 +327,16 @@ class MigratePlus_CLI {
 			}
 		}
 		if ( '' === $choice ) {
-			if ( function_exists( 'posix_isatty' ) && posix_isatty( STDIN ) ) {
-				$answer = $found['changed']
-					? \cli\choose( 'Skip them (y), import them anyway as copies (n), or update the ones that differ (u)?', 'ynu', 'y' )
-					: \cli\choose( 'Skip them? Answer n to import them anyway', 'yn', 'y' );
-				$choice = array(
-					'y' => 'skip',
-					'n' => 'import',
-					'u' => 'update',
-				)[ $answer ];
-			} else {
-				$choice = 'skip';
-				WP_CLI::log( 'Skipping them. Pass --duplicates=import or --duplicates=update to change that.' );
-			}
+			$answer = $found['changed']
+				? \cli\choose( 'Skip them (y), import them anyway as copies (n), or update the ones that differ (u)?', 'ynu', 'y' )
+				: \cli\choose( 'Skip them? Answer n to import them anyway', 'yn', 'y' );
+			$choice = array(
+				'y' => 'skip',
+				'n' => 'import',
+				'u' => 'update',
+			)[ $answer ];
+		} elseif ( ! $answered ) {
+			WP_CLI::log( 'import' === $choice ? 'Importing them as copies (--duplicate=create). Pass --duplicates=skip to skip them.' : 'Skipping them. Pass --duplicates=import or --duplicates=update to change that.' );
 		}
 		// As in the admin: records imported before keep "update" when asked for; otherwise skip or copy.
 		// "update" updates the ones that differ and skips the rest.
@@ -337,11 +362,15 @@ class MigratePlus_CLI {
 		if ( ! $job ) {
 			WP_CLI::error( 'Job not found.' );
 		}
+		// As in the admin: a draft was never started, so its options have not been through the duplicate check.
+		if ( 'draft' === $job->data['status'] ) {
+			WP_CLI::error( sprintf( 'Job %s was never started, so there is nothing to resume. Run the import again.', $job->data['id'] ) );
+		}
 		$this->run( $job );
 	}
 
 	/**
-	 * Export content to a JSON file that MigratePlus (on this or another site) can import.
+	 * Export content to a JSON file that Migrate Plus (on this or another site) can import.
 	 *
 	 * ## OPTIONS
 	 *
@@ -418,6 +447,13 @@ class MigratePlus_CLI {
 		);
 		if ( is_wp_error( $export ) ) {
 			WP_CLI::error( $export->get_error_message() );
+		}
+		// The admin only loads on admin requests; its class holds the rule the Export screen uses.
+		require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-admin.php';
+		foreach ( $export['post_types'] as $type ) {
+			if ( ! MigratePlus_Admin::exportable_type( $type ) ) {
+				WP_CLI::error( sprintf( '"%s" can\'t be exported: Migrate Plus exports content types with an admin screen, other than ACF\'s settings and WooCommerce orders.', $type ) );
+			}
 		}
 		$state = MigratePlus_Exporter::start( $export );
 		if ( is_wp_error( $state ) ) {
@@ -556,6 +592,11 @@ class MigratePlus_CLI {
 			WP_CLI::error( 'Job not found.' );
 		}
 		$count = $job->imported_count();
+		// rollback_batch() would mark the job rolled back without deleting anything.
+		if ( ! empty( $job->data['options']['dry_run'] ) || ! $count ) {
+			WP_CLI::warning( sprintf( 'Nothing to roll back: job %s %s.', $job->data['id'], empty( $job->data['options']['dry_run'] ) ? 'created nothing that is still on this site' : 'was a dry run' ) );
+			return;
+		}
 		WP_CLI::confirm( sprintf( 'Permanently delete %d items created by job %s?', $count, $job->data['id'] ), $assoc );
 		$deleted = 0;
 		do {
@@ -632,8 +673,72 @@ class MigratePlus_CLI {
 		if ( $progress ) {
 			$progress->finish();
 		}
-		$s = $job->data['stats'];
-		WP_CLI::success( sprintf( '%s%d created, %d updated, %d skipped, %d failed. Job id: %s', ! empty( $job->data['options']['dry_run'] ) ? '[dry run] ' : '', $s['created'], $s['updated'], $s['skipped'], $s['failed'], $job->data['id'] ) );
+		$s       = $job->data['stats'];
+		$summary = sprintf( '%s%d created, %d updated, %d skipped, %d failed. Job id: %s', ! empty( $job->data['options']['dry_run'] ) ? '[dry run] ' : '', $s['created'], $s['updated'], $s['skipped'], $s['failed'], $job->data['id'] );
+		// A non-zero exit, so a script running the import notices the failed records.
+		if ( $s['failed'] ) {
+			WP_CLI::error( $summary );
+		}
+		WP_CLI::success( $summary );
+	}
+
+	/**
+	 * Delete the job preview() saved, then stop with an error.
+	 *
+	 * @param MigratePlus_Job $job     Job.
+	 * @param string          $message Error.
+	 */
+	protected function abandon( MigratePlus_Job $job, $message ) {
+		$job->delete();
+		WP_CLI::error( $message );
+	}
+
+	/**
+	 * Whether there is a terminal to ask questions in.
+	 *
+	 * @return bool
+	 */
+	protected function interactive() {
+		return function_exists( 'posix_isatty' ) && posix_isatty( STDIN );
+	}
+
+	/**
+	 * A switch's value: true or false from --flag or --no-flag, or yes/no/true/false/1/0 given to it.
+	 *
+	 * @param mixed  $value Value.
+	 * @param string $flag  Flag name.
+	 * @return int 1 or 0.
+	 */
+	protected function switch_value( $value, $flag ) {
+		if ( is_bool( $value ) ) {
+			return (int) $value;
+		}
+		$value = strtolower( trim( (string) $value ) );
+		if ( in_array( $value, array( 'yes', 'true', '1' ), true ) ) {
+			return 1;
+		}
+		if ( in_array( $value, array( 'no', 'false', '0' ), true ) ) {
+			return 0;
+		}
+		WP_CLI::error( sprintf( '--%s takes yes, no, true, false, 1 or 0.', $flag ) );
+	}
+
+	/**
+	 * Stop on a mapping that is not shaped like one, rather than import with it emptied.
+	 *
+	 * @param mixed  $mapping Mapping from a file.
+	 * @param string $from    The file, for the message.
+	 */
+	protected function check_mapping( $mapping, $from ) {
+		$keys = array( 'fields', 'meta', 'taxonomies', 'acf' );
+		if ( ! is_array( $mapping ) || ! array_intersect( $keys, array_keys( $mapping ) ) ) {
+			WP_CLI::error( sprintf( '%s has no mapping: expected an object with "fields", and optionally "meta", "taxonomies" and "acf".', $from ) );
+		}
+		foreach ( $keys as $key ) {
+			if ( isset( $mapping[ $key ] ) && ! is_array( $mapping[ $key ] ) ) {
+				WP_CLI::error( sprintf( 'In %s, "%s" must be a JSON object or list.', $from, $key ) );
+			}
+		}
 	}
 
 	/**

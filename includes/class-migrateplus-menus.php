@@ -485,7 +485,7 @@ class MigratePlus_Menus {
 	protected static function find_post( array $ref, $type, MigratePlus_Job $job, array $planned ) {
 		$all = array_keys( get_post_types() );
 		$uid = ! empty( $ref['id'] ) ? MigratePlus_Importer::uid( $job, MigratePlus_Util::stringify( $ref['id'] ) ) : '';
-		$id  = '' !== $uid ? MigratePlus_Importer::find_by_uid( $uid, $all ) : 0;
+		$id  = '' !== $uid ? MigratePlus_Importer::find_by_uid( $uid, $all, $job->data['id'] ) : 0;
 		if ( ! $id && isset( $planned[ $uid ] ) ) {
 			return -1;
 		}

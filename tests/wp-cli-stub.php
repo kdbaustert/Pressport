@@ -12,6 +12,7 @@ namespace {
 	class WP_CLI {
 		public static $output = array();
 		public static $items  = array();
+		public static $asked  = array();
 
 		public static function log( $message ) {
 			self::$output[] = $message;
@@ -57,8 +58,10 @@ namespace WP_CLI\Utils {
 namespace cli {
 	/**
 	 * The duplicates prompt asks only when STDIN is a terminal, as it is when the tests run from a shell.
+	 * The question is kept, so a test can tell whether it was asked.
 	 */
 	function choose( $question, $choices, $default ) {
+		\WP_CLI::$asked[] = $question;
 		return $default;
 	}
 }

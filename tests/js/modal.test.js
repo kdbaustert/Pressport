@@ -1,6 +1,6 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { boot, job, fail, noNativeDialogs } from './helpers.js'
+import { boot, job, fail, later, noNativeDialogs } from './helpers.js'
 
 afterEach(noNativeDialogs)
 
@@ -87,5 +87,53 @@ describe('modalError()', () => {
     env.click(env.modal.primary())
     await env.flush()
     assert.equal(env.modal.note(), 'Unexpected server response (HTTP 500). Critical error')
+  })
+})
+
+describe('modal focus', () => {
+  const tab = (env, node) => !node.dispatchEvent(new env.window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }))
+
+  it('focuses the dialog when its only button is disabled, and keeps Tab inside', async () => {
+    const env = await history({ delete: later().promise })
+    env.click(env.modal.primary())
+    const dialog = env.$('.migrateplus-modal')
+    assert.equal(env.document.activeElement, dialog)
+    assert.equal(tab(env, dialog), true)
+  })
+
+  it('announces the title', async () => {
+    const env = await history()
+    assert.equal(env.$('.migrateplus-modal-title').getAttribute('aria-live'), 'polite')
+  })
+
+  const bulkDelete = async (focus) => {
+    const env = boot({
+      data: { view: 'history' },
+      routes: {
+        jobs: { jobs: [job({ status: 'complete' }), job({ id: 'authors', status: 'complete' })] },
+        exports: { exports: [] },
+        history_delete: { deleted: [{ id: 'books' }], skipped: [] },
+      },
+    })
+    await env.flush()
+    env.check(env.$('.migrateplus-history-panel tbody input'))
+    const opener = focus(env)
+    opener.focus()
+    env.click(env.byText('button', 'Delete 1 entry'))
+    env.click(env.modal.primary())
+    await env.flush()
+    env.click(env.modal.button('Close'))
+    return { env, opener }
+  }
+
+  it('gives focus back to the new copy of the control that opened it', async () => {
+    const { env, opener } = await bulkDelete(env => env.$('#migrateplus-history-search'))
+    assert.notEqual(env.$('#migrateplus-history-search'), opener)
+    assert.equal(env.document.activeElement, env.$('#migrateplus-history-search'))
+  })
+
+  it('falls back to the page heading when that control is gone', async () => {
+    const { env } = await bulkDelete(env => env.byText('button', 'Delete 1 entry'))
+    assert.equal(env.document.activeElement, env.$('h1'))
   })
 })

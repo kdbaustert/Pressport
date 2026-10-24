@@ -161,7 +161,13 @@ class MigratePlus_ACF {
 	 */
 	public static function read( array $record, $source ) {
 		if ( array_key_exists( $source, $record ) ) {
-			return $record[ $source ];
+			$value = $record[ $source ];
+			// flatten() keeps true, false and null so they survive inside nested values; a field read
+			// on its own is stored as it was before, "1", "0" and "" (update_post_meta( false ) would store "").
+			if ( is_bool( $value ) ) {
+				return $value ? '1' : '0';
+			}
+			return null === $value ? '' : $value;
 		}
 		$prefix = $source . '.';
 		$len    = strlen( $prefix );
@@ -173,7 +179,12 @@ class MigratePlus_ACF {
 				continue;
 			}
 			$found = true;
-			$node  = &$tree;
+			// flatten() stops at MAX_DEPTH and writes what is deeper as JSON text: decode it back.
+			if ( is_string( $value ) && MigratePlus_Util::MAX_DEPTH === substr_count( $key, '.' ) ) {
+				$decoded = json_decode( $value, true );
+				$value   = is_array( $decoded ) ? $decoded : $value;
+			}
+			$node = &$tree;
 			foreach ( explode( '.', substr( $key, $len ) ) as $segment ) {
 				if ( ! isset( $node[ $segment ] ) || ! is_array( $node[ $segment ] ) ) {
 					$node[ $segment ] = array();
@@ -183,28 +194,9 @@ class MigratePlus_ACF {
 			$node = $value;
 			unset( $node );
 		}
-		return $found ? self::listify( $tree ) : null;
-	}
-
-	/**
-	 * Turn arrays with 0..n keys into lists, recursively.
-	 *
-	 * @param mixed $data Data.
-	 * @return mixed
-	 */
-	protected static function listify( $data ) {
-		if ( ! is_array( $data ) ) {
-			return $data;
-		}
-		foreach ( $data as $k => $v ) {
-			$data[ $k ] = self::listify( $v );
-		}
-		$keys = array_keys( $data );
-		if ( $keys && array_filter( $keys, 'is_numeric' ) === $keys ) {
-			ksort( $data, SORT_NUMERIC );
-			$data = array_values( $data );
-		}
-		return $data;
+		// Keys come back in the order flatten() wrote them, so a list is already 0..n-1 and
+		// a map keeps its keys, numeric ones too ({ "5": 10, "4": 3 } is not a list).
+		return $found ? $tree : null;
 	}
 
 	/**
@@ -235,6 +227,10 @@ class MigratePlus_ACF {
 	protected static function items( $value ) {
 		$value = self::maybe_json( $value );
 		if ( is_array( $value ) ) {
+			// An empty list is no items; range( 0, -1 ) is [ 0, -1 ], so the test below would wrap it as one.
+			if ( ! $value ) {
+				return array();
+			}
 			// A single object (e.g. { url: ... }) is one item, not a list of fields.
 			return array_keys( $value ) === range( 0, count( $value ) - 1 ) ? $value : array( $value );
 		}
@@ -290,7 +286,9 @@ class MigratePlus_ACF {
 			$ctx['pending'] = array();
 			$value          = self::convert( $field, $raw, $ctx );
 			$value          = apply_filters( 'migrateplus_acf_value', $value, $field, $raw, $post_id, $job );
-			if ( update_field( $field['key'], $value, $post_id ) || null !== $value ) {
+			// ACF expects slashed data, as from a form post: post meta goes to update_metadata(),
+			// which unslashes, and options are unslashed by ACF itself. Unslashed, "C:\Users" loses its backslashes.
+			if ( update_field( $field['key'], wp_slash( $value ), $post_id ) || null !== $value ) {
 				++$saved;
 			}
 			self::set_pending( (int) $post_id, $field['key'], $ctx['pending'] );
@@ -394,9 +392,12 @@ class MigratePlus_ACF {
 				}
 				$ids   = array();
 				$names = array();
+				// Exports carry term names, so "2019" there is a term called 2019, never term #2019.
+				$export = isset( $ctx['job'] ) && isset( $ctx['job']->data['settings']['migrateplus_mapping'] );
 				foreach ( self::items( $value ) as $item ) {
 					$item = is_array( $item ) ? ( isset( $item['name'] ) ? $item['name'] : ( isset( $item['term_id'] ) ? $item['term_id'] : '' ) ) : $item;
-					if ( is_numeric( $item ) && get_term( (int) $item, $tax ) instanceof WP_Term ) {
+					// Other data may use ids, but a term named like the number still wins.
+					if ( ! $export && is_numeric( $item ) && ! get_term_by( 'name', (string) $item, $tax ) && ! get_term_by( 'slug', (string) $item, $tax ) && get_term( (int) $item, $tax ) instanceof WP_Term ) {
 						$ids[] = (int) $item;
 					} elseif ( '' !== trim( (string) $item ) ) {
 						$names[] = (string) $item;
@@ -461,7 +462,8 @@ class MigratePlus_ACF {
 				if ( ! is_array( $rows ) ) {
 					return array();
 				}
-				if ( array_keys( $rows ) !== range( 0, count( $rows ) - 1 ) ) {
+				// An empty repeater is no rows, not one blank row: range( 0, -1 ) is [ 0, -1 ].
+				if ( $rows && array_keys( $rows ) !== range( 0, count( $rows ) - 1 ) ) {
 					$rows = array( $rows ); // A single row given as an object.
 				}
 				$out = array();
@@ -734,7 +736,7 @@ class MigratePlus_ACF {
 		);
 		if ( is_array( $value ) ) {
 			// An exported reference { id, slug, title } from another site: match the
-			// earlier import by source id, then slug, then title. Never treat the
+			// earlier import by source id, then (not for our own exports) slug, then title. Never treat the
 			// foreign id as a local post id, nor as an id from another source.
 			$ref = array_change_key_case( $value, CASE_LOWER );
 			if ( ! empty( $ref['id'] ) ) {
@@ -749,6 +751,19 @@ class MigratePlus_ACF {
 				);
 				if ( $ids ) {
 					return (int) $ids[0];
+				}
+				// From a Migrate Plus export: the post is later in the file, in a file still to come,
+				// or already here without having been imported (staging and live both have About).
+				// The same slug of the same type is that last case; a title alone is too loose, and
+				// once linked to the wrong post the field would never be corrected, so otherwise wait.
+				if ( $job && isset( $job->data['settings']['migrateplus_mapping'] ) ) {
+					foreach ( array( 'slug', 'post_name' ) as $k ) {
+						$found = ! empty( $ref[ $k ] ) ? self::resolve_post( '/' . $ref[ $k ], $types ) : 0;
+						if ( $found ) {
+							return $found;
+						}
+					}
+					return 0;
 				}
 			}
 			foreach ( array( 'slug', 'post_name', 'title', 'post_title' ) as $k ) {

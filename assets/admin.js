@@ -38,6 +38,17 @@
 
 	// Helpers
 
+	/**
+	 * A URL from a file or the server, or null unless it is http(s) or relative: a javascript: or
+	 * data: link would run in the admin. Browsers drop tabs and newlines inside a URL and spaces
+	 * and control characters before it, so they are dropped here too before reading the scheme.
+	 */
+	function safeUrl( url ) {
+		const s = String( url ).replace( /[\t\n\r]/g, '' ).replace( /^[\u0000-\u0020]+/, '' );
+		const scheme = /^([a-z][a-z0-9+.-]*):/i.exec( s );
+		return ! scheme || /^https?$/i.test( scheme[ 1 ] ) ? url : null;
+	}
+
 	function el( tag, attrs, children ) {
 		const node = document.createElement( tag );
 		Object.entries( attrs || {} ).forEach( ( [ k, v ] ) => {
@@ -54,6 +65,8 @@
 				node.value = v;
 			} else if ( k === 'checked' || k === 'selected' || k === 'disabled' ) {
 				node[ k ] = !! v;
+			} else if ( ( k === 'href' || k === 'src' ) && null === safeUrl( v ) ) {
+				return;
 			} else {
 				node.setAttribute( k, v === true ? '' : v );
 			}
@@ -87,14 +100,31 @@
 			throw new Error( 'Unexpected server response (HTTP ' + status + '). ' + String( text ).replace( /<[^>]+>/g, ' ' ).trim().slice( 0, 300 ) );
 		}
 		if ( ! json.success ) {
-			throw new Error( ( json.data && json.data.message ) || 'Request failed.' );
+			const err = new Error( ( json.data && json.data.message ) || 'Request failed.' );
+			// The message is translated; the WP_Error code is what to match on.
+			err.code = ( json.data && json.data.code ) || '';
+			throw err;
 		}
 		return json.data || {};
 	}
 
+	// An import batch may run for the 300 seconds the runner allows PHP, plus the time to send and answer.
+	const API_TIMEOUT = 6 * 60 * 1000;
+
+	/**
+	 * POST to admin-ajax. A request that never reached the server, or got no answer in time,
+	 * fails with err.network set, so a long run can retry it.
+	 */
 	function api( action, data ) {
-		return fetch( D.ajaxUrl, { method: 'POST', body: apiBody( action, data ), credentials: 'same-origin' } )
-			.then( ( r ) => r.text().then( ( t ) => parseResponse( r.status, t ) ) );
+		const controller = new AbortController();
+		const timer = setTimeout( () => controller.abort(), API_TIMEOUT );
+		return fetch( D.ajaxUrl, { method: 'POST', body: apiBody( action, data ), credentials: 'same-origin', signal: controller.signal } )
+			.then( ( r ) => r.text().then( ( t ) => parseResponse( r.status, t ) ), ( e ) => {
+				const err = new Error( e && 'AbortError' === e.name ? 'The server took too long to respond.' : 'Network error. Check your connection and try again.' );
+				err.network = true;
+				throw err;
+			} )
+			.finally( () => clearTimeout( timer ) );
 	}
 
 	/**
@@ -172,12 +202,16 @@
 		let parts = {};
 		let opts = {};
 		let lastFocus = null;
+		let lastFocusId = '';
+		// Disabled and hidden controls can't take focus; focusing one drops it to the page behind.
+		const FOCUSABLE = 'button:not(:disabled):not([hidden]), a[href]:not([hidden])';
 
 		const ICONS = { success: 'dashicons-yes', error: 'dashicons-warning', paused: 'dashicons-controls-pause', file: 'dashicons-database-import', danger: 'dashicons-trash', question: 'dashicons-editor-help', working: '' };
 
 		function build() {
 			parts.icon = el( 'span', { class: 'migrateplus-modal-icon', 'aria-hidden': 'true' }, el( 'span', { class: 'dashicons' } ) );
-			parts.title = el( 'h2', { class: 'migrateplus-modal-title', id: 'migrateplus-modal-title' } );
+			// Announced when it changes, e.g. to "Import complete"; the message changes every batch, so it is not.
+			parts.title = el( 'h2', { class: 'migrateplus-modal-title', id: 'migrateplus-modal-title', 'aria-live': 'polite' } );
 			parts.message = el( 'p', { class: 'migrateplus-modal-message', id: 'migrateplus-modal-message' } );
 			parts.close = el( 'button', { type: 'button', class: 'migrateplus-modal-close', 'aria-label': 'Close', title: 'Close', onclick: dismiss }, el( 'span', { class: 'dashicons dashicons-no-alt', 'aria-hidden': 'true' } ) );
 			parts.head = el( 'header', { class: 'migrateplus-modal-head' }, [
@@ -217,7 +251,7 @@
 				dismiss();
 			} else if ( e.key === 'Tab' ) {
 				// Keep focus inside the dialog.
-				const focusables = parts.dialog.querySelectorAll( 'button, a[href]' );
+				const focusables = parts.dialog.querySelectorAll( FOCUSABLE );
 				if ( ! focusables.length ) {
 					e.preventDefault();
 					return;
@@ -316,7 +350,7 @@
 		}
 
 		function focusDefault() {
-			const target = parts.actions.querySelector( '.button-primary' ) || parts.actions.querySelector( 'button, a' ) || parts.dialog;
+			const target = parts.actions.querySelector( '.button-primary:not(:disabled)' ) || parts.actions.querySelector( FOCUSABLE ) || parts.dialog;
 			if ( target === parts.dialog ) {
 				parts.dialog.setAttribute( 'tabindex', '-1' );
 			}
@@ -326,6 +360,7 @@
 		function open( next ) {
 			if ( ! overlay ) {
 				lastFocus = document.activeElement;
+				lastFocusId = lastFocus ? lastFocus.id : '';
 				build();
 				document.body.classList.add( 'migrateplus-modal-open' );
 			}
@@ -346,10 +381,17 @@
 			parts = {};
 			opts = {};
 			document.body.classList.remove( 'migrateplus-modal-open' );
-			if ( lastFocus && document.body.contains( lastFocus ) ) {
-				lastFocus.focus( { preventScroll: true } );
+			// render() often replaces the control that opened the modal: then its new copy, or the page heading.
+			let back = lastFocus && document.body.contains( lastFocus ) ? lastFocus : null;
+			back = back || ( lastFocusId && document.getElementById( lastFocusId ) ) || document.querySelector( '.migrateplus-wrap h1' );
+			if ( back ) {
+				if ( 'H1' === back.tagName ) {
+					back.setAttribute( 'tabindex', '-1' );
+				}
+				back.focus( { preventScroll: true } );
 			}
 			lastFocus = null;
+			lastFocusId = '';
 		}
 
 		return {
@@ -358,6 +400,7 @@
 			close,
 			isOpen: () => !! overlay,
 			kind: () => opts.kind || '',
+			dismissible: () => !! opts.dismissible,
 		};
 	}() );
 
@@ -481,17 +524,45 @@
 		return s.length > n ? s.slice( 0, n ) + '…' : s;
 	}
 
+	/**
+	 * Above this many source fields, a select gets its options when it is focused. Every mapping
+	 * row has a select listing every field, and render() rebuilds them all on most changes: a
+	 * few hundred fields is a few thousand options, but a very wide file makes hundreds of
+	 * thousands and freezes the tab.
+	 */
+	const LAZY_FIELDS = 300;
+
 	function fieldSelect( value, onChange, opts ) {
 		const select = el( 'select', { class: 'migrateplus-field-select', 'aria-label': ( opts && opts.label ) || 'Source field', onchange: ( e ) => onChange( e.target.value ) }, [
 			el( 'option', { value: '', text: '(not mapped)' } ),
 		] );
-		state.fields.forEach( ( f ) => select.appendChild( el( 'option', { value: f, text: f, selected: f === value } ) ) );
-		if ( opts && opts.nested ) {
-			const parents = nestedFields();
-			if ( parents.length ) {
-				select.appendChild( el( 'optgroup', { label: 'Nested data (lists and objects)' }, parents.map( ( f ) =>
-					el( 'option', { value: f, text: f + ' (all)', selected: f === value } ) ) ) );
+		const fill = () => {
+			state.fields.forEach( ( f ) => select.appendChild( el( 'option', { value: f, text: f, selected: f === value } ) ) );
+			if ( opts && opts.nested ) {
+				const parents = nestedFields();
+				if ( parents.length ) {
+					select.appendChild( el( 'optgroup', { label: 'Nested data (lists and objects)' }, parents.map( ( f ) =>
+						el( 'option', { value: f, text: f + ' (all)', selected: f === value } ) ) ) );
+				}
 			}
+		};
+		if ( state.fields.length <= LAZY_FIELDS ) {
+			fill();
+		} else {
+			// Only the mapped field until then, so the select still shows it.
+			const parent = value && opts && opts.nested && ! state.fields.includes( value ) && nestedFields().includes( value );
+			const placeholder = value && ( parent || state.fields.includes( value ) ) ? el( 'option', { value, text: parent ? value + ' (all)' : value, selected: true } ) : null;
+			if ( placeholder ) {
+				select.appendChild( placeholder );
+			}
+			select.addEventListener( 'focus', () => {
+				const current = select.value;
+				if ( placeholder ) {
+					placeholder.remove();
+				}
+				fill();
+				select.value = current;
+			}, { once: true } );
 		}
 		if ( value && ! select.value ) {
 			select.appendChild( el( 'option', { value, text: value + ' (not in preview)', selected: true } ) );
@@ -628,7 +699,7 @@
 	}
 
 	const SOURCE_BLURBS = {
-		json: 'A MigratePlus export, or any JSON file or API',
+		json: 'A Migrate Plus export, or any JSON file or API',
 	};
 
 	// Render
@@ -808,7 +879,7 @@
 		const area = el( 'div', { class: 'migrateplus-import-drop' }, [
 			el( 'span', { class: 'dashicons dashicons-cloud-upload', 'aria-hidden': 'true' } ),
 			el( 'strong', { text: 'Drop a JSON file (.json or .json.gz) here to import it' } ),
-			el( 'span', { class: 'migrateplus-muted', text: 'A MigratePlus export imports straight away. Other JSON files go to field mapping first.' } ),
+			el( 'span', { class: 'migrateplus-muted', text: 'A Migrate Plus export imports straight away. Other JSON files go to field mapping first.' } ),
 			el( 'button', { type: 'button', class: 'button button-primary migrateplus-btn-lg', disabled: state.busy, text: 'Choose a JSON file', onclick: () => input.click() } ),
 		] );
 		[ 'dragenter', 'dragover' ].forEach( ( t ) => area.addEventListener( t, ( e ) => {
@@ -844,7 +915,7 @@
 				bar: false,
 				title: 'This file can’t be imported',
 				tone: 'error',
-				note: '“' + file.name + '” is not a ' + exts.join( ' or ' ) + ' file. Export one from MigratePlus → Export on the other site.',
+				note: '“' + file.name + '” is not a ' + exts.join( ' or ' ) + ' file. Export one from Migrate Plus → Export on the other site.',
 				dismissible: true,
 				actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
 			} );
@@ -1886,7 +1957,7 @@
 				render();
 			} }, D.postTypes.map( ( p ) => el( 'option', { value: p.name, text: p.label + ' (' + p.name + ')', selected: p.name === o.post_type } ) ) ), 'Used for every record, unless "Post type" is mapped and names a type this site has.' ),
 			row( 'Default status', el( 'select', { onchange: set( 'default_status' ) }, [ [ 'publish', 'Published' ], [ 'draft', 'Draft' ], [ 'pending', 'Pending review' ], [ 'private', 'Private' ] ].map( ( [ v, l ] ) =>
-				el( 'option', { value: v, text: l, selected: v === o.default_status } ) ) ), 'Used when a record has no status, or one MigratePlus does not recognise.' ),
+				el( 'option', { value: v, text: l, selected: v === o.default_status } ) ) ), 'Used when a record has no status, or one Migrate Plus does not recognise.' ),
 			row( 'Status for every item', el( 'select', { onchange: set( 'force_status' ) }, [ [ '', 'Keep each record’s status' ], [ 'publish', 'Published' ], [ 'draft', 'Draft' ], [ 'pending', 'Pending review' ], [ 'private', 'Private' ] ].map( ( [ v, l ] ) =>
 				el( 'option', { value: v, text: l, selected: v === ( o.force_status || '' ) } ) ) ), 'Overrides the status in the file, also for posts that are updated. Published posts with a future date are scheduled.' ),
 			row( 'Default author', el( 'select', { onchange: set( 'default_author' ) }, D.users.map( ( u ) =>
@@ -1900,9 +1971,9 @@
 				toggle( 'import_content_images', 'Download images in content', 'Copies <img> files into the Media Library and rewrites their URLs.' ),
 				toggle( 'create_terms', 'Create missing categories and terms' ),
 				toggle( 'create_authors', 'Create missing authors', 'New users get the Author role and a random password.' ),
-				toggle( 'rewrite_links', 'Point links to the old site here', 'MigratePlus exports only. Files in wp-content keep their old URLs unless images in content are downloaded.' ),
-				toggle( 'import_comments', 'Import comments', 'MigratePlus exports that include comments. Importing the file again updates them instead of adding them twice.' ),
-				toggle( 'import_menus', 'Import menus', 'MigratePlus exports that include menus, after all posts. A menu with the same slug is filled rather than copied.' ),
+				toggle( 'rewrite_links', 'Point links to the old site here', 'Migrate Plus exports only. Files in wp-content keep their old URLs unless images in content are downloaded.' ),
+				toggle( 'import_comments', 'Import comments', 'Migrate Plus exports that include comments. Importing the file again updates them instead of adding them twice.' ),
+				toggle( 'import_menus', 'Import menus', 'Migrate Plus exports that include menus, after all posts. A menu with the same slug is filled rather than copied.' ),
 			] ),
 		] );
 	}
@@ -2019,8 +2090,9 @@
 		const actions = el( 'div', { class: 'migrateplus-actions' } );
 		if ( ! done && 'draft' !== job.status ) {
 			actions.appendChild( state.paused
-				? el( 'button', { type: 'button', class: 'button button-primary', text: 'Resume', disabled: state.running, onclick: resume } )
-				: el( 'button', { type: 'button', class: 'button', text: 'Pause', onclick: pause } ) );
+				// One id for both, so focus stays on the button when render() swaps it after each batch.
+				? el( 'button', { type: 'button', id: 'migrateplus-run-toggle', class: 'button button-primary', text: 'Resume', disabled: state.running, onclick: resume } )
+				: el( 'button', { type: 'button', id: 'migrateplus-run-toggle', class: 'button', text: 'Pause', onclick: pause } ) );
 			if ( ! modal.isOpen() ) {
 				actions.appendChild( el( 'button', { type: 'button', class: 'button', text: 'Show progress window', onclick: showRunModal } ) );
 			}
@@ -2081,6 +2153,7 @@
 		};
 		const chip = ( key, label ) => el( 'button', {
 			type: 'button',
+			id: 'migrateplus-log-filter-' + key, // Keeps focus across render().
 			class: 'migrateplus-chip' + ( state.logFilter === key ? ' is-active' : '' ),
 			'aria-pressed': state.logFilter === key ? 'true' : 'false',
 			onclick: ( e ) => {
@@ -2263,6 +2336,7 @@
 		}
 		state.running = true;
 		state.runClock = { t: Date.now(), processed: Number( state.job.stats.processed ) || 0 };
+		let retries = 0;
 		const tick = () => {
 			if ( state.paused ) {
 				state.running = false;
@@ -2270,6 +2344,7 @@
 				return;
 			}
 			api( 'run', { job: state.job.id } ).then( ( data ) => {
+				retries = 0;
 				state.job = data.job;
 				if ( state.tab === 'new' && state.step === 'run' ) {
 					render();
@@ -2281,13 +2356,19 @@
 				}
 				tick();
 			} ).catch( ( err ) => {
-				if ( /already running/i.test( err.message ) ) {
+				// Another tab or request holds the batch lock: wait for it.
+				if ( 'migrateplus_locked' === err.code ) {
 					setTimeout( tick, 3000 );
+					return;
+				}
+				// A dropped connection shouldn't stop a long import: try again after 2, 4 and 8 seconds.
+				if ( err.network && retries < 3 ) {
+					setTimeout( tick, 2000 * Math.pow( 2, retries++ ) );
 					return;
 				}
 				state.running = false;
 				state.paused = true;
-				state.error = err.message + ' Fix the problem, then press Resume to pick up where it stopped.';
+				state.error = err.message.replace( /([^.!?])$/, '$1.' ) + ' Fix the problem, then press Resume to pick up where it stopped.';
 				render();
 			} );
 		};
@@ -2407,6 +2488,8 @@
 
 	// Shared by every render of the export screen, so a change made just after a re-render still sends one count.
 	let exportCountTimer = null;
+	// Counts can come back out of order; only the latest request's answer is shown.
+	let exportCountSeq = 0;
 
 	function renderExport() {
 		const x = state.exportArgs = state.exportArgs || Object.assign( {}, D.exportDefaults, {
@@ -2419,7 +2502,11 @@
 			clearTimeout( exportCountTimer );
 			countEl.textContent = 'Counting…';
 			exportCountTimer = setTimeout( () => {
+				const seq = ++exportCountSeq;
 				api( 'export_count', { args: x } ).then( ( d ) => {
+					if ( seq !== exportCountSeq ) {
+						return;
+					}
 					const counts = Object.entries( d.counts || {} );
 					const each = counts.length > 1 ? ' (' + counts.map( ( [ type, n ] ) => n.toLocaleString() + ' ' + ( 1 === n ? postType( type ).label : postType( type ).plural || postType( type ).label ).toLowerCase() ).join( ', ' ) + ')' : '';
 					const menus = d.menus ? ', with ' + d.menus + ( 1 === d.menus ? ' menu' : ' menus' ) : '';
@@ -2429,6 +2516,9 @@
 					countEl.classList.toggle( 'is-warn', ! d.count );
 					submit.disabled = ! d.count && ! d.menus; // Menus alone are worth a file.
 				} ).catch( ( e ) => {
+					if ( seq !== exportCountSeq ) {
+						return;
+					}
 					countEl.textContent = e.message;
 					countEl.classList.add( 'is-warn' );
 				} );
@@ -2458,12 +2548,12 @@
 					el( 'h2', { text: 'What to export' } ),
 					el( 'fieldset', { class: 'migrateplus-opt' }, [
 						el( 'legend', { class: 'migrateplus-opt-label', text: 'Content types' } ),
-						el( 'div', { class: 'migrateplus-chips' }, D.postTypes.map( ( p ) => {
+						el( 'div', { class: 'migrateplus-chips' }, exportTypes().map( ( p ) => {
 							const id = 'migrateplus-export-type-' + p.name;
 							return el( 'label', { class: 'migrateplus-check-chip', for: id, title: p.name }, [
 								el( 'input', { type: 'checkbox', id, checked: x.post_types.includes( p.name ), onchange: ( e ) => {
 									const picked = e.target.checked ? x.post_types.concat( p.name ) : x.post_types.filter( ( t ) => t !== p.name );
-									x.post_types = D.postTypes.map( ( t ) => t.name ).filter( ( t ) => picked.includes( t ) ); // In the order shown.
+									x.post_types = exportTypes().map( ( t ) => t.name ).filter( ( t ) => picked.includes( t ) ); // In the order shown.
 									if ( ! x.post_types.length ) {
 										x.post_types = [ p.name ];
 										e.target.checked = true;
@@ -2518,7 +2608,7 @@
 							: null,
 						toggle( 'include_comments', 'Comments', 'Approved comments and replies, with their public comment fields. Pending, spam and trashed comments are left out.' ),
 						D.menus ? toggle( 'include_menus', 'Navigation menus', 'Every menu with its items and theme locations. Items point at posts and terms, so export the content they link to in this file too.' ) : null,
-						D.zlib ? toggle( 'gzip', 'Compress the file (.json.gz)', 'Much smaller, for a site whose upload limit is lower than the export. MigratePlus imports it as it is.' ) : null,
+						D.zlib ? toggle( 'gzip', 'Compress the file (.json.gz)', 'Much smaller, for a site whose upload limit is lower than the export. Migrate Plus imports it as it is.' ) : null,
 					] ),
 				] ),
 			] ),
@@ -2538,6 +2628,11 @@
 			] ) );
 		}
 		recount();
+	}
+
+	/** The post types the Export screen offers (the server leaves out ACF's settings, orders and the like). */
+	function exportTypes() {
+		return D.postTypes.filter( ( p ) => false !== p.export );
 	}
 
 	function runExport() {
@@ -2579,7 +2674,7 @@
 				}
 				modal.update( {
 					title: 'Export ready',
-					message: 'Import it on the other site with MigratePlus → Import. The fields map themselves.',
+					message: 'Import it on the other site with Migrate Plus → Import. The fields map themselves.',
 					percent: 100,
 					tone: 'success',
 					detail: d.done.toLocaleString() + ' items' + ( extras.length ? ' with ' + extras.join( ' and ' ) : '' ) + ', ' + d.size,
@@ -2749,6 +2844,9 @@
 			}
 			if ( run.can_undo ) {
 				actions.appendChild( el( 'button', { type: 'button', class: 'button button-small migrateplus-danger', text: { rolling_back: 'Finish rollback', rollback_failed: 'Retry rollback' }[ run.status ] || 'Roll back', onclick: () => rollbackReplace( run ) } ) );
+			} else if ( run.undo_note ) {
+				// Say why Roll back is gone rather than drop it silently.
+				actions.appendChild( el( 'span', { class: 'migrateplus-help migrateplus-undo-note', text: run.undo_note } ) );
 			}
 			actions.appendChild( el( 'button', { type: 'button', class: 'migrateplus-link-danger', text: 'Delete', title: 'Remove from this list. The changes stay, but can no longer be rolled back.', onclick: () => ask( {
 				title: 'Delete this run?',
@@ -3106,7 +3204,7 @@
 		if ( x.url ) {
 			actions.appendChild( el( 'a', { class: 'button button-small button-primary', href: x.url, text: 'Download' } ) );
 		}
-		const viewBtn = el( 'button', { type: 'button', class: 'button button-small', 'aria-expanded': 'false', text: 'View log', onclick: () => {
+		const viewBtn = el( 'button', { type: 'button', class: 'button button-small migrateplus-view', 'aria-expanded': 'false', text: 'View log', onclick: () => {
 			const open = logRow.hidden;
 			logRow.hidden = ! open;
 			viewBtn.setAttribute( 'aria-expanded', open ? 'true' : 'false' );
@@ -3243,12 +3341,12 @@
 		if ( [ 'running', 'ready', 'failed' ].includes( job.status ) ) {
 			btn( 'Resume', () => openJob( job.id, true ), 'button-primary' );
 		}
-		btn( 'View log', () => openJob( job.id, false ) );
+		btn( 'View log', () => openJob( job.id, false ), 'migrateplus-view' );
 		if ( [ 'complete', 'rolled_back', 'failed' ].includes( job.status ) ) {
-			btn( 'Run again', () => restartJob( job ) );
+			btn( 'Run again', () => restartJob( job ), 'migrateplus-run-again' );
 		}
 		if ( ! dry && ! [ 'rolled_back', 'running' ].includes( job.status ) && importedCount( job ) > 0 ) {
-			btn( 'Roll back', () => rollback( job.id ), 'migrateplus-danger' );
+			btn( 'Roll back', () => rollback( job.id ), 'migrateplus-rollback' );
 		}
 		actions.appendChild( el( 'button', { type: 'button', class: 'migrateplus-link-danger', text: 'Delete', title: 'Remove from history. Imported content is kept.', onclick: () => ask( {
 			title: 'Delete this import?',
@@ -3317,7 +3415,9 @@
 	}
 
 	window.addEventListener( 'beforeunload', ( e ) => {
-		if ( state.running && ! state.paused ) {
+		// Rollbacks, exports and replacements run from their modal, which can't be dismissed until they stop.
+		const working = modal.isOpen() && [ 'rollback', 'export', 'replace' ].includes( modal.kind() ) && ! modal.dismissible();
+		if ( ( state.running && ! state.paused ) || working ) {
 			e.preventDefault();
 			e.returnValue = '';
 		}

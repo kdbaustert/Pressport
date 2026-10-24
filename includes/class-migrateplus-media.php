@@ -39,10 +39,14 @@ class MigratePlus_Media {
 		if ( $max ) {
 			add_filter( 'http_request_args', $limit );
 		}
+		// Reset in finally: left on after an exception, the next request anything makes would get the local-host allowance.
 		MigratePlus_Util::$in_request = true;
-		$tmp                          = download_url( $url, max( 60, (int) MigratePlus_Settings::get( 'request_timeout' ) ) );
-		MigratePlus_Util::$in_request = false;
-		remove_filter( 'http_request_args', $limit );
+		try {
+			$tmp = download_url( $url, max( 60, (int) MigratePlus_Settings::get( 'request_timeout' ) ) );
+		} finally {
+			MigratePlus_Util::$in_request = false;
+			remove_filter( 'http_request_args', $limit );
+		}
 
 		if ( ! is_wp_error( $tmp ) && $max && filesize( $tmp ) > $max ) {
 			wp_delete_file( $tmp );
@@ -162,7 +166,8 @@ class MigratePlus_Media {
 			update_post_meta( $id, '_migrateplus_job_id', $job_id );
 		}
 		if ( '' !== (string) $alt ) {
-			update_post_meta( $id, '_wp_attachment_image_alt', sanitize_text_field( $alt ) );
+			// Slashed: update_post_meta() unslashes, and "C:\Photos" would lose its backslash.
+			update_post_meta( $id, '_wp_attachment_image_alt', wp_slash( sanitize_text_field( $alt ) ) );
 		}
 		return (int) $id;
 	}
@@ -201,14 +206,17 @@ class MigratePlus_Media {
 		$meta   = wp_get_attachment_metadata( $attachment_id );
 		$target = ! empty( $meta['original_image'] ) ? $dir . '/' . $meta['original_image'] : $old;
 		$stale  = array();
+		$scaled = '';
 		if ( $target !== $old ) {
 			$stale[] = $old; // The "-scaled" copy; WordPress makes a new one if needed.
+			$scaled  = $old;
 		}
 		$ext = $check['ext'] ? $check['ext'] : pathinfo( $name, PATHINFO_EXTENSION );
 		if ( strtolower( pathinfo( $target, PATHINFO_EXTENSION ) ) !== strtolower( $ext ) ) {
 			// A different type can't keep the old name: save it beside it and drop the old file.
 			$stale[] = $target;
 			$target  = $dir . '/' . wp_unique_filename( $dir, pathinfo( $target, PATHINFO_FILENAME ) . '.' . $ext );
+			$scaled  = ''; // Nor the old "-scaled" name.
 		}
 		if ( ! @copy( $tmp, $target ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 			wp_delete_file( $tmp );
@@ -235,13 +243,64 @@ class MigratePlus_Media {
 				'post_mime_type' => $check['type'],
 			)
 		);
-		wp_update_attachment_metadata( $attachment_id, wp_generate_attachment_metadata( $attachment_id, $target ) );
+		$new_meta = wp_generate_attachment_metadata( $attachment_id, $target );
+		if ( '' !== $scaled && ! file_exists( $scaled ) && @copy( $target, $scaled ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			// The old image was scaled down and links point at its "-scaled" file, but the new one is under
+			// the size threshold, so WordPress made none. A copy under that name keeps the links working,
+			// recorded as WordPress records its own scaled copy (the file, with original_image naming the
+			// one it came from), so deleting the attachment deletes both.
+			update_attached_file( $attachment_id, $scaled );
+			$new_meta['file']           = _wp_relative_upload_path( $scaled );
+			$new_meta['original_image'] = wp_basename( $target );
+		}
+		wp_update_attachment_metadata( $attachment_id, $new_meta );
 		update_post_meta( $attachment_id, '_migrateplus_source_url', $url );
 		return true;
 	}
 
 	/**
-	 * Import every external <img> in HTML and rewrite src to the local copy.
+	 * The attachment an earlier record of this import brought an image in as: by the
+	 * old attachment id in its wp-image-N class, then by its URL, then by the URL of
+	 * the full-size file a size variant (photo-1024x683.jpg, photo-scaled.jpg) was
+	 * made from, so a variant is not downloaded again as an image of its own.
+	 *
+	 * @param string               $url    Image URL on the old site.
+	 * @param string               $old_id Old attachment id, or ''.
+	 * @param MigratePlus_Job|null $job    The import.
+	 * @return int 0 when none.
+	 */
+	protected static function find_imported( $url, $old_id, $job ) {
+		if ( '' !== $old_id && $job ) {
+			$id = MigratePlus_Importer::find_by_uid( MigratePlus_Importer::uid( $job, $old_id ), 'attachment' );
+			if ( $id ) {
+				return $id;
+			}
+		}
+		foreach ( array_unique( array_merge( array( $url ), self::full_size_urls( $url ) ) ) as $candidate ) {
+			$id = self::find_existing( $candidate );
+			if ( $id ) {
+				return $id;
+			}
+		}
+		return 0;
+	}
+
+	/**
+	 * Where the full-size file of a size variant may be: the URL without "-WxH" or
+	 * "-scaled", and that with "-scaled" (what an export of a big image carries).
+	 *
+	 * @param string $url Image URL.
+	 * @return string[]
+	 */
+	protected static function full_size_urls( $url ) {
+		$plain = preg_replace( '/-(?:\d+x\d+|scaled)(\.[a-z0-9]+)$/i', '$1', $url );
+		return array_unique( array( $plain, preg_replace( '/(\.[a-z0-9]+)$/i', '-scaled$1', $plain ) ) );
+	}
+
+	/**
+	 * Import every external <img> in HTML and rewrite src to the local copy, along
+	 * with links to the old file and the ids and URLs in the image, cover and
+	 * media & text block comments.
 	 *
 	 * @param string $html     Content.
 	 * @param int    $post_id  Post.
@@ -255,11 +314,13 @@ class MigratePlus_Media {
 			return $html;
 		}
 		$home = untrailingslashit( preg_replace( '#^https?:#i', '', home_url() ) );
-		$ids  = array(); // Old attachment id => new, for the image block comments.
+		$ids  = array(); // Old attachment id => new, for the block comments.
+		$urls = array(); // Old file URL => new, for links to the image and the cover block's url.
+		$job  = $job_id ? MigratePlus_Job::load( $job_id ) : null;
 
 		$html = preg_replace_callback(
 			'/<img\b[^>]*>/i',
-			static function ( $m ) use ( $post_id, $base, $job_id, $home, &$errors, &$ids ) {
+			static function ( $m ) use ( $post_id, $base, $job_id, $home, $job, &$errors, &$ids, &$urls ) {
 				$tag = $m[0];
 				if ( ! preg_match( '/\ssrc\s*=\s*(["\'])(.*?)\1/i', $tag, $src ) ) {
 					return $tag;
@@ -269,33 +330,79 @@ class MigratePlus_Media {
 				if ( ! $url || 0 === stripos( preg_replace( '#^https?:#i', '', $url ), $home . '/' ) ) {
 					return $tag;
 				}
-				$alt = preg_match( '/\salt\s*=\s*(["\'])(.*?)\1/i', $tag, $a ) ? html_entity_decode( $a[2], ENT_QUOTES, 'UTF-8' ) : '';
-				$id  = self::sideload( $url, $post_id, $alt, $base, $job_id );
+				$old_id = preg_match( '/\bwp-image-(\d+)\b/', $tag, $class ) ? $class[1] : '';
+				$id     = self::find_imported( $url, $old_id, $job );
+				if ( ! $id ) {
+					$alt = preg_match( '/\salt\s*=\s*(["\'])(.*?)\1/i', $tag, $a ) ? html_entity_decode( $a[2], ENT_QUOTES, 'UTF-8' ) : '';
+					$id  = self::sideload( $url, $post_id, $alt, $base, $job_id );
+				}
 				if ( is_wp_error( $id ) ) {
 					$errors[] = $url . ': ' . $id->get_error_message();
 					return $tag;
 				}
-				$new = wp_get_attachment_url( $id );
-				$tag = str_replace( $src[0], ' src=' . $src[1] . esc_url( $new ) . $src[1], $tag );
+				$full = wp_get_attachment_url( $id );
+				$new  = $full;
+				// A size variant matched to its original: show the same size of the local copy.
+				if ( get_post_meta( $id, '_migrateplus_source_url', true ) !== $url && preg_match( '/-(\d+)x(\d+)\.[a-z0-9]+$/i', $url, $size ) ) {
+					$sized = wp_get_attachment_image_url( $id, array( (int) $size[1], (int) $size[2] ) );
+					$new   = $sized ? $sized : $full;
+				}
+				foreach ( self::full_size_urls( $url ) as $old ) {
+					$urls[ $old ] = $full;
+				}
+				$urls[ $url ] = $new;
+				$tag          = str_replace( $src[0], ' src=' . $src[1] . esc_url( $new ) . $src[1], $tag );
 				// Old responsive sources would still point at the old site.
 				$tag = preg_replace( '/\s(srcset|sizes)\s*=\s*(["\']).*?\2/i', '', $tag );
 				// Update block image class (wp-image-123) so the editor links it.
-				if ( preg_match( '/\bwp-image-(\d+)\b/', $tag, $class ) ) {
-					$ids[ $class[1] ] = $id;
+				if ( '' !== $old_id ) {
+					$ids[ $old_id ] = $id;
 				}
 				$tag = preg_replace( '/\bwp-image-\d+\b/', 'wp-image-' . $id, $tag );
 				return $tag;
 			},
 			$html
 		);
-		if ( ! $ids ) {
+		if ( ! $urls ) {
 			return $html;
 		}
-		// The block comment before the <img> carries the id too ({"id":123}); the editor rejects a mismatch.
+		// A link around the image (to the file, or "Link to: Media file") would still open the old site's copy.
+		$html = preg_replace_callback(
+			'/(<a\b[^>]*?\shref\s*=\s*)(["\'])(.*?)\2/i',
+			static function ( $m ) use ( $base, $urls ) {
+				$href = self::absolutize( $m[3], $base );
+				return isset( $urls[ $href ] ) ? $m[1] . $m[2] . esc_url( $urls[ $href ] ) . $m[2] : $m[0];
+			},
+			$html
+		);
+		// The block comments carry the id and URL too ({"id":123}, a cover's "url", media & text's
+		// "mediaId" and "mediaLink"); the editor marks a block invalid when they no longer match its HTML.
 		return preg_replace_callback(
-			'/(<!--\s+wp:image\s+\{[^>]*?"id":)(\d+)\b/',
-			static function ( $m ) use ( $ids ) {
-				return isset( $ids[ $m[2] ] ) ? $m[1] . $ids[ $m[2] ] : $m[0];
+			'/<!--\s+wp:(?:image|cover|media-text)\s+(\{.*?\})\s+\/?-->/s',
+			static function ( $m ) use ( $base, $ids, $urls ) {
+				$attrs = preg_replace_callback(
+					'/"(id|mediaId)":(\d+)\b/',
+					static function ( $a ) use ( $ids ) {
+						return isset( $ids[ $a[2] ] ) ? '"' . $a[1] . '":' . $ids[ $a[2] ] : $a[0];
+					},
+					$m[1]
+				);
+				$media = preg_match( '/"mediaId":(\d+)\b/', $m[1], $mid ) && isset( $ids[ $mid[1] ] ) ? $ids[ $mid[1] ] : 0;
+				$attrs = preg_replace_callback(
+					'/"(url|mediaLink)":"((?:[^"\\\\]|\\\\.)*)"/',
+					static function ( $a ) use ( $base, $urls, $media ) {
+						$new = '';
+						if ( 'url' === $a[1] ) {
+							$old = self::absolutize( (string) json_decode( '"' . $a[2] . '"' ), $base );
+							$new = isset( $urls[ $old ] ) ? $urls[ $old ] : '';
+						} elseif ( $media ) {
+							$new = (string) get_attachment_link( $media );
+						}
+						return '' !== $new ? '"' . $a[1] . '":' . wp_json_encode( $new, JSON_UNESCAPED_SLASHES ) : $a[0];
+					},
+					$attrs
+				);
+				return str_replace( $m[1], $attrs, $m[0] );
 			},
 			$html
 		);

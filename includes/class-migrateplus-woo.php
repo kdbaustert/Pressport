@@ -208,6 +208,8 @@ class MigratePlus_Woo {
 		$from = $variation->get_date_on_sale_from();
 		$to   = $variation->get_date_on_sale_to();
 		$data = array(
+			// Its id on this site, so an up-sell, cross-sell or coupon pointing at it finds it after import.
+			'id'             => $variation->get_id(),
 			// 'edit': in view context a variation without its own SKU reports the parent's.
 			'sku'            => $variation->get_sku( 'edit' ),
 			'regular_price'  => $variation->get_regular_price(),
@@ -217,12 +219,14 @@ class MigratePlus_Woo {
 			'manage_stock'   => $variation->get_manage_stock(),
 			'stock_quantity' => $variation->get_stock_quantity(),
 			'stock_status'   => $variation->get_stock_status(),
-			'backorders'     => $variation->get_backorders(),
-			'weight'         => $variation->get_weight(),
-			'length'         => $variation->get_length(),
-			'width'          => $variation->get_width(),
-			'height'         => $variation->get_height(),
-			'tax_class'      => $variation->get_tax_class(),
+			// 'edit' for these too: in view context an empty value reports the parent's, and
+			// importing that sets it on the variation, which then stops following the parent.
+			'backorders'     => $variation->get_backorders( 'edit' ),
+			'weight'         => $variation->get_weight( 'edit' ),
+			'length'         => $variation->get_length( 'edit' ),
+			'width'          => $variation->get_width( 'edit' ),
+			'height'         => $variation->get_height( 'edit' ),
+			'tax_class'      => $variation->get_tax_class( 'edit' ),
 			'virtual'        => $variation->get_virtual(),
 			'downloadable'   => $variation->get_downloadable(),
 			'description'    => $variation->get_description(),
@@ -235,13 +239,13 @@ class MigratePlus_Woo {
 		$class                  = $class_id ? get_term( $class_id, 'product_shipping_class' ) : null;
 		$data['shipping_class'] = $class instanceof WP_Term ? $class->slug : '';
 		if ( method_exists( $variation, 'get_low_stock_amount' ) ) {
-			$data['low_stock_amount'] = $variation->get_low_stock_amount();
+			$data['low_stock_amount'] = $variation->get_low_stock_amount( 'edit' );
 		}
 		if ( $variation->get_downloadable() ) {
 			$data = array_merge( $data, self::downloads_data( $variation ) );
 		}
 		if ( $with_images ) {
-			$url           = wp_get_attachment_url( $variation->get_image_id() );
+			$url           = wp_get_attachment_url( $variation->get_image_id( 'edit' ) );
 			$data['image'] = $url ? $url : '';
 		}
 		return $data;
@@ -347,8 +351,9 @@ class MigratePlus_Woo {
 		$skus = array();
 		foreach ( (array) $ids as $id ) {
 			$product = wc_get_product( $id );
-			if ( $product && '' !== $product->get_sku() ) {
-				$skus[] = $product->get_sku();
+			// 'edit': a variation without its own SKU would report its parent's.
+			if ( $product && '' !== $product->get_sku( 'edit' ) ) {
+				$skus[] = $product->get_sku( 'edit' );
 			}
 		}
 		return $skus;
@@ -368,7 +373,7 @@ class MigratePlus_Woo {
 			if ( $product ) {
 				$refs[] = array(
 					'id'  => (int) $id,
-					'sku' => $product->get_sku(),
+					'sku' => $product->get_sku( 'edit' ), // A variation's own, not its parent's.
 				);
 			}
 		}
@@ -459,7 +464,9 @@ class MigratePlus_Woo {
 
 	/**
 	 * The readable file on this site behind a download URL, resolved the way
-	 * WooCommerce resolves it when it serves the download.
+	 * WooCommerce resolves it when it serves the download. Only files in the
+	 * uploads folder (woocommerce_uploads is in it), and none of the private
+	 * folders kept there.
 	 *
 	 * @param string $file File URL or path.
 	 * @return string Absolute path, or ''.
@@ -472,19 +479,21 @@ class MigratePlus_Woo {
 		if ( ! empty( $parsed['remote_file'] ) ) {
 			return '';
 		}
-		$path = realpath( (string) $parsed['file_path'] );
-		$root = realpath( ABSPATH );
-		$wpc  = realpath( WP_CONTENT_DIR );
-		if ( ! $path || ! is_file( $path ) || ! is_readable( $path ) ) {
+		$path    = realpath( (string) $parsed['file_path'] );
+		$uploads = wp_upload_dir( null, false );
+		$root    = realpath( $uploads['basedir'] );
+		if ( ! $path || ! $root || ! is_file( $path ) || ! is_readable( $path ) ) {
 			return '';
 		}
-		// Only files inside this WordPress install, whatever the URL resolves to.
-		foreach ( array( $root, $wpc ) as $base ) {
-			if ( $base && 0 === strpos( $path, trailingslashit( $base ) ) ) {
-				return $path;
+		// The rest of the install holds wp-config.php, .env files and debug.log, and Migrate Plus's own
+		// folder holds exports and import caches, WooCommerce's its logs: none of them is a product file.
+		foreach ( array( MigratePlus_Util::storage_dir(), defined( 'WC_LOG_DIR' ) ? WC_LOG_DIR : '' ) as $private ) {
+			$private = '' !== $private ? realpath( $private ) : false;
+			if ( $private && 0 === strpos( $path, trailingslashit( $private ) ) ) {
+				return '';
 			}
 		}
-		return '';
+		return 0 === strpos( $path, trailingslashit( $root ) ) ? $path : '';
 	}
 
 	/**
@@ -511,6 +520,7 @@ class MigratePlus_Woo {
 		header( 'Content-Disposition: attachment; filename="' . sanitize_file_name( wp_basename( $path ) ) . '"' );
 		header( 'Content-Length: ' . filesize( $path ) );
 		header( 'X-Robots-Tag: noindex' );
+		header( 'X-Content-Type-Options: nosniff' ); // So a browser never renders an .html or .svg it was sent as a page.
 		readfile( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 		exit;
 	}
@@ -748,16 +758,24 @@ class MigratePlus_Woo {
 			$resolved_tax = '' !== $taxonomy ? self::ensure_attribute_taxonomy( $taxonomy, $name, $ctx['create_terms'] ) : '';
 			if ( '' !== $resolved_tax ) {
 				$term_ids = array();
+				$missing  = array();
 				foreach ( $options as $option ) {
 					$term_id = self::ensure_term( $resolved_tax, (string) $option, $ctx['create_terms'] );
 					if ( $term_id ) {
 						$term_ids[] = $term_id;
+					} elseif ( '' !== trim( (string) $option ) ) {
+						$missing[] = (string) $option;
 					}
 				}
 				if ( ! $term_ids ) {
 					/* translators: %s: attribute name */
 					$warnings[] = sprintf( __( 'Attribute "%s" was left off: none of its values match a term on this site. Turn on "Create missing categories and terms" to create them.', 'migrateplus' ), '' !== $name ? $name : $resolved_tax );
 					continue;
+				}
+				if ( $missing ) {
+					// Otherwise the product quietly loses these values, and so do the variations that use them.
+					/* translators: 1: attribute name, 2: comma-separated values */
+					$warnings[] = sprintf( __( 'Attribute "%1$s" was added without %2$s: no term on this site matches. Turn on "Create missing categories and terms" to create them.', 'migrateplus' ), '' !== $name ? $name : $resolved_tax, '"' . implode( '", "', $missing ) . '"' );
 				}
 				$object->set_id( function_exists( 'wc_attribute_taxonomy_id_by_name' ) ? wc_attribute_taxonomy_id_by_name( $resolved_tax ) : 0 );
 				$object->set_name( $resolved_tax );
@@ -822,10 +840,19 @@ class MigratePlus_Woo {
 		}
 		$downloads = array();
 		foreach ( (array) $woo['downloads'] as $download ) {
-			$file = isset( $download['file'] ) ? (string) $download['file'] : '';
-			if ( self::is_remote_file( $file ) ) {
-				$fetch = isset( $download['fetch'] ) ? (string) $download['fetch'] : '';
-				$file  = self::copy_download_file( $file, '' !== $fetch ? $fetch : $file, $ctx, $warnings );
+			$file  = isset( $download['file'] ) ? (string) $download['file'] : '';
+			$fetch = isset( $download['fetch'] ) ? (string) $download['fetch'] : '';
+			// A signed link means the file was on the old site, also when it was stored as a server path
+			// there, which is no file here: copy it. Unless it is a file here, as when the export comes
+			// back to the site it was made on, maybe after its 24-hour link has expired.
+			if ( self::is_remote_file( $file ) || ( '' !== $fetch && '' === self::local_file_path( $file ) ) ) {
+				$file = self::copy_download_file( $file, '' !== $fetch ? $fetch : $file, $ctx, $warnings );
+			} elseif ( '' !== $file && class_exists( 'WC_Download_Handler' ) && empty( WC_Download_Handler::parse_file_path( $file )['remote_file'] ) && '' === self::local_file_path( $file ) ) {
+				// A path or URL on this server outside the uploads folder: the file being imported could
+				// otherwise sell any readable file here (wp-config.php, logs) as a download.
+				/* translators: %s: file path or URL */
+				$warnings[] = sprintf( __( 'Downloadable file "%s" was left off: it is not a file in this site\'s uploads folder.', 'migrateplus' ), $file );
+				continue;
 			}
 			if ( '' === $file ) {
 				continue;
@@ -897,7 +924,7 @@ class MigratePlus_Woo {
 			// Current exports sign every file in woocommerce_uploads, so a refused one without a link is from an older export.
 			if ( $fetch === $url && is_array( $data ) && isset( $data['code'] ) && 403 === (int) $data['code'] && false !== strpos( $url, '/woocommerce_uploads/' ) ) {
 				/* translators: %s: file name */
-				$warnings[] = sprintf( __( 'Downloadable file "%s" could not be copied: the old site keeps it in a protected folder, and this export was made by an older version of MigratePlus that could not reach it. Export again on the old site and import the new file.', 'migrateplus' ), wp_basename( $url ) );
+				$warnings[] = sprintf( __( 'Downloadable file "%s" could not be copied: the old site keeps it in a protected folder, and this export was made by an older version of Migrate Plus that could not reach it. Export again on the old site and import the new file.', 'migrateplus' ), wp_basename( $url ) );
 				return '';
 			}
 			/* translators: 1: file name, 2: error message */
@@ -1004,7 +1031,8 @@ class MigratePlus_Woo {
 			$source_id = isset( $ref['id'] ) ? (string) $ref['id'] : '';
 			$sku       = isset( $ref['sku'] ) ? (string) $ref['sku'] : '';
 			$uid       = MigratePlus_Importer::uid( $ctx['job'], $source_id );
-			$id        = '' !== $uid ? MigratePlus_Importer::find_by_uid( $uid, 'product' ) : 0;
+			// Variations too: an up-sell or a coupon restriction can name one.
+			$id = '' !== $uid ? MigratePlus_Importer::find_by_uid( $uid, array( 'product', 'product_variation' ) ) : 0;
 			if ( ! $id && '' !== $sku && function_exists( 'wc_get_product_id_by_sku' ) ) {
 				$id = (int) wc_get_product_id_by_sku( $sku );
 			}
@@ -1035,8 +1063,9 @@ class MigratePlus_Woo {
 		if ( '' !== $uid ) {
 			$keys[] = 'uid:' . $uid;
 		}
-		if ( '' !== $product->get_sku() ) {
-			$keys[] = 'sku:' . $product->get_sku();
+		// 'edit': a variation without its own SKU would take what waits for its parent's.
+		if ( '' !== $product->get_sku( 'edit' ) ) {
+			$keys[] = 'sku:' . $product->get_sku( 'edit' );
 		}
 		$accessors = array(
 			'upsell'           => array( 'get_upsell_ids', 'set_upsell_ids' ),
@@ -1115,6 +1144,15 @@ class MigratePlus_Woo {
 			return;
 		}
 
+		// The parent's global attributes. A name such as "size" is only pa_size when the parent uses
+		// pa_size: a parent with its own "size" attribute keys the variations by "size".
+		$ctx['parent_taxonomies'] = array();
+		foreach ( $parent->get_attributes() as $attribute ) {
+			if ( $attribute instanceof WC_Product_Attribute && $attribute->is_taxonomy() ) {
+				$ctx['parent_taxonomies'][] = $attribute->get_name();
+			}
+		}
+
 		// Index existing children so a re-import updates rather than duplicates.
 		$by_sku = array();
 		$by_sig = array();
@@ -1181,6 +1219,13 @@ class MigratePlus_Woo {
 					}
 				}
 				$variation->save();
+				// Tracked like the posts the importer saves, so references to it resolve and link up.
+				$uid = isset( $data['id'] ) ? MigratePlus_Importer::uid( $ctx['job'], $data['id'] ) : '';
+				if ( '' !== $uid ) {
+					update_post_meta( $variation->get_id(), '_migrateplus_source_uid', $uid );
+					update_post_meta( $variation->get_id(), '_migrateplus_source_id', (string) $data['id'] );
+				}
+				self::link_pending( $variation, $warnings );
 			} catch ( Exception $e ) {
 				$warnings[] = __( 'WooCommerce variation: ', 'migrateplus' ) . $e->getMessage();
 			}
@@ -1207,7 +1252,8 @@ class MigratePlus_Woo {
 		$out = array();
 		foreach ( $attributes as $name => $value ) {
 			$value    = (string) $value;
-			$taxonomy = taxonomy_exists( $name ) ? $name : ( taxonomy_exists( 'pa_' . $name ) ? 'pa_' . $name : '' );
+			$pa       = isset( $ctx['parent_taxonomies'] ) && in_array( 'pa_' . $name, $ctx['parent_taxonomies'], true );
+			$taxonomy = taxonomy_exists( $name ) ? $name : ( $pa ? 'pa_' . $name : '' );
 			if ( '' !== $taxonomy ) {
 				$term_id = self::ensure_term( $taxonomy, $value, $ctx['create_terms'] );
 				$term    = $term_id ? get_term( $term_id, $taxonomy ) : null;

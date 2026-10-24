@@ -17,6 +17,7 @@ delete_option( 'migrateplus_job_ids' );
 delete_option( 'migrateplus_settings' );
 delete_option( 'migrateplus_mappings' );
 delete_option( 'migrateplus_renamed' );
+delete_transient( 'migrateplus_storage_probe' );
 global $wpdb;
 $wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE 'migrateplus\\_job\\_%' OR option_name LIKE 'migrateplus\\_export\\_%' OR option_name LIKE 'migrateplus\\_exportlog\\_%' OR option_name LIKE 'migrateplus\\_replace\\_%' OR option_name LIKE 'migrateplus\\_replacelog\\_%' OR option_name LIKE 'migrateplus\\_lock\\_%'" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 wp_clear_scheduled_hook( 'migrateplus_cleanup' );

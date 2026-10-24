@@ -14,6 +14,13 @@ class MigratePlus_Admin {
 	const EXPORT_SLUG  = 'migrateplus-export';
 	const REPLACE_SLUG = 'migrateplus-replace';
 
+	/**
+	 * Post types with an admin screen that are not content to move: the site editor's and
+	 * menus' types (which the importer refuses too), ACF's settings, and WooCommerce orders,
+	 * which with HPOS keep their data in tables of their own.
+	 */
+	const NOT_EXPORTED = array( 'wp_block', 'wp_navigation', 'wp_template', 'wp_template_part', 'wp_global_styles', 'nav_menu_item', 'acf-field-group', 'acf-field', 'acf-post-type', 'acf-taxonomy', 'acf-ui-options-page', 'shop_order', 'shop_order_refund', 'shop_order_placehold' );
+
 	public static function init() {
 		add_action( 'admin_menu', array( __CLASS__, 'menu' ) );
 		add_action( 'admin_enqueue_scripts', array( __CLASS__, 'assets' ) );
@@ -35,8 +42,8 @@ class MigratePlus_Admin {
 
 	public static function menu() {
 		add_menu_page(
-			__( 'MigratePlus', 'migrateplus' ),
-			__( 'MigratePlus', 'migrateplus' ),
+			__( 'Migrate Plus', 'migrateplus' ),
+			__( 'Migrate Plus', 'migrateplus' ),
 			self::capability(),
 			self::SLUG,
 			array( __CLASS__, 'render_import' ),
@@ -45,9 +52,10 @@ class MigratePlus_Admin {
 		);
 		add_submenu_page( self::SLUG, __( 'Import', 'migrateplus' ), __( 'Import', 'migrateplus' ), self::capability(), self::SLUG, array( __CLASS__, 'render_import' ) );
 		add_submenu_page( self::SLUG, __( 'Export Content', 'migrateplus' ), __( 'Export', 'migrateplus' ), self::capability(), self::EXPORT_SLUG, array( __CLASS__, 'render_export' ) );
-		add_submenu_page( self::SLUG, __( 'Find & Replace', 'migrateplus' ), __( 'Find & Replace', 'migrateplus' ), 'manage_options', self::REPLACE_SLUG, array( __CLASS__, 'render_replace' ) );
+		// On a network every subsite administrator has manage_options, but the tables are shared by all sites.
+		add_submenu_page( self::SLUG, __( 'Find & Replace', 'migrateplus' ), __( 'Find & Replace', 'migrateplus' ), is_multisite() ? 'manage_network_options' : 'manage_options', self::REPLACE_SLUG, array( __CLASS__, 'render_replace' ) );
 		add_submenu_page( self::SLUG, __( 'History', 'migrateplus' ), __( 'History', 'migrateplus' ), self::capability(), self::HISTORY_SLUG, array( __CLASS__, 'render_history' ) );
-		add_submenu_page( self::SLUG, __( 'MigratePlus Settings', 'migrateplus' ), __( 'Settings', 'migrateplus' ), 'manage_options', MigratePlus_Settings::PAGE, array( 'MigratePlus_Settings', 'render' ) );
+		add_submenu_page( self::SLUG, __( 'Migrate Plus Settings', 'migrateplus' ), __( 'Settings', 'migrateplus' ), 'manage_options', MigratePlus_Settings::PAGE, array( 'MigratePlus_Settings', 'render' ) );
 	}
 
 	/**
@@ -132,6 +140,7 @@ class MigratePlus_Admin {
 				'label'      => $pt->labels->singular_name,
 				'plural'     => $pt->labels->name,
 				'taxonomies' => $taxes,
+				'export'     => self::exportable_type( $pt->name ), // Offered on the Export screen.
 			);
 		}
 
@@ -190,14 +199,14 @@ class MigratePlus_Admin {
 	public static function render_import() {
 		self::render_shell(
 			__( 'Import Content', 'migrateplus' ),
-			__( 'Upload a MigratePlus export (.json or .json.gz) and it imports straight away, using the field mapping saved in the file. Other JSON files work too: you map their fields first. Every import can be rolled back from History.', 'migrateplus' )
+			__( 'Upload a Migrate Plus export (.json or .json.gz) and it imports straight away, using the field mapping saved in the file. Other JSON files work too: you map their fields first. Every import can be rolled back from History.', 'migrateplus' )
 		);
 	}
 
 	public static function render_export() {
 		self::render_shell(
 			__( 'Export Content', 'migrateplus' ),
-			__( 'Export posts, pages, media or custom post types, one type or several in one file, with their terms, featured images, custom fields and ACF fields. Import the file on another site with MigratePlus and the fields map themselves.', 'migrateplus' )
+			__( 'Export posts, pages, media or custom post types, one type or several in one file, with their terms, featured images, custom fields and ACF fields. Import the file on another site with Migrate Plus and the fields map themselves.', 'migrateplus' )
 		);
 	}
 
@@ -295,7 +304,14 @@ class MigratePlus_Admin {
 	 * @param WP_Error $error Error.
 	 */
 	protected static function fail( WP_Error $error ) {
-		wp_send_json_error( array( 'message' => $error->get_error_message() ), 400 );
+		// The code is for the script to match on (a busy batch is retried); the message is translated.
+		wp_send_json_error(
+			array(
+				'message' => $error->get_error_message(),
+				'code'    => $error->get_error_code(),
+			),
+			400
+		);
 	}
 
 	/**
@@ -416,7 +432,7 @@ class MigratePlus_Admin {
 		self::guard();
 		$job = self::request_job();
 		if ( self::is_export( $job ) ) {
-			self::fail( new WP_Error( 'migrateplus_mapping_export', __( 'MigratePlus exports carry their own mapping, so there is nothing to save.', 'migrateplus' ) ) );
+			self::fail( new WP_Error( 'migrateplus_mapping_export', __( 'Migrate Plus exports carry their own mapping, so there is nothing to save.', 'migrateplus' ) ) );
 		}
 		// phpcs:disable WordPress.Security.NonceVerification, WordPress.Security.ValidatedSanitizedInput
 		$name    = isset( $_POST['name'] ) ? wp_unslash( $_POST['name'] ) : '';
@@ -550,15 +566,19 @@ class MigratePlus_Admin {
 			exit;
 		}
 		MigratePlus_Util::$in_request = true;
-		$response                     = wp_safe_remote_get(
-			$url,
-			array(
-				'timeout'             => 20,
-				'limit_response_size' => 15 * MB_IN_BYTES,
-			)
-		);
-		MigratePlus_Util::$in_request = false;
-		$type                         = is_wp_error( $response ) ? '' : strtolower( trim( explode( ';', (string) wp_remote_retrieve_header( $response, 'content-type' ) )[0] ) );
+		try {
+			$response = wp_safe_remote_get(
+				$url,
+				array(
+					'timeout'             => 20,
+					'limit_response_size' => 15 * MB_IN_BYTES,
+				)
+			);
+		} finally {
+			// Left on, it would let every later request in this process reach local hosts.
+			MigratePlus_Util::$in_request = false;
+		}
+		$type = is_wp_error( $response ) ? '' : strtolower( trim( explode( ';', (string) wp_remote_retrieve_header( $response, 'content-type' ) )[0] ) );
 		if ( is_wp_error( $response ) || 200 !== (int) wp_remote_retrieve_response_code( $response ) || ! in_array( $type, array( 'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif' ), true ) ) {
 			status_header( 404 );
 			exit;
@@ -837,6 +857,10 @@ class MigratePlus_Admin {
 			return $args;
 		}
 		foreach ( $args['post_types'] as $type ) {
+			if ( ! self::exportable_type( $type ) ) {
+				/* translators: %s: post type label */
+				return new WP_Error( 'migrateplus_export_type', sprintf( __( '%s can\'t be exported.', 'migrateplus' ), MigratePlus_Exporter::type_label( $type ) ) );
+			}
 			if ( ! current_user_can( get_post_type_object( $type )->cap->edit_posts ) ) {
 				/* translators: %s: post type label */
 				return new WP_Error( 'migrateplus_export_cap', sprintf( __( 'You are not allowed to export %s.', 'migrateplus' ), MigratePlus_Exporter::type_label( $type ) ) );
@@ -923,10 +947,15 @@ class MigratePlus_Admin {
 	 */
 	public static function ajax_exports() {
 		self::guard();
-		$exports = MigratePlus_Exporter::history();
-		foreach ( $exports as $i => $entry ) {
-			$exports[ $i ]['size'] = $entry['size'] ? size_format( $entry['size'] ) : '';
-			$exports[ $i ]['url']  = $entry['available'] && self::may_use_export( $entry['id'] ) ? self::export_download_url( $entry['id'] ) : '';
+		$exports = array();
+		// Like the jobs: only the user's own, or every one for an administrator.
+		foreach ( MigratePlus_Exporter::history() as $entry ) {
+			if ( ! self::may_use_export( $entry['id'] ) ) {
+				continue;
+			}
+			$entry['size'] = $entry['size'] ? size_format( $entry['size'] ) : '';
+			$entry['url']  = $entry['available'] ? self::export_download_url( $entry['id'] ) : '';
+			$exports[]     = $entry;
 		}
 		wp_send_json_success( array( 'exports' => $exports ) );
 	}
@@ -1056,6 +1085,22 @@ class MigratePlus_Admin {
 		if ( ! current_user_can( 'manage_options' ) ) {
 			wp_send_json_error( array( 'message' => __( 'Only administrators can use Find & Replace.', 'migrateplus' ) ), 403 );
 		}
+		// As for the menu: the tables belong to the whole network.
+		if ( is_multisite() && ! is_super_admin() ) {
+			wp_send_json_error( array( 'message' => __( 'Only network administrators can use Find & Replace.', 'migrateplus' ) ), 403 );
+		}
+	}
+
+	/**
+	 * Whether a post type may be exported: one with an admin screen, as the importer
+	 * requires, that is not in NOT_EXPORTED. Whether the user may edit it is checked apart.
+	 *
+	 * @param string $type Post type.
+	 * @return bool
+	 */
+	public static function exportable_type( $type ) {
+		$object = get_post_type_object( $type );
+		return $object && $object->show_ui && ! in_array( $type, self::NOT_EXPORTED, true );
 	}
 
 	/**

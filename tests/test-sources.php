@@ -67,6 +67,42 @@ class Test_Sources extends WP_UnitTestCase {
 		$this->assertSame( 'count', $sources[1]['schema'][0]['key'] );
 	}
 
+	/**
+	 * "Run again" prepares the refreshed file over the last run's settings.
+	 */
+	public function test_json_refreshed_without_menus_drops_the_old_menus() {
+		$export = array(
+			'migrateplus' => array(
+				'site'    => 'http://old.test',
+				'mapping' => array( 'fields' => array( 'source_id' => 'id' ) ),
+			),
+			'items'       => array( array( 'id' => 1 ) ),
+			'menus'       => array(
+				array(
+					'name'  => 'Main',
+					'items' => array(),
+				),
+			),
+		);
+		$file   = wp_tempnam( 'migrateplus-test.json' );
+		file_put_contents( $file, wp_json_encode( $export ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$first = ( new MigratePlus_Source_JSON( array( 'file' => $file ) ) )->prepare();
+		$this->assertIsArray( $first );
+		$this->assertFileExists( $first['menus_file'] );
+		$this->assertSame( 1, $first['migrateplus_menus'] );
+
+		unset( $export['menus'] );
+		file_put_contents( $file, wp_json_encode( $export ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$again = ( new MigratePlus_Source_JSON( $first ) )->prepare();
+		wp_delete_file( $file );
+		wp_delete_file( $first['cache_file'] );
+		$this->assertIsArray( $again );
+		wp_delete_file( $again['cache_file'] );
+		$this->assertArrayNotHasKey( 'menus_file', $again );
+		$this->assertArrayNotHasKey( 'migrateplus_menus', $again );
+		$this->assertFileDoesNotExist( $first['menus_file'] );
+	}
+
 	public function test_guess_mapping_takes_each_source_field_once() {
 		$this->assertSame(
 			array(

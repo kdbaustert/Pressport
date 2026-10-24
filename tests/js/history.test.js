@@ -1,6 +1,6 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { boot, job, json, noNativeDialogs } from './helpers.js'
+import { boot, job, json, later, noNativeDialogs } from './helpers.js'
 
 afterEach(noNativeDialogs)
 
@@ -161,5 +161,32 @@ describe('History', () => {
     await env.flush()
     assert.equal(env.sent('delete')[0].fields.job, 'authors')
     assert.deepEqual(names(imports(env)), ['books.json', 'reviews.json'])
+  })
+
+  it('shows a file name with markup in it as text', async () => {
+    const hostile = '<img src=x onerror=alert(1)>'
+    const env = await history({ jobs: { jobs: [job({ settings: { file_name: hostile } })] } })
+    assert.deepEqual(names(imports(env)), [hostile])
+    assert.equal(env.$$('img').length, 0)
+  })
+
+  for (const url of ['javascript:alert(document.cookie)', ' java\tscript:alert(1)', 'data:text/html,<script>alert(1)</script>']) {
+    it('leaves the href off a download link to ' + JSON.stringify(url), async () => {
+      const env = await history({ exports: { exports: [{ ...exportsList()[0], url }] } })
+      assert.equal(env.byText('.migrateplus-exports-panel a', 'Download').getAttribute('href'), null)
+    })
+  }
+
+  it('warns before leaving the page while a rollback runs', async () => {
+    const step = later()
+    const env = await history({ rollback: step.promise })
+    env.click(env.byText('tbody button', 'Roll back'))
+    env.click(env.modal.primary())
+    await env.flush()
+    assert.equal(env.leaveWarns(), true)
+    step.resolve({ deleted: 12, remaining: 0, done: true, error: '', job: job({ status: 'rolled_back' }) })
+    await env.flush()
+    assert.equal(env.modal.title(), 'Rollback complete')
+    assert.equal(env.leaveWarns(), false)
   })
 })

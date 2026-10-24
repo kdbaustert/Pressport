@@ -203,6 +203,54 @@ class Test_Settings extends WP_UnitTestCase {
 	}
 
 	/**
+	 * @dataProvider storage_answers
+	 *
+	 * @param string    $answer   What the web server does with a file in the folder.
+	 * @param bool|null $expected storage_public().
+	 */
+	public function test_storage_probe_reports_whether_files_are_served( $answer, $expected ) {
+		$dir      = MigratePlus_Util::ensure_storage_dir();
+		$requests = array();
+		$serve    = static function ( $pre, $args, $url ) use ( $answer, $dir, &$requests ) {
+			$requests[] = $url;
+			if ( 'unreachable' === $answer ) {
+				return new WP_Error( 'http_request_failed', 'cURL error 7: Failed to connect' );
+			}
+			// nginx without a deny rule hands over the file itself; Apache reads .htaccess and refuses.
+			$body = 'served' === $answer ? (string) file_get_contents( $dir . wp_basename( $url ) ) : 'Forbidden'; // phpcs:ignore WordPress.WP.AlternativeFunctions
+			return array(
+				'headers'  => array(),
+				'body'     => $body,
+				'response' => array(
+					'code'    => 'served' === $answer ? 200 : 403,
+					'message' => '',
+				),
+				'cookies'  => array(),
+				'filename' => null,
+			);
+		};
+		add_filter( 'pre_http_request', $serve, 10, 3 );
+		$first  = MigratePlus_Settings::storage_public();
+		$second = MigratePlus_Settings::storage_public();
+		remove_filter( 'pre_http_request', $serve );
+
+		$this->assertSame( $expected, $first );
+		$this->assertSame( $expected, $second );
+		$this->assertCount( 1, $requests, 'The answer is cached for an hour.' );
+		$uploads = wp_upload_dir( null, false );
+		$this->assertStringStartsWith( trailingslashit( $uploads['baseurl'] ) . 'migrateplus/probe-', $requests[0] );
+		$this->assertSame( array(), glob( $dir . 'probe-*' ), 'The probe file is deleted.' );
+	}
+
+	public function storage_answers() {
+		return array(
+			'served'      => array( 'served', true ),
+			'denied'      => array( 'denied', false ),
+			'unreachable' => array( 'unreachable', null ),
+		);
+	}
+
+	/**
 	 * Writes the option directly, because save() would stamp "updated" with the current time.
 	 */
 	protected function backdate( $option, $key, $days ) {

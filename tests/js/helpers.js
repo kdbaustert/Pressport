@@ -1,7 +1,9 @@
 // Loads assets/admin.js, unchanged, into a fresh jsdom window. fetch and
 // XMLHttpRequest answer from `routes`, keyed by the action without its
-// "migrateplus_" prefix. The window's timers are fake: admin.js debounces the
-// export count and retries a busy run, and those only fire on clock.tick().
+// "migrateplus_" prefix. A route may answer with a promise, to hold the
+// response back, or with `offline` or `hang`. The window's timers are fake:
+// admin.js debounces the export count, retries a busy run and times requests
+// out, and those only fire on clock.tick().
 import { readFileSync } from 'node:fs'
 import { JSDOM } from 'jsdom'
 
@@ -103,7 +105,19 @@ const bootstrap = () => ({
   tables: [],
 })
 
-export const fail = message => ({ failMessage: message })
+// code is the WP_Error code MigratePlus_Admin::fail() sends with the message.
+export const fail = (message, code) => ({ failMessage: message, failCode: code })
+// fetch rejects, as it does when the connection drops.
+export const offline = { offline: true }
+// fetch never answers, until admin.js aborts it.
+export const hang = { hang: true }
+
+// A route answer that arrives when the test calls resolve().
+export function later() {
+  let resolve
+  const promise = new Promise(r => (resolve = r))
+  return { promise, resolve }
+}
 
 // Every job admin.js renders needs stats, options and settings; tests
 // override what they care about.
@@ -158,7 +172,9 @@ export function noNativeDialogs() {
 }
 
 export function boot({ data = {}, routes = {}, prompt } = {}) {
-  const { window } = new JSDOM('<div id="migrateplus-app"><p>Loading…</p></div>', {
+  // The page as MigratePlus_Admin::render_shell() prints it.
+  const html = '<div class="wrap migrateplus-wrap"><h1 class="wp-heading-inline">Import Content</h1><div id="migrateplus-app"><p>Loading…</p></div></div>'
+  const { window } = new JSDOM(html, {
     url: site + '/wp-admin/admin.php?page=migrateplus',
     runScripts: 'outside-only',
   })
@@ -181,7 +197,7 @@ export function boot({ data = {}, routes = {}, prompt } = {}) {
   window.scrollTo = () => {}
   window.Element.prototype.scrollIntoView = () => {}
 
-  const respond = (body, transport) => {
+  const answer = (body, transport) => {
     const fields = Object.fromEntries(body.entries())
     const action = fields.action.replace(/^migrateplus_/, '')
     const calls = requests.filter(r => r.action === action).length
@@ -189,17 +205,25 @@ export function boot({ data = {}, routes = {}, prompt } = {}) {
     let value = routes[action]
     if (typeof value === 'function') value = value(fields, calls)
     if (value === undefined) value = fail('No mock for ' + action)
-    return JSON.stringify(
+    return value
+  }
+  const encode = value =>
+    JSON.stringify(
       value.failMessage !== undefined
-        ? { success: false, data: { message: value.failMessage } }
+        ? { success: false, data: { message: value.failMessage, ...(value.failCode && { code: value.failCode }) } }
         : { success: true, data: value }
     )
-  }
 
-  window.fetch = (url, { body }) => {
-    const text = respond(body, 'fetch')
-    return Promise.resolve({ status: 200, text: () => Promise.resolve(text) })
-  }
+  window.fetch = (url, { body, signal }) =>
+    Promise.resolve(answer(body, 'fetch')).then(value => {
+      if (value === offline) throw new window.TypeError('Failed to fetch')
+      if (value === hang) {
+        return new Promise((resolve, reject) =>
+          signal.addEventListener('abort', () => reject(new window.DOMException('The operation was aborted.', 'AbortError')))
+        )
+      }
+      return { status: 200, text: () => Promise.resolve(encode(value)) }
+    })
 
   // Uploads go through XHR for progress events.
   window.XMLHttpRequest = class {
@@ -210,7 +234,7 @@ export function boot({ data = {}, routes = {}, prompt } = {}) {
       this.listeners[t] = fn
     }
     send(body) {
-      const text = respond(body, 'xhr')
+      const text = encode(answer(body, 'xhr'))
       Promise.resolve().then(() => {
         this.upload.listeners.progress?.({ lengthComputable: true, loaded: 1, total: 1 })
         this.upload.listeners.load?.({})
@@ -243,6 +267,8 @@ export function boot({ data = {}, routes = {}, prompt } = {}) {
       for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r))
     },
     click: node => node.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true })),
+    // Whether leaving the page now would ask first.
+    leaveWarns: () => !window.dispatchEvent(new window.Event('beforeunload', { cancelable: true })),
     check(box, on = true) {
       box.checked = on
       event(box, 'change')

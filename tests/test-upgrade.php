@@ -120,6 +120,45 @@ class Test_Upgrade extends WP_UnitTestCase {
 	}
 
 	/**
+	 * Two first page loads running the move at once: the other one has already moved an
+	 * option and deleted it, while this one's cache still says the new name is free.
+	 */
+	public function test_run_never_writes_over_an_option_moved_by_another_request() {
+		global $wpdb;
+		update_option( 'migrateplus_raced', 'moved', false );
+		update_option( 'migrateplus_stale', 'current', false );
+		// Old rows this request listed, and its cache: one already deleted, both new names missing.
+		foreach ( array( 'pressport_raced', 'pressport_stale' ) as $name ) {
+			$wpdb->insert(
+				$wpdb->options,
+				array(
+					'option_name'  => $name,
+					'option_value' => 'old',
+					'autoload'     => 'no',
+				)
+			);
+		}
+		wp_cache_delete( 'migrateplus_raced', 'options' );
+		wp_cache_delete( 'migrateplus_stale', 'options' );
+		wp_cache_set(
+			'notoptions',
+			array(
+				'migrateplus_raced' => true,
+				'migrateplus_stale' => true,
+				'pressport_raced'   => true,
+			),
+			'options'
+		);
+
+		MigratePlus_Upgrade::run();
+
+		$this->assertSame( 'moved', get_option( 'migrateplus_raced' ) );
+		$this->assertSame( 'current', get_option( 'migrateplus_stale' ) );
+		$this->assertFalse( get_option( 'pressport_stale' ) );
+		MigratePlus_Settings::flush_cache();
+	}
+
+	/**
 	 * A file exported before the rename has its header under "pressport". It still
 	 * imports as an export, and matches what it imported before once the upgrade
 	 * has renamed that content's tracking meta.

@@ -9,7 +9,8 @@ defined( 'ABSPATH' ) || exit;
 
 /**
  * Writes posts to a JSON file, in batches, with everything MigratePlus needs
- * to rebuild them elsewhere: core fields, the author's email, login and name,
+ * to rebuild them elsewhere: core fields, the author's name (and email and login
+ * when the person exporting may list users),
  * hierarchical terms, featured image URL, custom fields and ACF fields (images as URLs, related posts
  * as { id, slug, title } references, terms as names, users as emails) and,
  * when asked for, approved comments.
@@ -474,7 +475,18 @@ class MigratePlus_Exporter {
 		$posts = $ids ? ( new WP_Query( array_merge( self::query_args( $state['args'], $type, 1, $limit ), array( 'post__in' => $ids ) ) ) )->posts : array();
 		$lines = '';
 		$log   = array();
+		$skips = 0;
+		if ( empty( $state['people_noted'] ) && ! self::user_can( 'list_users' ) ) {
+			// Said once, so whoever imports the file knows why authors and commenters match by name only.
+			$state['people_noted'] = 1;
+			$log[]                 = self::log_line( 'warning', __( 'Author and commenter emails and logins are left out, because you are not allowed to list users. The importing site matches authors by display name, so two people with the same name become one.', 'migrateplus' ) );
+		}
 		foreach ( $posts as $post ) {
+			// Others' drafts and private posts, and posts of types with stricter rights, stay out of the file as they stay out of the editor.
+			if ( ! self::user_can( 'edit_post', $post->ID ) ) {
+				++$skips;
+				continue;
+			}
 			$item  = self::export_post( $post, $state['args'] );
 			$json  = wp_json_encode( $item, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
 			$title = '' !== $post->post_title ? $post->post_title : __( '(untitled)', 'migrateplus' );
@@ -492,6 +504,11 @@ class MigratePlus_Exporter {
 			$state['taxes']     = array_values( array_unique( array_merge( $state['taxes'], array_keys( $item['terms'] ) ) ) );
 			++$state['done'];
 			$state['type_done'][ $type ] = ( isset( $state['type_done'][ $type ] ) ? $state['type_done'][ $type ] : 0 ) + 1;
+		}
+		if ( $skips ) {
+			// A count only: their titles are what the user may not see.
+			/* translators: %d: number of items */
+			$log[] = self::log_line( 'warning', sprintf( _n( 'Left out %d item you are not allowed to edit.', 'Left out %d items you are not allowed to edit.', $skips, 'migrateplus' ), $skips ) );
 		}
 		// An item that could not be encoded has failed the export already.
 		if ( empty( $state['error'] ) && '' !== $lines && false === file_put_contents( $state['work'], $lines, FILE_APPEND ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
@@ -691,6 +708,8 @@ class MigratePlus_Exporter {
 	 */
 	public static function export_post( WP_Post $post, array $args ) {
 		$author = get_userdata( (int) $post->post_author );
+		// Emails and logins only for those who may see them in Users; the importer still matches the display name.
+		$people = self::user_can( 'list_users' );
 		$item   = array(
 			'id'             => (int) $post->ID,
 			'title'          => $post->post_title,
@@ -702,13 +721,13 @@ class MigratePlus_Exporter {
 			'slug'           => $post->post_name,
 			'status'         => $post->post_status,
 			'post_type'      => $post->post_type,
-			'author'         => $author ? $author->user_email : '',
+			'author'         => $author && $people ? $author->user_email : '',
 			'author_name'    => $author ? $author->display_name : '',
-			'author_login'   => $author ? $author->user_login : '',
+			'author_login'   => $author && $people ? $author->user_login : '',
 			'parent'         => $post->post_parent ? self::post_ref( (int) $post->post_parent ) : null,
 			'menu_order'     => (int) $post->menu_order,
 			'comment_status' => $post->comment_status,
-			'password'       => $post->post_password,
+			'password'       => self::user_can( 'edit_post', $post->ID ) ? $post->post_password : '',
 			'template'       => (string) get_post_meta( $post->ID, '_wp_page_template', true ),
 			'format'         => (string) get_post_format( $post ),
 			'link'           => get_permalink( $post ),
@@ -804,7 +823,8 @@ class MigratePlus_Exporter {
 	 * @return array[]
 	 */
 	protected static function export_comments( WP_Post $post, array $args ) {
-		$out = array();
+		$out    = array();
+		$people = self::user_can( 'list_users' );
 		foreach ( get_comments(
 			array(
 				'post_id' => $post->ID,
@@ -829,18 +849,30 @@ class MigratePlus_Exporter {
 				'id'           => (int) $c->comment_ID,
 				'parent'       => (int) $c->comment_parent,
 				'author'       => $c->comment_author,
-				'author_email' => $c->comment_author_email,
+				'author_email' => $people ? $c->comment_author_email : '',
 				'author_url'   => $c->comment_author_url,
 				'date'         => $c->comment_date,
 				'date_gmt'     => '0000-00-00 00:00:00' === $c->comment_date_gmt ? '' : gmdate( 'c', strtotime( $c->comment_date_gmt . ' UTC' ) ),
 				'content'      => $c->comment_content,
 				'approved'     => $c->comment_approved,
 				'type'         => $c->comment_type,
-				'user_email'   => $user ? $user->user_email : '',
+				'user_email'   => $user && $people ? $user->user_email : '',
 				'meta'         => $meta,
 			);
 		}
 		return $out;
+	}
+
+	/**
+	 * Whether the person exporting may do something. Nobody logged in is WP-CLI
+	 * without --user, which runs with the shell account's access, as it always has.
+	 *
+	 * @param string $capability Capability.
+	 * @param mixed  ...$args    Object id, for meta capabilities.
+	 * @return bool
+	 */
+	protected static function user_can( $capability, ...$args ) {
+		return ! get_current_user_id() || current_user_can( $capability, ...$args );
 	}
 
 	/**
@@ -935,14 +967,16 @@ class MigratePlus_Exporter {
 
 			case 'user':
 				// Email and login: the same person often has a different email on each site.
-				$users = array();
+				// Only the display name for those who may not list users; the importer matches that too.
+				$people = self::user_can( 'list_users' );
+				$users  = array();
 				foreach ( (array) $raw as $id ) {
 					$u = get_userdata( (int) $id );
 					if ( $u ) {
-						$users[] = array(
+						$users[] = $people ? array(
 							'email' => $u->user_email,
 							'login' => $u->user_login,
-						);
+						) : $u->display_name;
 					}
 				}
 				return ! empty( $field['multiple'] ) ? $users : ( $users ? $users[0] : '' );

@@ -1,6 +1,6 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { boot, json, noNativeDialogs } from './helpers.js'
+import { boot, json, later, noNativeDialogs } from './helpers.js'
 
 afterEach(noNativeDialogs)
 
@@ -45,4 +45,47 @@ describe('Export', () => {
       assert.equal(exportScreen({ [flag]: false }).$('#migrateplus-export-' + id), null)
     })
   }
+
+  it('ignores a count that arrives after a newer one', async () => {
+    const first = later()
+    const env = boot({
+      data: { view: 'export' },
+      routes: { export_count: (fields, calls) => (calls ? { count: 52, counts: { post: 40, page: 12 } } : first.promise) },
+    })
+    env.clock.tick(250)
+    await env.flush()
+    env.check(env.$('#migrateplus-export-status-draft'))
+    env.clock.tick(250)
+    await env.flush()
+    first.resolve({ count: 0, counts: { post: 0 }, menus: 0 })
+    await env.flush()
+    assert.equal(env.$('.migrateplus-export-count').textContent, '52 items (40 posts, 12 pages) will be exported')
+    assert.equal(env.$('form.migrateplus-export [type=submit]').disabled, false)
+  })
+
+  it('offers only the types the server says can be exported', () => {
+    const env = exportScreen({
+      postTypes: [
+        { name: 'post', label: 'Post', plural: 'Posts', taxonomies: [], export: true },
+        { name: 'acf-field-group', label: 'Field Group', plural: 'Field Groups', taxonomies: [], export: false },
+      ],
+    })
+    assert.ok(env.$('#migrateplus-export-type-post'))
+    assert.equal(env.$('#migrateplus-export-type-acf-field-group'), null)
+  })
+
+  it('warns before leaving the page while the export runs', async () => {
+    const run = later()
+    const env = boot({
+      data: { view: 'export' },
+      routes: { export_count: { count: 52, counts: { post: 52 } }, export_start: { id: 'exp1', total: 52 }, export_run: run.promise },
+    })
+    env.submit(env.$('form.migrateplus-export'))
+    await env.flush()
+    assert.equal(env.leaveWarns(), true)
+    run.resolve({ complete: true, done: 52, total: 52, size: '120 KB', filename: 'posts.json', url: 'https://example.test/dl/exp1' })
+    await env.flush()
+    assert.equal(env.modal.title(), 'Export ready')
+    assert.equal(env.leaveWarns(), false)
+  })
 })

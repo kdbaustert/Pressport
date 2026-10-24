@@ -77,3 +77,20 @@ describe('buttons', () => {
     })
   }
 })
+
+describe('Past replacements', () => {
+  it('says why a run can no longer be rolled back', async () => {
+    const note = 'Can no longer be rolled back: its rollback file is gone. Rollback files are deleted after 30 days.'
+    const env = boot({
+      data: { view: 'replace' },
+      routes: {
+        replace_history: {
+          runs: [{ id: 'run1', search: 'http://old.test', replace: 'https://new.test', status: 'complete', can_undo: false, undo_note: note, changes: 340, rows: 120, created: 0 }],
+        },
+      },
+    })
+    await env.flush()
+    assert.equal(env.byText('.migrateplus-replace-runs button', 'Roll back'), undefined)
+    assert.equal(env.$('.migrateplus-replace-runs .migrateplus-undo-note').textContent, note)
+  })
+})

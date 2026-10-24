@@ -106,8 +106,13 @@ class MigratePlus_Upgrade {
 		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT option_name, autoload FROM {$wpdb->options} WHERE option_name LIKE %s", $wpdb->esc_like( self::OLD_OPTION_PREFIX ) . '%' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		foreach ( (array) $rows as $row ) {
 			$new = 'migrateplus_' . substr( $row->option_name, strlen( self::OLD_OPTION_PREFIX ) );
-			if ( false === get_option( $new ) ) {
-				$value = self::move_paths( get_option( $row->option_name ), $old_dir, $new_dir );
+			$old = get_option( $row->option_name );
+			// Two first page loads can run this at once. The other one may have moved this option and deleted
+			// it since the list above was read: false is then not a value to copy. And add_option() upserts,
+			// trusting a cached "no such option", so it could write over what the other one moved: ask the table.
+			$exists = (bool) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->options} WHERE option_name = %s", $new ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+			if ( false !== $old && ! $exists ) {
+				$value = self::move_paths( $old, $old_dir, $new_dir );
 				if ( 0 === strpos( $new, 'migrateplus_job_' ) && isset( $value['settings'] ) && is_array( $value['settings'] ) ) {
 					$value['settings'] = self::rename_keys( $value['settings'] );
 				}

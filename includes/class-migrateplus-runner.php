@@ -61,8 +61,9 @@ class MigratePlus_Runner {
 		// Files exported by MigratePlus carry their own mapping: apply it.
 		$embedded = isset( $prepared['migrateplus_mapping'] ) ? $prepared['migrateplus_mapping'] : null;
 		if ( is_array( $embedded ) ) {
-			$job->data['mapping'] = self::apply_embedded_mapping( $job->data['mapping'], $embedded, $names );
-			$job->log( 'info', __( 'This file was exported by MigratePlus; its field mapping was applied.', 'migrateplus' ) );
+			// Cleaned like a mapping sent from the mapping screen: a file is no more trusted than a request.
+			$job->data['mapping'] = self::apply_embedded_mapping( $job->data['mapping'], MigratePlus_Mappings::clean_mapping( $embedded ), $names );
+			$job->log( 'info', __( 'This file was exported by Migrate Plus; its field mapping was applied.', 'migrateplus' ) );
 		}
 		// ...and the type it was exported from: import into that type when this site has it.
 		$exported_type = isset( $prepared['migrateplus_post_type'] ) ? $prepared['migrateplus_post_type'] : '';
@@ -302,8 +303,11 @@ class MigratePlus_Runner {
 			$job->data['total'] = (int) $batch['total'];
 		}
 
-		$results = array();
-		foreach ( $batch['records'] as $record ) {
+		// Cursors are the source's own, so a batch cut short resumes from its first record
+		// and skips the ones it already did. Those are saved after each record, below.
+		$done_in_batch = (int) $job->data['cursor_skip'];
+		$results       = array();
+		foreach ( array_slice( $batch['records'], $done_in_batch ) as $record ) {
 			self::tally( $job, $record );
 			try {
 				$result = MigratePlus_Importer::import( $record, $job );
@@ -326,10 +330,22 @@ class MigratePlus_Runner {
 			$level = 'failed' === $result['action'] ? 'error' : ( ! empty( $result['warning'] ) ? 'warning' : ( 'skipped' === $result['action'] ? 'info' : 'success' ) );
 			$job->log( $level, $result['message'] );
 			$results[] = $result;
+
+			// Saved as each record finishes, so a request that dies part way through does not do the
+			// batch again. Each save also renews the lock, so a slow batch keeps it; one that lost it
+			// anyway (a retry took over) stops here rather than save over the retry's progress.
+			$job->data['cursor_skip'] = ++$done_in_batch;
+			$lock                     = self::checkpoint( $job, $lock );
+			if ( ! $lock ) {
+				wp_defer_term_counting( false );
+				wp_defer_comment_counting( false );
+				return new WP_Error( 'migrateplus_locked', __( 'This batch took too long and another request took it over.', 'migrateplus' ) );
+			}
 		}
 
-		$job->data['cursor'] = $batch['next'];
-		$done                = null === $batch['next'] || empty( $batch['records'] );
+		$job->data['cursor']      = $batch['next'];
+		$job->data['cursor_skip'] = 0;
+		$done                     = null === $batch['next'] || empty( $batch['records'] );
 		if ( $done && MigratePlus_Menus::pending( $job ) ) {
 			// Menu items point at the posts and terms imported above, so menus come last, in a request of their own.
 			$job->data['stage'] = 'menus';
@@ -337,7 +353,9 @@ class MigratePlus_Runner {
 		} elseif ( $done && ! empty( $job->data['settings']['menus_file'] ) ) {
 			$job->log( 'info', __( 'The file\'s menus were not imported: "Import menus" is off.', 'migrateplus' ) );
 		}
-		self::finish_batch( $job, $lock, $done );
+		if ( ! self::finish_batch( $job, $lock, $done ) ) {
+			return new WP_Error( 'migrateplus_locked', __( 'This batch took too long and another request took it over.', 'migrateplus' ) );
+		}
 
 		return array(
 			'done'    => $done,
@@ -375,7 +393,9 @@ class MigratePlus_Runner {
 			}
 		}
 		$job->data['stage'] = 'records';
-		self::finish_batch( $job, $lock, true );
+		if ( ! self::finish_batch( $job, $lock, true ) ) {
+			return new WP_Error( 'migrateplus_locked', __( 'This batch took too long and another request took it over.', 'migrateplus' ) );
+		}
 		return array(
 			'done'    => true,
 			'results' => $results,
@@ -388,6 +408,7 @@ class MigratePlus_Runner {
 	 * @param MigratePlus_Job $job  Job.
 	 * @param string          $lock Lock token.
 	 * @param bool            $done Whether the import has finished.
+	 * @return bool False when the lock was lost and nothing was saved.
 	 */
 	protected static function finish_batch( MigratePlus_Job $job, $lock, $done ) {
 		if ( $done ) {
@@ -413,11 +434,34 @@ class MigratePlus_Runner {
 				)
 			);
 		}
-		$job->save();
+		$lock = self::checkpoint( $job, $lock );
 
 		wp_defer_term_counting( false );
 		wp_defer_comment_counting( false );
+		if ( ! $lock ) {
+			return false;
+		}
 		self::unlock( $job, $lock );
+		return true;
+	}
+
+	/**
+	 * Save a job part way through a batch, if its lock is still ours, and renew the lock
+	 * so a batch that keeps making progress never looks abandoned (see LOCK_TTL).
+	 *
+	 * @param MigratePlus_Job $job   Job.
+	 * @param string          $token Token from lock().
+	 * @return string|false The renewed token, or false when another request holds the lock now.
+	 */
+	protected static function checkpoint( MigratePlus_Job $job, $token ) {
+		global $wpdb;
+		$renewed = ( time() + self::LOCK_TTL ) . ':' . wp_generate_password( 8, false );
+		$held    = $wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s AND option_value = %s", $renewed, 'migrateplus_lock_' . $job->data['id'], $token ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		if ( ! $held ) {
+			return false;
+		}
+		$job->save();
+		return $renewed;
 	}
 
 	/**
@@ -442,10 +486,13 @@ class MigratePlus_Runner {
 		$denied  = 0;
 		$offset  = 0; // Posts left in place (not allowed, or the delete failed) stay tagged: page past them.
 		do {
-			$ids  = $job->imported_query( $limit, $offset )->posts;
+			$ids  = $job->imported_ids( $limit, $offset );
 			$full = count( $ids ) === (int) $limit;
 			foreach ( $ids as $id ) {
-				if ( ! $cli && ! current_user_can( 'delete_post', $id ) ) {
+				// A type no longer registered has no capabilities of its own, and WordPress complains when
+				// asked about one (then checks edit_others_posts): ask for deleting other people's posts.
+				$may = post_type_exists( (string) get_post_type( $id ) ) ? current_user_can( 'delete_post', $id ) : current_user_can( 'delete_others_posts' );
+				if ( ! $cli && ! $may ) {
 					++$denied;
 					++$offset;
 					continue;
@@ -495,6 +542,7 @@ class MigratePlus_Runner {
 			MigratePlus_Menus::restore_locations( $job );
 			$job->data['status']         = 'rolled_back';
 			$job->data['cursor']         = null;
+			$job->data['cursor_skip']    = 0;
 			$job->data['created_total']  = 0;
 			$job->data['comments_total'] = 0;
 			$job->log( 'info', __( 'Rollback complete: imported content was deleted.', 'migrateplus' ) );

@@ -83,20 +83,23 @@ class MigratePlus_Job {
 		// sections: the post types (and menus) of a MigratePlus export, with how many of each are done.
 		// stage: "menus" once the records are done and the file's menus are next.
 		// menu_locations: theme location => [ menu before, menu the import set ], for rollback.
+		// cursor_skip: records of the batch at "cursor" already imported, by a batch that was cut short.
 		$this->data += array(
 			'created_total'  => 0,
 			'comments_total' => 0,
 			'sections'       => array(),
 			'stage'          => 'records',
 			'menu_locations' => array(),
+			'cursor_skip'    => 0,
 		);
 	}
 
 	/**
-	 * Start the sections over, for a run from the first record.
+	 * Start the sections, and a batch that was cut short, over, for a run from the first record.
 	 */
 	public function reset_sections() {
-		$this->data['stage'] = 'records';
+		$this->data['stage']       = 'records';
+		$this->data['cursor_skip'] = 0;
 		foreach ( $this->data['sections'] as $i => $section ) {
 			$this->data['sections'][ $i ]['done'] = 0;
 		}
@@ -209,7 +212,9 @@ class MigratePlus_Job {
 	 * @return int
 	 */
 	public function imported_count() {
-		return (int) $this->imported_query( 1 )->found_posts + (int) $this->imported_comments( 0, 0, true ) + count( $this->imported_menus() );
+		global $wpdb;
+		$posts = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT( DISTINCT m.post_id ) FROM {$wpdb->postmeta} m INNER JOIN {$wpdb->posts} p ON p.ID = m.post_id WHERE m.meta_key = '_migrateplus_job_id' AND m.meta_value = %s", $this->data['id'] ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		return $posts + (int) $this->imported_comments( 0, 0, true ) + count( $this->imported_menus() );
 	}
 
 	/**
@@ -257,28 +262,19 @@ class MigratePlus_Job {
 	}
 
 	/**
-	 * IDs of posts tagged with this job, shared by the count and rollback so both see the same posts.
+	 * IDs of posts tagged with this job, newest first, for rollback. Read from the meta
+	 * table, as imported_count() counts them: a query by post type would leave out a type
+	 * no longer registered (products with WooCommerce off), and rollback would report
+	 * success with them still there. No filters either, so a language plugin can't hide any.
 	 *
 	 * @param int $limit  Posts per page.
 	 * @param int $offset Posts to skip.
-	 * @return WP_Query
+	 * @return int[]
 	 */
-	public function imported_query( $limit, $offset = 0 ) {
-		// 'any' leaves out types and statuses excluded from search (coupons, hidden CPTs, trash): list them all.
-		// Filters are suppressed so a language plugin can't hide posts in other languages.
-		return new WP_Query(
-			array(
-				'post_type'        => array_keys( get_post_types() ),
-				'post_status'      => array_keys( get_post_stati() ),
-				'meta_key'         => '_migrateplus_job_id', // phpcs:ignore WordPress.DB.SlowDBQuery
-				'meta_value'       => $this->data['id'], // phpcs:ignore WordPress.DB.SlowDBQuery
-				'fields'           => 'ids',
-				'posts_per_page'   => $limit,
-				'offset'           => $offset,
-				'no_found_rows'    => false,
-				'suppress_filters' => true,
-			)
-		);
+	public function imported_ids( $limit, $offset = 0 ) {
+		global $wpdb;
+		$ids = $wpdb->get_col( $wpdb->prepare( "SELECT DISTINCT m.post_id FROM {$wpdb->postmeta} m INNER JOIN {$wpdb->posts} p ON p.ID = m.post_id WHERE m.meta_key = '_migrateplus_job_id' AND m.meta_value = %s ORDER BY m.post_id DESC LIMIT %d OFFSET %d", $this->data['id'], $limit, $offset ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		return array_map( 'intval', $ids );
 	}
 
 	/**

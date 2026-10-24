@@ -1,6 +1,6 @@
 <?php
 /**
- * Plugin Name:       MigratePlus
+ * Plugin Name:       Migrate Plus
  * Description:       Move content between WordPress sites as JSON. Export posts, pages, custom post types and WooCommerce products, then import the file on another site with field mapping (including ACF), dry runs, batched processing, media sideloading and one-click rollback.
  * Version:           0.1.0-beta.1
  * Requires at least: 6.0

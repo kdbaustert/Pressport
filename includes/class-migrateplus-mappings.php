@@ -65,7 +65,7 @@ class MigratePlus_Mappings {
 		$all = self::all();
 		if ( ! isset( $all[ $name ] ) && count( $all ) >= self::MAX ) {
 			/* translators: %d: maximum number of saved mappings */
-			return new WP_Error( 'migrateplus_mapping_limit', sprintf( __( 'There are already %d saved mappings, the most MigratePlus keeps. Delete one you no longer use, or save over an existing one.', 'migrateplus' ), self::MAX ) );
+			return new WP_Error( 'migrateplus_mapping_limit', sprintf( __( 'There are already %d saved mappings, the most Migrate Plus keeps. Delete one you no longer use, or save over an existing one.', 'migrateplus' ), self::MAX ) );
 		}
 		$entry = array(
 			'name'    => $name,

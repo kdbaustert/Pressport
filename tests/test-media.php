@@ -153,4 +153,259 @@ class Test_Media extends WP_UnitTestCase {
 		$this->assertSame( array( 'http://old.test/uploads/broken.png: Connection refused' ), $errors );
 		$this->assertSame( $post, wp_get_post_parent_id( $id ) );
 	}
+
+	public function test_content_images_reuse_the_original_of_a_size_variant() {
+		$id   = MigratePlus_Media::sideload( 'http://old.test/uploads/photo.png', 0 );
+		$full = wp_get_attachment_url( $id );
+		$html = '<!-- wp:image {"id":12,"linkDestination":"media"} --><figure><a href="http://old.test/uploads/photo.png"><img src="http://old.test/uploads/photo-1024x683.png" class="wp-image-12"></a></figure><!-- /wp:image -->'
+			. '<img src="http://old.test/uploads/photo-scaled.png">';
+
+		$out = MigratePlus_Media::import_content_images( $html, 0, 'http://old.test', '' );
+
+		$this->assertSame(
+			'<!-- wp:image {"id":' . $id . ',"linkDestination":"media"} --><figure><a href="' . $full . '"><img src="' . $full . '" class="wp-image-' . $id . '"></a></figure><!-- /wp:image -->'
+				. '<img src="' . $full . '">',
+			$out
+		);
+		$this->assertSame( array( 'http://old.test/uploads/photo.png' ), array_keys( $this->requests ) );
+	}
+
+	public function test_content_images_find_the_old_attachment_by_its_id_and_fix_cover_and_media_text_blocks() {
+		$job = MigratePlus_Job::create( 'json', array( 'migrateplus_site' => 'http://old.test' ) );
+		$id  = MigratePlus_Media::sideload( 'http://old.test/uploads/hero.png', 0 );
+		update_post_meta( $id, '_migrateplus_source_uid', MigratePlus_Importer::uid( $job, 12 ) );
+		$url  = wp_get_attachment_url( $id );
+		$html = '<!-- wp:cover {"url":"http://old.test/uploads/hero-edited.png","id":12,"dimRatio":50} --><div class="wp-block-cover"><img class="wp-block-cover__image-background wp-image-12" src="http://old.test/uploads/hero-edited.png"/></div><!-- /wp:cover -->'
+			. '<!-- wp:media-text {"mediaId":12,"mediaLink":"http://old.test/?attachment_id=12","mediaType":"image"} --><div class="wp-block-media-text"><figure class="wp-block-media-text__media"><img src="http://old.test/uploads/hero-edited.png" class="wp-image-12 size-full"/></figure></div><!-- /wp:media-text -->';
+
+		$out = MigratePlus_Media::import_content_images( $html, 0, 'http://old.test', $job->data['id'] );
+		$job->delete();
+
+		$this->assertSame(
+			'<!-- wp:cover {"url":"' . $url . '","id":' . $id . ',"dimRatio":50} --><div class="wp-block-cover"><img class="wp-block-cover__image-background wp-image-' . $id . '" src="' . $url . '"/></div><!-- /wp:cover -->'
+				. '<!-- wp:media-text {"mediaId":' . $id . ',"mediaLink":"' . get_attachment_link( $id ) . '","mediaType":"image"} --><div class="wp-block-media-text"><figure class="wp-block-media-text__media"><img src="' . $url . '" class="wp-image-' . $id . ' size-full"/></figure></div><!-- /wp:media-text -->',
+			$out
+		);
+		$this->assertCount( 1, $this->requests );
+	}
+
+	public function test_replacing_a_scaled_image_keeps_its_scaled_url() {
+		$big = imagecreatetruecolor( 2600, 20 );
+		ob_start();
+		imagepng( $big );
+		$this->serve[0] = ob_get_clean();
+		$id             = MigratePlus_Media::sideload( 'http://old.test/uploads/panorama.png', 0 );
+		$url            = wp_get_attachment_url( $id );
+		$this->assertStringEndsWith( '/panorama-scaled.png', $url );
+
+		$this->serve[0] = $this->png();
+		$this->assertTrue( MigratePlus_Media::replace_file( $id, 'http://old.test/uploads/panorama-small.png' ) );
+
+		$file = get_attached_file( $id );
+		$this->assertSame( $url, wp_get_attachment_url( $id ) );
+		$this->assertSame( array( 4, 4 ), array_slice( getimagesize( $file ), 0, 2 ) );
+		$this->assertSame( 'panorama.png', wp_get_attachment_metadata( $id )['original_image'] );
+		$original = wp_get_original_image_path( $id );
+		wp_delete_attachment( $id, true );
+		$this->assertFileDoesNotExist( $file );
+		$this->assertFileDoesNotExist( $original );
+	}
+
+	public function test_alt_text_keeps_backslashes() {
+		$id = MigratePlus_Media::sideload( 'http://old.test/uploads/mug.png', 0, 'Saved in C:\Photos\mugs' );
+		$this->assertSame( 'Saved in C:\Photos\mugs', get_post_meta( $id, '_wp_attachment_image_alt', true ) );
+	}
+
+	public function test_local_host_allowance_ends_when_a_hook_throws() {
+		add_filter(
+			'pre_http_request',
+			static function () {
+				throw new RuntimeException( 'Hook failed' );
+			},
+			9
+		);
+		foreach ( array( 'download', 'download_to_storage' ) as $method ) {
+			try {
+				'download' === $method ? MigratePlus_Media::download( 'http://old.test/a.png' ) : MigratePlus_Util::download_to_storage( 'http://old.test/a.json', array( 'json' ) );
+				$this->fail( 'The hook did not throw.' );
+			} catch ( RuntimeException $e ) {
+				$this->assertSame( 'Hook failed', $e->getMessage() );
+			}
+			$this->assertFalse( MigratePlus_Util::$in_request, $method );
+		}
+	}
+
+	public function test_storage_folder_htaccess_turns_listings_off() {
+		$dir = MigratePlus_Util::storage_dir();
+		wp_mkdir_p( $dir );
+		// As versions before Options -Indexes wrote it.
+		file_put_contents( $dir . '.htaccess', "Require all denied\nDeny from all\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		MigratePlus_Util::ensure_storage_dir();
+		$this->assertSame( "Options -Indexes\nRequire all denied\nDeny from all\n", file_get_contents( $dir . '.htaccess' ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+	}
+
+	public function test_nested_values_read_back_as_they_were() {
+		$record = MigratePlus_Util::flatten(
+			array(
+				'meta' => array(
+					'order' => array(
+						'5' => 10,
+						'4' => 3,
+					),
+					'flags' => array(
+						'on'   => true,
+						'off'  => false,
+						'none' => null,
+					),
+					'deep'  => array( 'a' => array( 'b' => array( 'c' => array( 'd' => array( 'e' => array( 'f' => 'x' ) ) ) ) ) ),
+				),
+			)
+		);
+		// The mapping screen's field list is unchanged: it stops at the same depth.
+		$this->assertSame( array( 'meta.order.5', 'meta.order.4', 'meta.flags.on', 'meta.flags.off', 'meta.flags.none', 'meta.deep.a.b.c.d.e' ), array_keys( $record ) );
+
+		$this->assertSame(
+			array(
+				5 => 10,
+				4 => 3,
+			),
+			MigratePlus_ACF::read( $record, 'meta.order' )
+		);
+		$this->assertSame(
+			array(
+				'on'   => true,
+				'off'  => false,
+				'none' => null,
+			),
+			MigratePlus_ACF::read( $record, 'meta.flags' )
+		);
+		$this->assertSame( array( 'a' => array( 'b' => array( 'c' => array( 'd' => array( 'e' => array( 'f' => 'x' ) ) ) ) ) ), MigratePlus_ACF::read( $record, 'meta.deep' ) );
+		// A single field is stored as before.
+		$this->assertSame( '0', MigratePlus_ACF::read( $record, 'meta.flags.off' ) );
+		$this->assertSame( '', MigratePlus_ACF::read( $record, 'meta.flags.none' ) );
+	}
+
+	public function test_acf_empty_repeater_has_no_rows() {
+		$ctx   = array(
+			'post_id'  => 0,
+			'warnings' => array(),
+		);
+		$items = array(
+			'key'        => 'field_items',
+			'name'       => 'items',
+			'label'      => 'Items',
+			'type'       => 'repeater',
+			'sub_fields' => array(
+				array(
+					'key'   => 'field_item',
+					'name'  => 'item',
+					'label' => 'Item',
+					'type'  => 'text',
+				),
+			),
+		);
+		$rows  = array(
+			'key'        => 'field_rows',
+			'name'       => 'rows',
+			'label'      => 'Rows',
+			'type'       => 'repeater',
+			'sub_fields' => array(
+				array(
+					'key'   => 'field_title',
+					'name'  => 'title',
+					'label' => 'Title',
+					'type'  => 'text',
+				),
+				$items,
+			),
+		);
+
+		$this->assertSame( array(), MigratePlus_ACF::convert( $items, array(), $ctx ) );
+		$this->assertSame(
+			array(
+				array(
+					'field_title' => 'Kitchen',
+					'field_items' => array(),
+				),
+			),
+			MigratePlus_ACF::convert(
+				$rows,
+				array(
+					array(
+						'title' => 'Kitchen',
+						'items' => array(),
+					),
+				),
+				$ctx
+			)
+		);
+		$this->assertSame( array(), MigratePlus_ACF::convert( array( 'type' => 'gallery' ), array(), $ctx ) );
+	}
+
+	public function test_acf_taxonomy_names_win_over_term_ids() {
+		$other         = self::factory()->category->create( array( 'name' => 'Archive' ) );
+		$named         = self::factory()->category->create( array( 'name' => (string) $other ) );
+		$lone          = self::factory()->category->create( array( 'name' => 'Lone' ) );
+		$field         = array(
+			'type'       => 'taxonomy',
+			'taxonomy'   => 'category',
+			'field_type' => 'checkbox',
+			'add_term'   => 1,
+		);
+		$plain         = array(
+			'post_id'      => 0,
+			'job'          => new MigratePlus_Job( array( 'source' => 'json' ) ),
+			'create_terms' => true,
+			'warnings'     => array(),
+		);
+		$export        = $plain;
+		$export['job'] = new MigratePlus_Job(
+			array(
+				'source'   => 'json',
+				'settings' => array( 'migrateplus_mapping' => array() ),
+			)
+		);
+
+		$this->assertSame( array( $named ), MigratePlus_ACF::convert( $field, (string) $other, $plain ) );
+		$this->assertSame( array( $named ), MigratePlus_ACF::convert( $field, (string) $other, $export ) );
+		// No term has that name: other data means the id, an export a term to create.
+		$this->assertSame( array( $lone ), MigratePlus_ACF::convert( $field, (string) $lone, $plain ) );
+		$created = MigratePlus_ACF::convert( $field, (string) $lone, $export );
+		$this->assertSame( (string) $lone, get_term( $created[0], 'category' )->name );
+	}
+
+	public function test_acf_exported_related_post_waits_rather_than_matching_a_local_title() {
+		$local  = self::factory()->post->create(
+			array(
+				'post_type'  => 'page',
+				'post_title' => 'About',
+			)
+		);
+		$field  = array(
+			'type'      => 'relationship',
+			'post_type' => array( 'page' ),
+		);
+		$ref    = array(
+			'id'    => 99,
+			'slug'  => 'about-us',
+			'title' => 'About',
+		);
+		$export = array(
+			'post_id'  => 0,
+			'job'      => new MigratePlus_Job(
+				array(
+					'source'   => 'json',
+					'settings' => array( 'migrateplus_mapping' => array() ),
+				)
+			),
+			'defer'    => true,
+			'pending'  => array(),
+			'warnings' => array(),
+		);
+
+		$this->assertSame( array(), MigratePlus_ACF::convert( $field, array( $ref ), $export ) );
+		$this->assertSame( array( MigratePlus_Importer::uid( $export['job'], 99 ) ), $export['pending'] );
+		// Data from elsewhere still matches by title.
+		$this->assertSame( $local, MigratePlus_ACF::resolve_post( $ref, array( 'page' ), new MigratePlus_Job( array( 'source' => 'json' ) ) ) );
+	}
 }

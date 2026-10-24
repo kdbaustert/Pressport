@@ -1,20 +1,20 @@
-# MigratePlus
+# Migrate Plus
 
-> **Not ready for use yet.** MigratePlus hasn't had a stable release. Try it on a test site or a copy you can throw away, not a live one.
+> **Not ready for use yet.** Migrate Plus hasn't had a stable release. Try it on a test site or a copy you can throw away, not a live one.
 
 A WordPress plugin for moving content between sites as JSON. Export posts, pages, custom post types, media, WooCommerce products, comments and menus on one site, then drop the file on another site's Import page.
 
-MigratePlus exports carry their own field mapping, so importing one takes a single confirmation. Other JSON files work too: you map their fields once and can save the mapping. Every import can be dry-run first and rolled back afterwards.
+Migrate Plus exports carry their own field mapping, so importing one takes a single confirmation. Other JSON files work too: you map their fields once and can save the mapping. Every import can be dry-run first and rolled back afterwards.
 
 <p align="center">
-  <img src="docs/import.png" alt="Dropping a MigratePlus export on the Import page: a dialog asks to import 5 items exported from old-site.example" width="800">
+  <img src="docs/import.png" alt="Dropping a Migrate Plus export on the Import page: a dialog asks to import 5 items exported from old-site.example" width="800">
 </p>
 
 ## Why
 
 WordPress's own exporter copies custom fields as they are, but ACF fields often hold IDs (an image's attachment ID, a relationship's post IDs) that mean nothing on the new site. WooCommerce prices, stock and variations don't survive a plain post import either. Full-site migration plugins replace the whole destination, which doesn't help when it already has content of its own.
 
-MigratePlus is for moving *some* content into a site that already exists: staging to live, merging two sites, copying a product catalogue, or bringing in JSON from another system. Images and files are downloaded into the new Media Library, ACF fields point at the new IDs, and products are rebuilt through WooCommerce's API.
+Migrate Plus is for moving *some* content into a site that already exists: staging to live, merging two sites, copying a product catalogue, or bringing in JSON from another system. Images and files are downloaded into the new Media Library, ACF fields point at the new IDs, and products are rebuilt through WooCommerce's API.
 
 ## Features
 
@@ -40,16 +40,16 @@ cd wp-content/plugins
 git clone https://github.com/kdbaustert/migrateplus.git migrateplus
 ```
 
-Activate **MigratePlus** on the site you're copying from and the one you're copying to.
+Activate **Migrate Plus** on the site you're copying from and the one you're copying to.
 
 ## Using it
 
 ### Copy content between sites
 
-1. On the old site, open **MigratePlus → Export**, tick the content types (Media, Pages, Posts…), pick statuses, switch on comments or menus if you want them, and click **Export**. The download link works for 24 hours.
-2. On the new site, open **MigratePlus → Import** and drop the file on the page.
+1. On the old site, open **Migrate Plus → Export**, tick the content types (Media, Pages, Posts…), pick statuses, switch on comments or menus if you want them, and click **Export**. The download link works for 24 hours.
+2. On the new site, open **Migrate Plus → Import** and drop the file on the page.
 3. Confirm. If some items are already on the site, you're asked whether to skip them, import them anyway or review the changes.
-4. If something looks wrong, open **MigratePlus → History** and click **Roll back**.
+4. If something looks wrong, open **Migrate Plus → History** and click **Roll back**.
 
 To check the mapping or dry-run first, choose **Review mapping** instead of confirming. Files with several post types don't offer that; dry-run them with `wp migrateplus import --dry-run`.
 
@@ -69,18 +69,18 @@ Save the mapping under a name to reuse it. A later file with the same top-level 
 | --- | --- |
 | **Import** | Drop or choose a `.json` or `.json.gz` file. |
 | **Export** | Export one or more content types to a file. |
-| **Find & Replace** | Replace text across the database (administrators only). |
+| **Find & Replace** | Replace text across the database (administrators only; on multisite, network administrators). |
 | **History** | Past imports and exports: logs, resume, run again, roll back, delete. Tick several rows to delete them together. |
 | **Settings** | Import and export defaults, who can run imports, download limits, history cleanup, and a server check (administrators only). |
 
 ## How imports behave
 
-- **Post type.** A MigratePlus export imports into the type it came from when this site has it. A multi-type file imports Media first, then the other types, then menus, as one job with one rollback.
+- **Post type.** A Migrate Plus export imports into the type it came from when this site has it. A multi-type file imports Media first, then the other types, then menus, as one job with one rollback.
 - **Status.** *Default status* only fills in missing or unknown statuses. *Status for every item* overrides all of them, which is handy for importing everything as drafts on staging. Future-dated posts set to Published are scheduled.
 - **Authors** are matched by email, then login, then display name. Missing ones are created if *Create missing authors* is on; otherwise the default author is used and the log says so.
 - **Comments.** Only approved comments are exported. They're imported threaded, linked to local users by email, and never added twice.
 - **Menus** are rebuilt after the posts. Items point at the imported post or term (or one with the same slug), links to the old site are rewritten, and theme locations are assigned only if the active theme has them. A menu with the same slug is filled rather than copied.
-- **Duplicates.** Before starting, MigratePlus looks for items imported before or with the same slug (SKU for products, file name for media) and asks what to do. Changed posts can be reviewed one by one; duplicate images are shown side by side. A dry run skips duplicates so its counts match a real run.
+- **Duplicates.** Before starting, Migrate Plus looks for items imported before or with the same slug (SKU for products, file name for media) and asks what to do. Changed posts can be reviewed one by one; duplicate images are shown side by side. A dry run skips duplicates so its counts match a real run.
 - **Compressed files** are detected by their bytes, not the extension, and may unpack to at most an eighth of PHP's memory limit (`migrateplus_max_json_size` changes that). They need the zlib extension.
 - Permalinks are rebuilt once when an import finishes.
 
@@ -100,6 +100,8 @@ wp migrateplus rollback <job-id> --yes
 ```
 
 Import flags: `--post_type`, `--status`, `--force-status`, `--author`, `--duplicate=skip|update|create`, `--duplicates=skip|import|update`, `--batch_size`, `--[no-]featured-images`, `--content-images`, `--create-authors`, `--[no-]create-terms`, `--[no-]rewrite-links`, `--[no-]comments`, `--[no-]menus`, `--dry-run`, `--mapping`. Export also takes `--after`, `--exclude-meta`, `--no-meta`, `--no-woo` and `--[no-]gzip`. Anything left out uses the values from Settings.
+
+On/off flags also take a value: `--comments=no`, `--content-images=yes` (yes, no, true, false, 1 or 0). When records are already on the site and `--duplicates` is left out, the import asks; with `--yes`, in a dry run or without a terminal it skips them instead, or imports them as copies if you passed `--duplicate=create`. An import with failed records ends with an error and a non-zero exit status, after the summary, so scripts can catch it. `wp migrateplus resume` only continues imports that were started.
 
 ### Mapping file
 
@@ -136,7 +138,7 @@ With WooCommerce active, a product export also carries SKU, prices and sale date
 
 ## Find & Replace
 
-Replaces text in the tables you choose, for example an old domain after a migration. It starts as a dry run with sample changes per table. URLs only match whole (`http://old.test` leaves `http://old.test.example.com` alone), serialized data stays valid, GUIDs and MigratePlus's own data are skipped, and tables without a primary key are left out. Real runs can be rolled back from **Past replacements**; values edited since are kept. Back up the database before a big run anyway.
+Replaces text in the tables you choose, for example an old domain after a migration. It starts as a dry run with sample changes per table. URLs only match whole (`http://old.test` leaves `http://old.test.example.com` alone), serialized data stays valid, GUIDs and Migrate Plus's own data are skipped, and tables without a primary key are left out. Real runs can be rolled back from **Past replacements**; values edited since are kept. Back up the database before a big run anyway.
 
 ## Hooks
 
@@ -172,7 +174,7 @@ Items are in import order, Media first. `post_type` appears in the header only w
 
 ## Upgrading from PressPort
 
-MigratePlus used to be called PressPort. The first time the renamed plugin loads it moves settings, history, saved mappings, tracking data and the uploads folder over, so re-imports still recognise earlier content. Files exported under the old name still import. The CLI command is now `wp migrateplus` and hooks start with `migrateplus_`.
+Migrate Plus used to be called PressPort. The first time the renamed plugin loads it moves settings, history, saved mappings, tracking data and the uploads folder over, so re-imports still recognise earlier content. Files exported under the old name still import. The CLI command is now `wp migrateplus` and hooks start with `migrateplus_`.
 
 ## Contributing
 

@@ -12,6 +12,8 @@ class MigratePlus_Settings {
 	const OPTION = 'migrateplus_settings';
 	const GROUP  = 'migrateplus_settings_group';
 	const PAGE   = 'migrateplus-settings';
+	// Result of storage_public(): public, private or unknown.
+	const PROBE_TRANSIENT = 'migrateplus_storage_probe';
 
 	/**
 	 * Cached merged settings for the request.
@@ -157,7 +159,7 @@ class MigratePlus_Settings {
 						'pending' => __( 'Pending review', 'migrateplus' ),
 						'private' => __( 'Private', 'migrateplus' ),
 					),
-					__( 'Used when a record has no status, or one MigratePlus does not recognise.', 'migrateplus' ),
+					__( 'Used when a record has no status, or one Migrate Plus does not recognise.', 'migrateplus' ),
 				),
 				'force_status'          => array(
 					'select',
@@ -187,9 +189,9 @@ class MigratePlus_Settings {
 				'import_content_images' => array( 'checkbox', __( 'Images in content', 'migrateplus' ), __( 'Download images found inside post content and rewrite their URLs', 'migrateplus' ) ),
 				'create_terms'          => array( 'checkbox', __( 'Terms', 'migrateplus' ), __( 'Create categories, tags and terms that don\'t exist yet', 'migrateplus' ) ),
 				'create_authors'        => array( 'checkbox', __( 'Authors', 'migrateplus' ), __( 'Create users for authors that don\'t exist yet (Author role, random password)', 'migrateplus' ) ),
-				'rewrite_links'         => array( 'checkbox', __( 'Links', 'migrateplus' ), __( 'Point links to the old site at this one', 'migrateplus' ), __( 'MigratePlus exports only. Changes links in post content; images and files in wp-content still point at the old site unless "Images in content" copies them.', 'migrateplus' ) ),
-				'import_comments'       => array( 'checkbox', __( 'Comments', 'migrateplus' ), __( 'Add the comments a MigratePlus export carries to the imported posts', 'migrateplus' ), __( 'Importing the same file again updates the comments it added before instead of adding them twice.', 'migrateplus' ) ),
-				'import_menus'          => array( 'checkbox', __( 'Menus', 'migrateplus' ), __( 'Import the navigation menus a MigratePlus export carries', 'migrateplus' ), __( 'After all posts. A menu with the same slug is filled rather than copied, and theme locations are only set when this theme has them.', 'migrateplus' ) ),
+				'rewrite_links'         => array( 'checkbox', __( 'Links', 'migrateplus' ), __( 'Point links to the old site at this one', 'migrateplus' ), __( 'Migrate Plus exports only. Changes links in post content; images and files in wp-content still point at the old site unless "Images in content" copies them.', 'migrateplus' ) ),
+				'import_comments'       => array( 'checkbox', __( 'Comments', 'migrateplus' ), __( 'Add the comments a Migrate Plus export carries to the imported posts', 'migrateplus' ), __( 'Importing the same file again updates the comments it added before instead of adding them twice.', 'migrateplus' ) ),
+				'import_menus'          => array( 'checkbox', __( 'Menus', 'migrateplus' ), __( 'Import the navigation menus a Migrate Plus export carries', 'migrateplus' ), __( 'After all posts. A menu with the same slug is filled rather than copied, and theme locations are only set when this theme has them.', 'migrateplus' ) ),
 			),
 			'migrateplus_export'       => array(
 				'export_statuses'         => array( 'checkboxes', __( 'Status', 'migrateplus' ), self::export_statuses() ),
@@ -200,14 +202,14 @@ class MigratePlus_Settings {
 				'export_include_woo'      => array( 'checkbox', __( 'WooCommerce', 'migrateplus' ), __( 'Product data (prices, stock, attributes, variations)', 'migrateplus' ) ),
 				'export_include_comments' => array( 'checkbox', __( 'Comments', 'migrateplus' ), __( 'Approved comments and replies', 'migrateplus' ), __( 'Pending, spam and trashed comments are left out.', 'migrateplus' ) ),
 				'export_include_menus'    => array( 'checkbox', __( 'Menus', 'migrateplus' ), __( 'Navigation menus, their items and theme locations', 'migrateplus' ), __( 'Menu items point at posts and terms, so export the content they link to in the same file.', 'migrateplus' ) ),
-				'export_gzip'             => array( 'checkbox', __( 'Compression', 'migrateplus' ), __( 'Compress the file (.json.gz)', 'migrateplus' ), __( 'Much smaller, for a site whose upload limit is lower than the export. MigratePlus imports it as it is.', 'migrateplus' ) ),
+				'export_gzip'             => array( 'checkbox', __( 'Compression', 'migrateplus' ), __( 'Compress the file (.json.gz)', 'migrateplus' ), __( 'Much smaller, for a site whose upload limit is lower than the export. Migrate Plus imports it as it is.', 'migrateplus' ) ),
 				'export_exclude_meta'     => array( 'textarea', __( 'Leave out these custom fields', 'migrateplus' ), null, __( 'One meta key per line. End a line with * to leave out every key that starts with it, e.g. rank_math_*. Keys starting with "_" are always left out.', 'migrateplus' ) ),
 			),
 			'migrateplus_access'       => array(
 				'capability' => array( 'select', __( 'Who can run imports', 'migrateplus' ), self::access_levels(), __( 'Only administrators can change these settings.', 'migrateplus' ) ),
 			),
 			'migrateplus_connections'  => array(
-				'request_timeout'     => array( 'number', __( 'Download timeout', 'migrateplus' ), array( 5, 300 ), __( 'Seconds to wait for each file MigratePlus downloads. Values under 60 count as 60.', 'migrateplus' ), __( 'seconds', 'migrateplus' ) ),
+				'request_timeout'     => array( 'number', __( 'Download timeout', 'migrateplus' ), array( 5, 300 ), __( 'Seconds to wait for each file Migrate Plus downloads. Values under 60 count as 60.', 'migrateplus' ), __( 'seconds', 'migrateplus' ) ),
 				'max_remote_size'     => array( 'number', __( 'Remote file size limit', 'migrateplus' ), array( 1, 2048 ), __( 'Only for custom sources added with the migrateplus_sources filter that read their file from a URL: the largest file they may download. Uploaded JSON files are limited by the server\'s upload size instead.', 'migrateplus' ), __( 'MB', 'migrateplus' ) ),
 				'max_media_size'      => array( 'number', __( 'Image and media size limit', 'migrateplus' ), array( 0, 2048 ), __( 'Skip images and media files larger than this when importing. 0 means no limit.', 'migrateplus' ), __( 'MB', 'migrateplus' ) ),
 				'allow_local_sources' => array( 'checkbox', __( 'Local sources', 'migrateplus' ), __( 'Allow downloads from localhost, private network addresses and non-standard ports', 'migrateplus' ), __( 'Turn this on to migrate from a local dev site (for example http://oldsite.test:8888). WordPress blocks these addresses by default; this only relaxes the rule for MigratePlus\'s own requests.', 'migrateplus' ) ),
@@ -246,7 +248,7 @@ class MigratePlus_Settings {
 	}
 
 	public static function section_downloads() {
-		echo '<p>' . esc_html__( 'While importing, MigratePlus downloads files from the old site: featured images, images in post content, Media Library files and WooCommerce download files. These limits apply to those downloads.', 'migrateplus' ) . '</p>';
+		echo '<p>' . esc_html__( 'While importing, Migrate Plus downloads files from the old site: featured images, images in post content, Media Library files and WooCommerce download files. These limits apply to those downloads.', 'migrateplus' ) . '</p>';
 	}
 
 	public static function section_export() {
@@ -404,11 +406,11 @@ class MigratePlus_Settings {
 	 */
 	public static function render() {
 		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_die( esc_html__( 'Only administrators can change MigratePlus settings.', 'migrateplus' ) );
+			wp_die( esc_html__( 'Only administrators can change Migrate Plus settings.', 'migrateplus' ) );
 		}
 		?>
 		<div class="wrap migrateplus-wrap migrateplus-settings">
-			<h1><?php esc_html_e( 'MigratePlus Settings', 'migrateplus' ); ?></h1>
+			<h1><?php esc_html_e( 'Migrate Plus Settings', 'migrateplus' ); ?></h1>
 			<?php settings_errors(); ?>
 			<div class="migrateplus-settings-layout">
 				<form action="options.php" method="post" class="migrateplus-card">
@@ -470,6 +472,17 @@ class MigratePlus_Settings {
 				$zlib,
 			),
 		);
+
+		$public = self::storage_public();
+		if ( null !== $public ) {
+			$rows[] = array(
+				__( 'Private files', 'migrateplus' ),
+				$public ? __( 'Readable from the web', 'migrateplus' ) : __( 'Not readable from the web', 'migrateplus' ),
+				! $public,
+				/* translators: %s: folder path */
+				$public ? sprintf( __( 'Exports and rollback files in %s can be downloaded by anyone who guesses their name. Apache obeys the .htaccess file there; nginx, IIS and Caddy ignore it and need a rule in the server configuration that denies access to the folder.', 'migrateplus' ), $dir ) : '',
+			);
+		}
 		echo '<table class="migrateplus-status-table"><tbody>';
 		foreach ( $rows as $row ) {
 			printf(
@@ -483,6 +496,41 @@ class MigratePlus_Settings {
 		echo '</tbody></table>';
 		echo '<p class="description">' . esc_html__( 'Large files or slow servers? Run imports from the command line instead:', 'migrateplus' ) . '</p>';
 		echo '<p><code>wp migrateplus import json --file=export.json</code></p>';
+	}
+
+	/**
+	 * Whether files in the storage folder can be fetched over HTTP. It is only
+	 * protected by .htaccess, which nothing but Apache reads. Checked by asking
+	 * for a throwaway file, at most once an hour, as it costs a request to this site.
+	 *
+	 * @return bool|null Null when the check could not tell (no folder, or the site can't reach itself).
+	 */
+	public static function storage_public() {
+		$cached = get_transient( self::PROBE_TRANSIENT );
+		if ( false !== $cached ) {
+			return 'unknown' === $cached ? null : 'public' === $cached;
+		}
+		$result = 'unknown';
+		$dir    = MigratePlus_Util::storage_dir();
+		$name   = 'probe-' . wp_generate_password( 12, false ) . '.txt';
+		$token  = wp_generate_password( 32, false );
+		// No folder yet means nothing in it to protect; it is checked once something creates it.
+		if ( is_dir( $dir ) && wp_is_writable( $dir ) && false !== file_put_contents( $dir . $name, $token ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
+			$uploads  = wp_upload_dir( null, false );
+			$response = wp_remote_get(
+				trailingslashit( $uploads['baseurl'] ) . 'migrateplus/' . $name,
+				array(
+					'timeout'   => 5,
+					'sslverify' => false, // Only this site, which often has a self-signed certificate on staging.
+				)
+			);
+			wp_delete_file( $dir . $name );
+			if ( ! is_wp_error( $response ) ) {
+				$result = 200 === wp_remote_retrieve_response_code( $response ) && wp_remote_retrieve_body( $response ) === $token ? 'public' : 'private';
+			}
+		}
+		set_transient( self::PROBE_TRANSIENT, $result, HOUR_IN_SECONDS );
+		return 'unknown' === $result ? null : 'public' === $result;
 	}
 
 	/**

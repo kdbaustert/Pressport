@@ -671,6 +671,22 @@ class Test_Import_Export extends WP_UnitTestCase {
 		$this->assertSame( 'pending', get_post_status( $this->imported( 2, 'post' )[0] ) );
 	}
 
+	public function test_a_false_status_imports_as_a_draft() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		// JSON false, not the string: flatten() keeps the boolean and stringify() must read it as 0.
+		$file = $this->export_file( array( $this->item( 1, false ), $this->item( 2, true ) ) );
+		$this->import_file(
+			$file,
+			array(
+				'force_status'   => '',
+				'default_status' => 'pending',
+			)
+		)->delete();
+		wp_delete_file( $file );
+		$this->assertSame( 'draft', get_post_status( $this->imported( 1, 'post' )[0] ) );
+		$this->assertSame( 'publish', get_post_status( $this->imported( 2, 'post' )[0] ) );
+	}
+
 	public function test_finished_import_flushes_rewrite_rules_once_and_dry_runs_do_not() {
 		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
 		$this->set_permalink_structure( '/%postname%/' );
@@ -1792,5 +1808,616 @@ class Test_Import_Export extends WP_UnitTestCase {
 		wp_delete_file( $x['file'] );
 		$this->assertStringContainsString( 'Would update menu "Main": 5 items added, 0 updated, 1 skipped, in the existing menu "Header".', implode( "\n", wp_list_pluck( $dry->data['log'], 'm' ) ) );
 		$dry->delete();
+	}
+
+	/**
+	 * A MigratePlus export from the given site with the given field mapping.
+	 *
+	 * @param string  $site   Site.
+	 * @param array   $fields Mapping fields.
+	 * @param array[] $items  Items.
+	 * @param array   $header More header keys.
+	 * @return string Path.
+	 */
+	protected function mapped_file( $site, array $fields, array $items, array $header = array() ) {
+		return $this->json_file(
+			array(
+				'migrateplus' => $header + array(
+					'site'    => $site,
+					'mapping' => array( 'fields' => $fields ),
+				),
+				'items'       => $items,
+			)
+		);
+	}
+
+	public function test_update_leaves_fields_the_record_lacks_alone() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$full = $this->mapped_file(
+			'http://partial.test',
+			array(
+				'source_id'    => 'id',
+				'post_title'   => 'title',
+				'post_content' => 'content',
+			),
+			array(
+				array(
+					'id'      => 1,
+					'title'   => 'First',
+					'content' => 'Body',
+				),
+			)
+		);
+		$this->import_file( $full )->delete();
+		wp_delete_file( $full );
+
+		$titles = $this->mapped_file(
+			'http://partial.test',
+			array(
+				'source_id'  => 'id',
+				'post_title' => 'title',
+			),
+			array(
+				array(
+					'id'    => 1,
+					'title' => 'Renamed',
+				),
+			)
+		);
+		$job    = $this->import_file( $titles, array( 'duplicate' => 'update' ) );
+		wp_delete_file( $titles );
+
+		$post = get_post( $this->imported( 1, 'post' )[0] );
+		$this->assertSame( 'Renamed', $post->post_title );
+		$this->assertSame( 'Body', $post->post_content );
+		$changes = MigratePlus_Importer::changes_for(
+			array(
+				'id'    => 1,
+				'title' => 'Renamed again',
+			),
+			$job,
+			$post->ID,
+			'post'
+		);
+		$this->assertSame( array( 'title' ), array_keys( $changes ) );
+		$job->delete();
+	}
+
+	public function test_updating_media_keeps_its_description_and_backslashes_in_alt_text() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$attachment = self::factory()->attachment->create_object(
+			'pic.jpg',
+			0,
+			array(
+				'post_mime_type' => 'image/jpeg',
+				'post_title'     => 'Pic',
+				'post_content'   => 'A description',
+			)
+		);
+		update_post_meta( $attachment, '_migrateplus_source_uid', md5( 'json|http://media.test|9' ) );
+		$file = $this->mapped_file(
+			'http://media.test',
+			array(
+				'source_id'  => 'id',
+				'post_type'  => 'post_type',
+				'post_title' => 'title',
+				'media_url'  => 'file',
+				'media_alt'  => 'alt',
+			),
+			array(
+				array(
+					'id'        => 9,
+					'post_type' => 'attachment',
+					'title'     => 'New pic',
+					'file'      => 'http://media.test/pic.jpg',
+					'alt'       => 'C:\\pics\\a',
+				),
+			),
+			array( 'post_type' => 'attachment' )
+		);
+		$job  = $this->import_file( $file, array( 'duplicate' => 'update' ) );
+		wp_delete_file( $file );
+
+		$this->assertSame( 1, $job->data['stats']['updated'] );
+		$this->assertSame( 'New pic', get_post( $attachment )->post_title );
+		$this->assertSame( 'A description', get_post( $attachment )->post_content );
+		$this->assertSame( 'C:\\pics\\a', get_post_meta( $attachment, '_wp_attachment_image_alt', true ) );
+		$job->delete();
+	}
+
+	public function test_source_ids_keep_their_backslashes() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$file = $this->mapped_file(
+			'http://slashes.test',
+			array(
+				'source_id'  => 'id',
+				'post_title' => 'title',
+			),
+			array(
+				array(
+					'id'    => 'DOMAIN\\42',
+					'title' => 'Slashed',
+				),
+			)
+		);
+		$job  = $this->import_file( $file );
+		wp_delete_file( $file );
+
+		$ids = $this->imported( 'DOMAIN\\42', 'post' );
+		$this->assertCount( 1, $ids );
+		$this->assertSame( 'DOMAIN\\42', get_post_meta( $ids[0], '_migrateplus_source_id', true ) );
+		$job->delete();
+	}
+
+	/**
+	 * A parent skipped because a page with its slug is already here never got a uid, so
+	 * its child is linked to that page by the slug the record carries.
+	 */
+	public function test_child_links_to_a_parent_skipped_as_already_on_this_site() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$here = self::factory()->post->create(
+			array(
+				'post_type'  => 'page',
+				'post_title' => 'Handbook',
+				'post_name'  => 'handbook',
+			)
+		);
+		$file = $this->mapped_file(
+			'http://skip.test',
+			array(
+				'source_id'   => 'id',
+				'post_type'   => 'post_type',
+				'post_title'  => 'title',
+				'post_name'   => 'slug',
+				'post_parent' => 'parent.id',
+			),
+			array(
+				array(
+					'id'        => 1,
+					'post_type' => 'page',
+					'title'     => 'Handbook',
+					'slug'      => 'handbook',
+				),
+				array(
+					'id'        => 2,
+					'post_type' => 'page',
+					'title'     => 'Chapter',
+					'slug'      => 'chapter',
+					'parent'    => array(
+						'id'   => 1,
+						'slug' => 'handbook',
+						'type' => 'page',
+					),
+				),
+			),
+			array( 'post_type' => 'page' )
+		);
+		$job  = $this->import_file( $file, array( 'skip_existing' => 1 ) );
+		wp_delete_file( $file );
+
+		$this->assertSame( 1, $job->data['stats']['skipped'] );
+		$this->assertSame( 1, $job->data['stats']['created'] );
+		$child = $this->imported( 2, 'page' )[0];
+		$this->assertSame( $here, (int) get_post( $child )->post_parent );
+		$this->assertSame( '', get_post_meta( $child, '_migrateplus_parent_uid', true ) );
+		$job->delete();
+	}
+
+	/**
+	 * "Import as copies" puts each new child under the new copy of its parent, not the one an earlier import made.
+	 */
+	public function test_copies_link_to_the_parents_copied_with_them() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$file = $this->mapped_file(
+			'http://copies.test',
+			array(
+				'source_id'   => 'id',
+				'post_type'   => 'post_type',
+				'post_title'  => 'title',
+				'post_parent' => 'parent.id',
+			),
+			array(
+				array(
+					'id'        => 1,
+					'post_type' => 'page',
+					'title'     => 'Parent',
+				),
+				array(
+					'id'        => 2,
+					'post_type' => 'page',
+					'title'     => 'Child',
+					'parent'    => array( 'id' => 1 ),
+				),
+			),
+			array( 'post_type' => 'page' )
+		);
+		$this->import_file( $file )->delete();
+		$job = $this->import_file( $file, array( 'duplicate' => 'create' ) );
+		wp_delete_file( $file );
+
+		$copies = array();
+		foreach ( get_posts(
+			array(
+				'post_type'  => 'page',
+				'meta_key'   => '_migrateplus_job_id', // phpcs:ignore WordPress.DB.SlowDBQuery
+				'meta_value' => $job->data['id'], // phpcs:ignore WordPress.DB.SlowDBQuery
+			)
+		) as $post ) {
+			$copies[ $post->post_title ] = $post;
+		}
+		$this->assertCount( 2, $copies );
+		$this->assertSame( $copies['Parent']->ID, (int) $copies['Child']->post_parent );
+		$job->delete();
+	}
+
+	public function test_titles_keep_less_than_signs_and_excerpts_keep_their_html() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$file = $this->mapped_file(
+			'http://html.test',
+			array(
+				'source_id'    => 'id',
+				'post_title'   => 'title',
+				'post_excerpt' => 'excerpt',
+			),
+			array(
+				array(
+					'id'      => 1,
+					'title'   => 'I &lt;3 PHP and a<b <em>really</em>',
+					'excerpt' => '<p>Short <strong>intro</strong></p><script>alert(1)</script>',
+				),
+			)
+		);
+		$job  = $this->import_file( $file );
+		wp_delete_file( $file );
+
+		$post = get_post( $this->imported( 1, 'post' )[0] );
+		$this->assertSame( 'I <3 PHP and a<b really', $post->post_title );
+		$this->assertSame( '<p>Short <strong>intro</strong></p>alert(1)', $post->post_excerpt );
+		$job->delete();
+	}
+
+	/**
+	 * Fields WordPress, WooCommerce and Migrate Plus keep for themselves are not written from a
+	 * file, each reported once per job; other underscore fields (SEO plugins) still are.
+	 */
+	public function test_protected_custom_fields_are_skipped_and_reported_once() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$items = array();
+		foreach ( array( 1, 2 ) as $id ) {
+			$items[] = array(
+				'id'       => $id,
+				'title'    => 'Item ' . $id,
+				'template' => 'templates/missing.php',
+				'meta'     => array(
+					'_thumbnail_id'       => '999',
+					'_migrateplus_job_id' => 'forged',
+					'_yoast_wpseo_title'  => 'SEO title',
+				),
+			);
+		}
+		$meta = array();
+		foreach ( array( '_thumbnail_id', '_migrateplus_job_id', '_yoast_wpseo_title' ) as $key ) {
+			$meta[] = array(
+				'key'    => $key,
+				'source' => 'meta.' . $key,
+			);
+		}
+		$file = $this->json_file(
+			array(
+				'migrateplus' => array(
+					'site'      => 'http://protected.test',
+					'post_type' => 'page',
+					'mapping'   => array(
+						'fields' => array(
+							'source_id'     => 'id',
+							'post_title'    => 'title',
+							'page_template' => 'template',
+							'bogus_target'  => 'id',
+						),
+						'meta'   => $meta,
+					),
+				),
+				'items'       => $items,
+			)
+		);
+		$job  = $this->import_file( $file );
+		wp_delete_file( $file );
+
+		$this->assertArrayNotHasKey( 'bogus_target', $job->data['mapping']['fields'] );
+		foreach ( array( 1, 2 ) as $id ) {
+			$post = $this->imported( $id, 'page' )[0];
+			$this->assertSame( 'SEO title', get_post_meta( $post, '_yoast_wpseo_title', true ) );
+			$this->assertSame( '', get_post_meta( $post, '_thumbnail_id', true ) );
+			$this->assertSame( $job->data['id'], get_post_meta( $post, '_migrateplus_job_id', true ) );
+			$this->assertSame( '', get_post_meta( $post, '_wp_page_template', true ) );
+		}
+		$this->assertSame(
+			array(
+				'Page template "templates/missing.php" is not in the active theme, so it was not set.',
+				'Custom field "_thumbnail_id" is kept by WordPress, WooCommerce or Migrate Plus, so it was not imported.',
+				'Custom field "_migrateplus_job_id" is kept by WordPress, WooCommerce or Migrate Plus, so it was not imported.',
+			),
+			array_values( wp_list_pluck( wp_list_filter( $job->data['log'], array( 'l' => 'warning' ) ), 'm' ) )
+		);
+		$job->delete();
+	}
+
+	/**
+	 * Without the type's publish or edit-others capability, a new post waits for review under
+	 * the user's own name; a post the user may not edit is not updated.
+	 */
+	public function test_imports_respect_the_users_capabilities() {
+		$other  = self::factory()->user->create(
+			array(
+				'role'       => 'editor',
+				'user_email' => 'other@site.test',
+			)
+		);
+		$theirs = self::factory()->post->create(
+			array(
+				'post_title'  => 'Theirs',
+				'post_author' => $other,
+			)
+		);
+		update_post_meta( $theirs, '_migrateplus_source_uid', md5( 'json|http://caps.test|2' ) );
+		$contributor = self::factory()->user->create( array( 'role' => 'contributor' ) );
+		wp_set_current_user( $contributor );
+		$file = $this->mapped_file(
+			'http://caps.test',
+			array(
+				'source_id'    => 'id',
+				'post_title'   => 'title',
+				'post_content' => 'content',
+				'post_status'  => 'status',
+				'post_author'  => 'author',
+			),
+			array(
+				array(
+					'id'      => 1,
+					'title'   => 'Mine',
+					'content' => 'x',
+					'status'  => 'publish',
+					'author'  => 'other@site.test',
+				),
+				array(
+					'id'      => 2,
+					'title'   => 'Taken over',
+					'content' => 'x',
+				),
+			)
+		);
+		$job  = $this->import_file(
+			$file,
+			array(
+				'duplicate'      => 'update',
+				'default_author' => $contributor,
+			)
+		);
+		wp_delete_file( $file );
+
+		$mine = get_post( $this->imported( 1, 'post' )[0] );
+		$this->assertSame( 'pending', $mine->post_status );
+		$this->assertSame( $contributor, (int) $mine->post_author );
+		$this->assertSame( 1, $job->data['stats']['created'] );
+		$this->assertSame( 1, $job->data['stats']['failed'] );
+		$this->assertSame( 'Theirs', get_the_title( $theirs ) );
+		$this->assertSame(
+			array(
+				'Created "Mine" (#' . $mine->ID . '). Warnings: You are not allowed to publish, so it was saved as pending review. You are not allowed to give it another author, so you are its author.',
+				'Not updated: you are not allowed to edit "Taken over" (#' . $theirs . ').',
+			),
+			array_values(
+				wp_list_pluck(
+					array_filter(
+						$job->data['log'],
+						static function ( $line ) {
+							return in_array( $line['l'], array( 'warning', 'error' ), true );
+						}
+					),
+					'm'
+				)
+			)
+		);
+		$job->delete();
+	}
+
+	public function test_imported_reviews_count_towards_the_products_rating() {
+		if ( ! class_exists( 'WooCommerce' ) ) {
+			$this->markTestSkipped( 'WooCommerce is not installed.' );
+		}
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$file    = $this->mapped_file(
+			'http://shop.test',
+			array(
+				'source_id'  => 'id',
+				'post_type'  => 'post_type',
+				'post_title' => 'title',
+				'comments'   => 'comments',
+			),
+			array(
+				array(
+					'id'        => 1,
+					'post_type' => 'product',
+					'title'     => 'Mug',
+					'comments'  => array(
+						array(
+							'id'           => 5,
+							'author'       => 'Ann',
+							'author_email' => 'ann@shop.test',
+							'content'      => 'Great mug',
+							'type'         => 'review',
+							'approved'     => '1',
+							'meta'         => array( 'rating' => '4' ),
+						),
+					),
+				),
+			),
+			array( 'post_type' => 'product' )
+		);
+		$preview = MigratePlus_Runner::preview( 'json', array( 'file' => $file ), 5 );
+		wp_delete_file( $file );
+		$job                                     = $preview['job'];
+		$job->data['options']['import_comments'] = 1;
+		// Straight to the importer: run_batch() defers comment counting, which recounts after the batch and hides this.
+		$result = MigratePlus_Importer::import( $preview['records'][0], $job );
+
+		$product = wc_get_product( $result['post_id'] );
+		$this->assertSame( array( 4 => 1 ), $product->get_rating_counts() );
+		$this->assertSame( '4.00', $product->get_average_rating() );
+		$this->assertSame( 1, $product->get_review_count() );
+		$job->delete();
+	}
+
+	/**
+	 * A small export for the batch tests: three posts.
+	 *
+	 * @return MigratePlus_Job Previewed, not started.
+	 */
+	protected function three_post_job() {
+		$file    = $this->export_file( array( $this->item( 1 ), $this->item( 2 ), $this->item( 3 ) ) );
+		$preview = MigratePlus_Runner::preview( 'json', array( 'file' => $file ), 5 );
+		wp_delete_file( $file );
+		$job                                = $preview['job'];
+		$job->data['options']['batch_size'] = 3;
+		$job->save();
+		return $job;
+	}
+
+	public function test_batches_save_progress_after_each_record() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$job   = $this->three_post_job();
+		$saved = array();
+		$spy   = static function ( $post_id, $record, $running ) use ( &$saved ) {
+			$saved[] = MigratePlus_Job::load( $running->data['id'] )->data['stats']['processed'];
+		};
+		add_action( 'migrateplus_after_import_record', $spy, 10, 3 );
+		MigratePlus_Runner::run_batch( $job );
+		remove_action( 'migrateplus_after_import_record', $spy, 10 );
+
+		$this->assertSame( array( 0, 1, 2 ), $saved );
+		$this->assertSame( 0, MigratePlus_Job::load( $job->data['id'] )->data['cursor_skip'] );
+		$job->delete();
+	}
+
+	public function test_a_batch_cut_short_resumes_after_its_last_saved_record() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$job                             = $this->three_post_job();
+		$job->data['cursor_skip']        = 2; // As saved by a request that died after its second record.
+		$job->data['stats']['processed'] = 2;
+		$job->save();
+
+		$result = MigratePlus_Runner::run_batch( $job );
+		$this->assertIsArray( $result );
+		$this->assertTrue( $result['done'] );
+		$this->assertCount( 1, $result['results'] );
+		$this->assertSame( 3, $job->data['stats']['processed'] );
+		$this->assertSame( array(), $this->imported( 1, 'post' ) );
+		$this->assertCount( 1, $this->imported( 3, 'post' ) );
+		$job->delete();
+	}
+
+	/**
+	 * A batch that outlived its lock, taken over by a retry, must not save over the retry's progress.
+	 */
+	public function test_a_batch_that_lost_its_lock_stops_without_saving() {
+		global $wpdb;
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$job      = $this->three_post_job();
+		$name     = 'migrateplus_lock_' . $job->data['id'];
+		$retry    = ( time() + 300 ) . ':retry';
+		$takeover = static function () use ( $wpdb, $name, $retry ) {
+			$wpdb->update( $wpdb->options, array( 'option_value' => $retry ), array( 'option_name' => $name ) );
+		};
+		add_action( 'migrateplus_after_import_record', $takeover );
+		$result = MigratePlus_Runner::run_batch( $job );
+		remove_action( 'migrateplus_after_import_record', $takeover );
+
+		$this->assertWPError( $result );
+		$this->assertSame( 'migrateplus_locked', $result->get_error_code() );
+		$saved = MigratePlus_Job::load( $job->data['id'] );
+		$this->assertSame( 0, $saved->data['stats']['processed'] );
+		$this->assertSame( 0, $saved->data['cursor_skip'] );
+		$this->assertSame( $retry, $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", $name ) ) );
+		$wpdb->delete( $wpdb->options, array( 'option_name' => $name ) );
+		$job->delete();
+	}
+
+	public function test_run_batch_and_rollback_refuse_a_locked_job() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$job  = $this->three_post_job();
+		$lock = MigratePlus_Runner::lock( $job );
+
+		$batch = MigratePlus_Runner::run_batch( $job );
+		$this->assertWPError( $batch );
+		$this->assertSame( 'migrateplus_locked', $batch->get_error_code() );
+		$this->assertSame(
+			array(
+				'deleted'   => 0,
+				'remaining' => 0,
+				'done'      => true,
+				'error'     => 'An import batch for this job is running. Try again when it finishes.',
+			),
+			MigratePlus_Runner::rollback_batch( $job )
+		);
+		$this->assertSame( array(), $this->imported( 1, 'post' ) );
+		MigratePlus_Runner::unlock( $job, $lock );
+		$job->delete();
+	}
+
+	public function test_a_lock_left_by_a_request_that_died_expires() {
+		global $wpdb;
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$job  = $this->three_post_job();
+		$name = 'migrateplus_lock_' . $job->data['id'];
+		$wpdb->insert(
+			$wpdb->options,
+			array(
+				'option_name'  => $name,
+				'option_value' => ( time() - 1 ) . ':dead',
+				'autoload'     => 'no',
+			)
+		);
+
+		$result = MigratePlus_Runner::run_batch( $job );
+		$this->assertIsArray( $result );
+		$this->assertTrue( $result['done'] );
+		$this->assertSame( 3, $job->data['stats']['created'] );
+		$this->assertNull( $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", $name ) ) );
+		$job->delete();
+	}
+
+	/**
+	 * Products imported while WooCommerce was on are still rolled back once it is off.
+	 */
+	public function test_rollback_deletes_posts_of_a_type_no_longer_registered() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		register_post_type( 'pp_gone', array( 'show_ui' => true ) );
+		$file = $this->mapped_file(
+			'http://gone.test',
+			array(
+				'source_id'  => 'id',
+				'post_title' => 'title',
+			),
+			array(
+				array(
+					'id'    => 1,
+					'title' => 'Soon unregistered',
+				),
+			),
+			array( 'post_type' => 'pp_gone' )
+		);
+		$job  = $this->import_file( $file );
+		wp_delete_file( $file );
+		$id = $this->imported( 1, 'pp_gone' )[0];
+		unregister_post_type( 'pp_gone' );
+
+		$this->assertSame( 1, $job->imported_count() );
+		do {
+			$result = MigratePlus_Runner::rollback_batch( $job );
+		} while ( ! $result['done'] );
+		$this->assertSame( '', $result['error'] );
+		$this->assertSame( 'rolled_back', $job->data['status'] );
+		$this->assertNull( get_post( $id ) );
+		$job->delete();
 	}
 }
