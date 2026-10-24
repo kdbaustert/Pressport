@@ -1,8 +1,7 @@
 {
 	"source": "json",
 	"settings": {
-		"url": "https://example.com/feed.json",
-		"records_path": "items"
+		"file": "./feed.json"
 	},
 	"mapping": {
 		"fields": {

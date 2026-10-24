@@ -18,11 +18,18 @@ defined( 'ABSPATH' ) || exit;
 class PressPort_ACF {
 
 	/**
+	 * Post meta holding relationship links that wait for a later post.
+	 *
+	 * @var string
+	 */
+	const PENDING_META = '_pressport_acf_pending';
+
+	/**
 	 * Field types that hold no data.
 	 *
 	 * @var string[]
 	 */
-	const LAYOUT_TYPES = array( 'tab', 'message', 'accordion', 'clone' );
+	const LAYOUT_TYPES = array( 'tab', 'message', 'accordion' );
 
 	/**
 	 * Whether ACF (free or Pro) is active.
@@ -37,14 +44,19 @@ class PressPort_ACF {
 	 * Top-level ACF fields shown for a post type, grouped by field group.
 	 *
 	 * @param string $post_type Post type.
+	 * @param int    $post_id   Optional post: groups shown by its terms, template or ID only match with it.
 	 * @return array[] { key, name, label, type, group, required, sub }
 	 */
-	public static function fields_for_post_type( $post_type ) {
+	public static function fields_for_post_type( $post_type, $post_id = 0 ) {
 		if ( ! self::active() ) {
 			return array();
 		}
-		$out = array();
-		foreach ( (array) acf_get_field_groups( array( 'post_type' => $post_type ) ) as $group ) {
+		$out  = array();
+		$args = array( 'post_type' => $post_type );
+		if ( $post_id ) {
+			$args['post_id'] = (int) $post_id;
+		}
+		foreach ( (array) acf_get_field_groups( $args ) as $group ) {
 			if ( isset( $group['active'] ) && ! $group['active'] ) {
 				continue;
 			}
@@ -115,10 +127,12 @@ class PressPort_ACF {
 	}
 
 	/**
-	 * Load a field by key or name.
+	 * Load a field by key, or by name among the top-level fields of the groups
+	 * shown on the post. ACF's own name lookup falls back to the first field with
+	 * that name anywhere on the site, sub fields included.
 	 *
 	 * @param string $selector Field key or name.
-	 * @param int    $post_id  Post id (helps resolve names).
+	 * @param int    $post_id  Post id (names resolve against its field groups).
 	 * @return array|false
 	 */
 	public static function get_field_object( $selector, $post_id = 0 ) {
@@ -128,13 +142,13 @@ class PressPort_ACF {
 				return $field;
 			}
 		}
-		if ( function_exists( 'acf_maybe_get_field' ) ) {
-			$field = acf_maybe_get_field( $selector, $post_id, false );
-			if ( $field ) {
-				return $field;
+		$type = $post_id ? get_post_type( $post_id ) : '';
+		foreach ( $type ? self::fields_for_post_type( $type, $post_id ) : array() as $f ) {
+			if ( $f['name'] === $selector ) {
+				return acf_get_field( $f['key'] );
 			}
 		}
-		return function_exists( 'acf_get_field' ) ? acf_get_field( $selector ) : false;
+		return false;
 	}
 
 	/**
@@ -250,6 +264,7 @@ class PressPort_ACF {
 		$ctx   = array(
 			'post_id'      => (int) $post_id,
 			'job_id'       => $job->data['id'],
+			'job'          => $job,
 			'base'         => (string) $base,
 			'create_terms' => ! empty( $opts['create_terms'] ),
 			'warnings'     => array(),
@@ -269,11 +284,16 @@ class PressPort_ACF {
 				$warnings[] = sprintf( __( 'ACF field "%s" was not found.', 'pressport' ), $selector );
 				continue;
 			}
-			$value = self::convert( $field, $raw, $ctx );
-			$value = apply_filters( 'pressport_acf_value', $value, $field, $raw, $post_id, $job );
+			// Only top-level relationship fields wait for posts later in the file; a row inside a
+			// repeater or group has no stable place to add the post to afterwards.
+			$ctx['defer']   = in_array( $field['type'], array( 'post_object', 'relationship' ), true );
+			$ctx['pending'] = array();
+			$value          = self::convert( $field, $raw, $ctx );
+			$value          = apply_filters( 'pressport_acf_value', $value, $field, $raw, $post_id, $job );
 			if ( update_field( $field['key'], $value, $post_id ) || null !== $value ) {
 				++$saved;
 			}
+			self::set_pending( (int) $post_id, $field['key'], $ctx['pending'] );
 		}
 		foreach ( array_unique( $ctx['warnings'] ) as $w ) {
 			$warnings[] = $w;
@@ -348,11 +368,14 @@ class PressPort_ACF {
 				$types = isset( $field['post_type'] ) ? array_filter( (array) $field['post_type'] ) : array();
 				$ids   = array();
 				foreach ( self::items( $value ) as $item ) {
-					$id = self::resolve_post( $item, $types );
+					$id = self::resolve_post( $item, $types, isset( $ctx['job'] ) ? $ctx['job'] : null );
 					if ( $id ) {
 						$ids[] = $id;
 					} elseif ( 'page_link' === $type && is_string( $item ) && preg_match( '#^https?://#', $item ) ) {
 						$ids[] = $item; // Page links may store plain URLs.
+					} elseif ( ! empty( $ctx['defer'] ) && is_array( $item ) && ! empty( $item['id'] ) ) {
+						// An exported post later in the file: linked when it is imported.
+						$ctx['pending'][] = PressPort_Importer::uid( $ctx['job'], $item['id'] );
 					} else {
 						/* translators: 1: field label, 2: value */
 						$ctx['warnings'][] = sprintf( __( 'ACF "%1$s": no post found for "%2$s".', 'pressport' ), $label, PressPort_Util::stringify( $item ) );
@@ -381,7 +404,7 @@ class PressPort_ACF {
 				}
 				if ( $names ) {
 					$create = $ctx['create_terms'] && ! empty( $field['add_term'] );
-					$ids    = array_merge( $ids, PressPort_Importer::resolve_terms( $tax, $names, $create ) );
+					$ids    = array_merge( $ids, PressPort_Importer::resolve_terms( $tax, $names, $create, $ctx['warnings'] ) );
 				}
 				$ids = array_values( array_unique( $ids ) );
 				$one = isset( $field['field_type'] ) && in_array( $field['field_type'], array( 'radio', 'select' ), true ) && empty( $field['multiple'] );
@@ -390,10 +413,12 @@ class PressPort_ACF {
 			case 'user':
 				$ids = array();
 				foreach ( self::items( $value ) as $item ) {
-					$item = is_array( $item ) ? ( isset( $item['user_email'] ) ? $item['user_email'] : ( isset( $item['ID'] ) ? $item['ID'] : '' ) ) : $item;
-					$id   = is_numeric( $item ) && get_userdata( (int) $item ) ? (int) $item : PressPort_Importer::resolve_author( (string) $item, false );
+					$id = self::resolve_user( $item );
 					if ( $id ) {
-						$ids[] = (int) $id;
+						$ids[] = $id;
+					} else {
+						/* translators: 1: field label, 2: user */
+						$ctx['warnings'][] = sprintf( __( 'ACF "%1$s": no user found for "%2$s".', 'pressport' ), $label, is_array( $item ) ? implode( ', ', array_filter( array_map( 'strval', $item ) ) ) : PressPort_Util::stringify( $item ) );
 					}
 				}
 				$ids = array_values( array_unique( $ids ) );
@@ -426,6 +451,7 @@ class PressPort_ACF {
 				}
 				return is_array( $value ) ? $value : array( 'address' => (string) $value );
 
+			case 'clone': // Stores its cloned fields' values, read and written like a group's.
 			case 'group':
 				$row = self::maybe_json( $value );
 				return is_array( $row ) ? self::convert_row( (array) $field['sub_fields'], $row, $ctx ) : array();
@@ -602,32 +628,124 @@ class PressPort_ACF {
 	}
 
 	/**
+	 * Remember the posts a relationship field still waits for, as "field_key|source_uid"
+	 * rows. A re-import replaces the field's old rows.
+	 *
+	 * @param int      $post_id    Post id.
+	 * @param string   $field_key  ACF field key.
+	 * @param string[] $source_ids Source uids (PressPort_Importer::uid()) not imported yet.
+	 */
+	protected static function set_pending( $post_id, $field_key, array $source_ids ) {
+		foreach ( (array) get_post_meta( $post_id, self::PENDING_META, false ) as $row ) {
+			if ( 0 === strpos( (string) $row, $field_key . '|' ) ) {
+				delete_post_meta( $post_id, self::PENDING_META, $row );
+			}
+		}
+		foreach ( array_unique( $source_ids ) as $source_id ) {
+			add_post_meta( $post_id, self::PENDING_META, $field_key . '|' . $source_id );
+		}
+	}
+
+	/**
+	 * A post has just been imported: add it to the relationship fields that were waiting for it.
+	 *
+	 * @param int    $post_id   The imported post.
+	 * @param string $source_id Its source uid (PressPort_Importer::uid()), so only references from the same source match.
+	 */
+	public static function link_pending( $post_id, $source_id ) {
+		global $wpdb;
+		if ( '' === (string) $source_id || ! self::active() ) {
+			return;
+		}
+		$rows = $wpdb->get_results( // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+			$wpdb->prepare(
+				"SELECT post_id, meta_value FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value LIKE %s",
+				self::PENDING_META,
+				'%|' . $wpdb->esc_like( (string) $source_id )
+			)
+		);
+		foreach ( (array) $rows as $row ) {
+			$field_key = substr( $row->meta_value, 0, strrpos( $row->meta_value, '|' ) );
+			$field     = acf_get_field( $field_key );
+			if ( $field ) {
+				$current = get_field( $field_key, (int) $row->post_id, false );
+				if ( 'relationship' === $field['type'] || ! empty( $field['multiple'] ) ) {
+					$ids   = array_map( 'intval', is_array( $current ) ? $current : array_filter( array( $current ) ) );
+					$ids[] = (int) $post_id;
+					update_field( $field_key, array_values( array_unique( $ids ) ), (int) $row->post_id );
+				} else {
+					update_field( $field_key, (int) $post_id, (int) $row->post_id );
+				}
+			}
+			delete_post_meta( (int) $row->post_id, self::PENDING_META, $row->meta_value );
+		}
+	}
+
+	/**
+	 * Resolve a user: an exported { email, login }, ACF's user array, a local id, or
+	 * a plain email/login/slug/display name (older exports). Email wins over login.
+	 *
+	 * @param mixed $item Value.
+	 * @return int 0 when no user matches.
+	 */
+	public static function resolve_user( $item ) {
+		if ( is_array( $item ) ) {
+			$item = array_change_key_case( $item, CASE_LOWER );
+			$keys = array(
+				'email'      => 'email',
+				'user_email' => 'email',
+				'login'      => 'login',
+				'user_login' => 'login',
+			);
+			foreach ( $keys as $key => $by ) {
+				if ( ! empty( $item[ $key ] ) ) {
+					$user = get_user_by( $by, (string) $item[ $key ] );
+					if ( $user ) {
+						return (int) $user->ID;
+					}
+				}
+			}
+			return 0;
+		}
+		if ( is_numeric( $item ) && get_userdata( (int) $item ) ) {
+			return (int) $item;
+		}
+		return (int) PressPort_Importer::resolve_author( (string) $item, false );
+	}
+
+	/**
 	 * Resolve a related post: a source ID from an earlier PressPort import, a local
 	 * post id, a slug or a title.
 	 *
-	 * @param mixed    $value Value.
-	 * @param string[] $types Allowed post types (empty = any).
+	 * @param mixed              $value Value.
+	 * @param string[]           $types Allowed post types (empty = any).
+	 * @param PressPort_Job|null $job   The import: source ids match the posts it imported from the same source.
 	 * @return int
 	 */
-	public static function resolve_post( $value, array $types ) {
-		$post_types = $types ? $types : 'any';
+	public static function resolve_post( $value, array $types, $job = null ) {
+		$common = array(
+			// Not 'any': that leaves out post types hidden from search.
+			'post_type'        => $types ? $types : array_keys( get_post_types() ),
+			'post_status'      => 'any',
+			'posts_per_page'   => 1,
+			'fields'           => 'ids',
+			'no_found_rows'    => true,
+			'suppress_filters' => true,
+		);
 		if ( is_array( $value ) ) {
 			// An exported reference { id, slug, title } from another site: match the
 			// earlier import by source id, then slug, then title. Never treat the
-			// foreign id as a local post id.
+			// foreign id as a local post id, nor as an id from another source.
 			$ref = array_change_key_case( $value, CASE_LOWER );
 			if ( ! empty( $ref['id'] ) ) {
 				$ids = get_posts(
-					array(
-						'post_type'        => $post_types,
-						'post_status'      => 'any',
-						'posts_per_page'   => 1,
-						'fields'           => 'ids',
-						'no_found_rows'    => true,
-						'suppress_filters' => true,
-						'meta_key'         => '_pressport_source_id', // phpcs:ignore WordPress.DB.SlowDBQuery
-						'meta_value'       => (string) $ref['id'], // phpcs:ignore WordPress.DB.SlowDBQuery
-					)
+					$common + ( $job ? array(
+						'meta_key'   => '_pressport_source_uid', // phpcs:ignore WordPress.DB.SlowDBQuery
+						'meta_value' => PressPort_Importer::uid( $job, $ref['id'] ), // phpcs:ignore WordPress.DB.SlowDBQuery
+					) : array(
+						'meta_key'   => '_pressport_source_id', // phpcs:ignore WordPress.DB.SlowDBQuery
+						'meta_value' => (string) $ref['id'], // phpcs:ignore WordPress.DB.SlowDBQuery
+					) )
 				);
 				if ( $ids ) {
 					return (int) $ids[0];
@@ -647,16 +765,22 @@ class PressPort_ACF {
 		if ( '' === $value ) {
 			return 0;
 		}
-		$common     = array(
-			'post_type'        => $post_types,
-			'post_status'      => 'any',
-			'posts_per_page'   => 1,
-			'fields'           => 'ids',
-			'no_found_rows'    => true,
-			'suppress_filters' => true,
-		);
 
-		// 1. Imported earlier by PressPort (source IDs survive the migration).
+		// 1. Imported earlier by PressPort (source IDs survive the migration): from this
+		// import's source first, then from any source, before this site's own ids. Data
+		// that names related posts by id almost always uses the old system's ids, and a
+		// local post with the same number nearly always exists.
+		if ( $job ) {
+			$ids = get_posts(
+				$common + array(
+					'meta_key'   => '_pressport_source_uid', // phpcs:ignore WordPress.DB.SlowDBQuery
+					'meta_value' => PressPort_Importer::uid( $job, $value ), // phpcs:ignore WordPress.DB.SlowDBQuery
+				)
+			);
+			if ( $ids ) {
+				return (int) $ids[0];
+			}
+		}
 		$ids = get_posts(
 			$common + array(
 				'meta_key'   => '_pressport_source_id', // phpcs:ignore WordPress.DB.SlowDBQuery
@@ -673,13 +797,9 @@ class PressPort_ACF {
 				return (int) $post->ID;
 			}
 		}
-		// 3. A URL or path: use its last segment as a slug.
-		if ( false !== strpos( $value, '/' ) ) {
-			$segments = array_values( array_filter( explode( '/', (string) wp_parse_url( $value, PHP_URL_PATH ) ), 'strlen' ) );
-			$value    = $segments ? end( $segments ) : $value;
-		}
-		// 4. Slug, then title.
-		$ids = get_posts( $common + array( 'name' => sanitize_title( $value ) ) );
+		// 3. Slug (a URL or path uses its last segment), then title.
+		$slug = PressPort_Importer::slug_from( $value );
+		$ids  = '' !== $slug ? get_posts( $common + array( 'name' => $slug ) ) : array();
 		if ( $ids ) {
 			return (int) $ids[0];
 		}

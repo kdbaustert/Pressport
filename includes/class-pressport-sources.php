@@ -24,11 +24,7 @@ class PressPort_Sources {
 	 */
 	public static function all() {
 		$sources = array(
-			'csv'       => 'PressPort_Source_CSV',
-			'json'      => 'PressPort_Source_JSON',
-			'remote'    => 'PressPort_Source_Remote',
-			'wordpress' => 'PressPort_Source_WordPress',
-			'drupal'    => 'PressPort_Source_Drupal',
+			'json' => 'PressPort_Source_JSON',
 		);
 		return (array) apply_filters( 'pressport_sources', $sources );
 	}
@@ -62,20 +58,20 @@ class PressPort_Sources {
 	 */
 	public static function guess_mapping( array $fields ) {
 		$synonyms = array(
-			'source_id'      => array( 'id', 'uuid', 'guid', 'external_id', 'source_id', 'nid', 'post_id', 'legacy_id' ),
-			'post_title'     => array( 'title', 'post_title', 'headline', 'name', 'subject', 'title.rendered' ),
-			'post_content'   => array( 'content', 'post_content', 'body', 'body.value', 'html', 'content_html', 'content.rendered', 'text', 'content_text', 'description' ),
-			'post_excerpt'   => array( 'excerpt', 'post_excerpt', 'summary', 'teaser', 'body.summary', 'custom_excerpt', 'excerpt.rendered' ),
-			'post_date'      => array( 'date', 'post_date', 'published_at', 'date_published', 'published', 'publish_date', 'pubdate', 'created', 'created_at' ),
-			'post_name'      => array( 'slug', 'post_name', 'url_slug', 'path.alias' ),
-			'post_status'    => array( 'status', 'post_status', 'state' ),
-			'post_author'    => array( 'author', 'author_email', 'author_name', 'author.name', 'authors.0.name', 'post_author', 'creator', 'byline' ),
-			'categories'     => array( 'categories', 'category', 'post_category', 'section', 'terms.category' ),
-			'tags'           => array( 'tags', 'tag', 'keywords', 'post_tag', 'post_tags', 'terms.post_tag' ),
+			'source_id'          => array( 'id', 'uuid', 'guid', 'external_id', 'source_id', 'nid', 'post_id', 'legacy_id' ),
+			'post_title'         => array( 'title', 'post_title', 'headline', 'name', 'subject', 'title.rendered' ),
+			'post_content'       => array( 'content', 'post_content', 'body', 'body.value', 'html', 'content_html', 'content.rendered', 'text', 'content_text', 'description' ),
+			'post_excerpt'       => array( 'excerpt', 'post_excerpt', 'summary', 'teaser', 'body.summary', 'custom_excerpt', 'excerpt.rendered' ),
+			'post_date'          => array( 'date', 'post_date', 'published_at', 'date_published', 'published', 'publish_date', 'pubdate', 'created', 'created_at' ),
+			'post_name'          => array( 'slug', 'post_name', 'url_slug', 'path.alias' ),
+			'post_status'        => array( 'status', 'post_status', 'state' ),
+			'post_author'        => array( 'author', 'author_email', 'author_name', 'author.name', 'authors.0.name', 'post_author', 'creator', 'byline' ),
+			'categories'         => array( 'categories', 'category', 'post_category', 'section', 'terms.category' ),
+			'tags'               => array( 'tags', 'tag', 'keywords', 'post_tag', 'post_tags', 'terms.post_tag' ),
 			'featured_image_alt' => array( 'featured_image_alt', 'image_alt', 'alt_text', 'image.alt' ),
-			'featured_image' => array( 'featured_image', 'featured_image_url', 'image', 'image_url', 'thumbnail', 'feature_image', 'cover_image', 'banner_image', 'image.url' ),
+			'featured_image'     => array( 'featured_image', 'featured_image_url', 'image', 'image_url', 'thumbnail', 'feature_image', 'cover_image', 'banner_image', 'image.url' ),
 		);
-		$lower = array();
+		$lower    = array();
 		foreach ( $fields as $field ) {
 			$lower[ strtolower( (string) $field ) ] = $field;
 		}

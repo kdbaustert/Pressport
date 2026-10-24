@@ -1,0 +1,11 @@
+# Left out of `git archive`, which builds the release zip: only the plugin ships.
+/.github export-ignore
+/.claude export-ignore
+/docs export-ignore
+/tests export-ignore
+/composer.json export-ignore
+/composer.lock export-ignore
+/phpcs.xml.dist export-ignore
+/phpunit.xml.dist export-ignore
+/.gitignore export-ignore
+/.gitattributes export-ignore

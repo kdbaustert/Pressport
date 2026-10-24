@@ -9,7 +9,7 @@
 	}
 
 	const state = {
-		tab: [ 'history', 'export' ].includes( D.view ) ? D.view : 'new',
+		tab: [ 'history', 'export', 'replace' ].includes( D.view ) ? D.view : 'new',
 		step: 'source',
 		sourceId: D.sources[ 0 ] ? D.sources[ 0 ].id : '',
 		job: null,
@@ -29,6 +29,7 @@
 		logQuery: '',
 		historyQuery: '',
 		historyJobs: null,
+		direct: false, // A PressPort export imported straight from the upload screen, without the mapping step.
 	};
 
 	// Helpers
@@ -73,10 +74,12 @@
 	}
 
 	function parseResponse( status, text ) {
-		let json;
+		let json = null;
 		try {
 			json = JSON.parse( text );
-		} catch ( e ) {
+		} catch ( e ) {}
+		// admin-ajax answers a bare "0" when the request never reached PressPort, e.g. a post larger than post_max_size.
+		if ( ! json || 'object' !== typeof json ) {
 			throw new Error( 'Unexpected server response (HTTP ' + status + '). ' + String( text ).replace( /<[^>]+>/g, ' ' ).trim().slice( 0, 300 ) );
 		}
 		if ( ! json.success ) {
@@ -153,9 +156,12 @@
 	 * A single reusable modal with a progress bar. Lives outside #pressport-app so
 	 * re-renders of the page never tear it down.
 	 *
-	 * modal.open( { title, message, percent, detail, stats, actions, tone, dismissible } )
+	 * modal.open( { title, message, percent, detail, stats, actions, tone, icon, dismissible } )
 	 * modal.update( { ...same keys } )   percent: number 0-100, or null for indeterminate.
 	 * modal.close()
+	 *
+	 * The header icon follows the tone (spinner while working, check on success, pause, error);
+	 * icon: 'file' overrides it. The primary action is always placed last (rightmost).
 	 */
 	const modal = ( function () {
 		let overlay = null;
@@ -163,34 +169,48 @@
 		let opts = {};
 		let lastFocus = null;
 
+		const ICONS = { success: 'dashicons-yes', error: 'dashicons-warning', paused: 'dashicons-controls-pause', file: 'dashicons-database-import', working: '' };
+
 		function build() {
+			parts.icon = el( 'span', { class: 'pressport-modal-icon', 'aria-hidden': 'true' }, el( 'span', { class: 'dashicons' } ) );
 			parts.title = el( 'h2', { class: 'pressport-modal-title', id: 'pressport-modal-title' } );
 			parts.message = el( 'p', { class: 'pressport-modal-message', id: 'pressport-modal-message' } );
+			parts.close = el( 'button', { type: 'button', class: 'pressport-modal-close', 'aria-label': 'Close', title: 'Close', onclick: dismiss }, el( 'span', { class: 'dashicons dashicons-no-alt', 'aria-hidden': 'true' } ) );
+			parts.head = el( 'header', { class: 'pressport-modal-head' }, [
+				parts.icon,
+				el( 'div', { class: 'pressport-modal-heading' }, [ parts.title, parts.message ] ),
+				parts.close,
+			] );
 			parts.fill = el( 'span', { class: 'pressport-modal-fill' } );
 			parts.obar = outcomeBar( {}, 0, {} );
 			parts.bar = el( 'div', { class: 'pressport-progress pressport-modal-bar', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-labelledby': 'pressport-modal-title' }, parts.fill );
 			parts.percent = el( 'span', { class: 'pressport-modal-percent' } );
 			parts.detail = el( 'span', { class: 'pressport-modal-detail' } );
-			parts.meta = el( 'div', { class: 'pressport-modal-meta' }, [ parts.detail, parts.percent ] );
+			parts.meta = el( 'div', { class: 'pressport-modal-meta' }, [ parts.percent, parts.detail ] );
 			parts.stats = el( 'ul', { class: 'pressport-legend pressport-modal-stats' } );
 			parts.note = el( 'p', { class: 'pressport-modal-note', 'aria-live': 'polite' } );
 			parts.actions = el( 'div', { class: 'pressport-modal-actions' } );
 			parts.dialog = el( 'div', { class: 'pressport-modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'pressport-modal-title', 'aria-describedby': 'pressport-modal-message' }, [
-				parts.title, parts.message, parts.bar, parts.obar, parts.meta, parts.stats, parts.note, parts.actions,
+				parts.head, parts.meta, parts.bar, parts.obar, parts.stats, parts.note, parts.actions,
 			] );
 			overlay = el( 'div', { class: 'pressport-modal-overlay' }, parts.dialog );
 			overlay.addEventListener( 'keydown', onKey );
 			document.body.appendChild( overlay );
 		}
 
+		/** Escape and the ✕ button do the same thing: the caller's onDismiss, or close. */
+		function dismiss() {
+			if ( typeof opts.onDismiss === 'function' ) {
+				opts.onDismiss();
+			} else {
+				close();
+			}
+		}
+
 		function onKey( e ) {
 			if ( e.key === 'Escape' && opts.dismissible ) {
 				e.preventDefault();
-				if ( typeof opts.onDismiss === 'function' ) {
-					opts.onDismiss();
-				} else {
-					close();
-				}
+				dismiss();
 			} else if ( e.key === 'Tab' ) {
 				// Keep focus inside the dialog.
 				const focusables = parts.dialog.querySelectorAll( 'button, a[href]' );
@@ -219,6 +239,11 @@
 			parts.message.textContent = opts.message || '';
 			parts.message.hidden = ! opts.message;
 
+			const status = opts.icon || { success: 'success', error: 'error', paused: 'paused' }[ opts.tone ] || 'working';
+			parts.dialog.setAttribute( 'data-status', status );
+			parts.icon.firstChild.className = 'dashicons ' + ( ICONS[ status ] || '' );
+			parts.close.hidden = ! opts.dismissible;
+
 			const indeterminate = opts.percent === null || opts.percent === undefined;
 			const pct = indeterminate ? 0 : Math.max( 0, Math.min( 100, opts.percent ) );
 			parts.bar.classList.toggle( 'is-indeterminate', indeterminate );
@@ -233,11 +258,17 @@
 			}
 			parts.percent.textContent = indeterminate || opts.tone === 'error' ? '' : Math.floor( pct ) + '%';
 			// Outcome mode: the bar is split into created / updated / skipped / failed.
-			parts.bar.hidden = !! opts.outcome;
+			// bar: false hides the progress bar and its numbers (e.g. for a confirmation).
+			parts.bar.hidden = !! opts.outcome || false === opts.bar;
 			parts.obar.hidden = ! opts.outcome;
+			parts.meta.hidden = false === opts.bar;
 			if ( opts.outcome ) {
 				setOutcomeBar( parts.obar, opts.outcome.stats, opts.outcome.total, { size: 'lg', indeterminate, tone: opts.tone, label: opts.title } );
 			}
+			// A soft moving sheen on the bar while work is in progress.
+			const running = 'working' === status && ! indeterminate && pct < 100;
+			parts.bar.classList.toggle( 'is-running', running );
+			parts.obar.classList.toggle( 'is-running', running );
 			parts.detail.textContent = opts.detail || '';
 
 			parts.stats.innerHTML = '';
@@ -250,13 +281,16 @@
 			parts.note.hidden = ! opts.note;
 			parts.note.classList.toggle( 'is-error', opts.tone === 'error' );
 
+			// Primary action last, so it sits on the right.
+			const actions = ( opts.actions || [] ).filter( ( a ) => ! a.primary ).concat( ( opts.actions || [] ).filter( ( a ) => a.primary ) );
+
 			// Only rebuild buttons when they change, so focus is not lost on every tick.
-			const sig = JSON.stringify( ( opts.actions || [] ).map( ( a ) => [ a.label, a.primary, a.danger, a.href, a.disabled ] ) );
+			const sig = JSON.stringify( actions.map( ( a ) => [ a.label, a.primary, a.danger, a.href, a.disabled ] ) );
 			if ( sig !== parts.actionsSig ) {
 				parts.actionsSig = sig;
 				const hadFocus = parts.dialog.contains( document.activeElement );
 				parts.actions.innerHTML = '';
-				( opts.actions || [] ).forEach( ( a ) => {
+				actions.forEach( ( a ) => {
 					const cls = 'button' + ( a.primary ? ' button-primary' : '' ) + ( a.danger ? ' pressport-danger' : '' );
 					parts.actions.appendChild( a.href
 						? el( 'a', { class: cls, href: a.href, text: a.label } )
@@ -268,13 +302,13 @@
 			} else {
 				// Handlers may close over fresh state; refresh them without rebuilding.
 				Array.from( parts.actions.children ).forEach( ( node, i ) => {
-					const a = opts.actions[ i ];
+					const a = actions[ i ];
 					if ( a && ! a.href ) {
 						node.onclick = a.onClick;
 					}
 				} );
 			}
-			parts.actions.hidden = ! ( opts.actions && opts.actions.length );
+			parts.actions.hidden = ! actions.length;
 		}
 
 		function focusDefault() {
@@ -465,6 +499,13 @@
 		return el( 'div', { class: 'notice notice-' + type + ' inline pressport-notice' }, el( 'p', { text: message } ) );
 	}
 
+	/** Show a failed request's message at the top of the page. */
+	function showError( err ) {
+		const n = notice( 'error', err.message );
+		root.insertBefore( n, root.firstChild );
+		n.scrollIntoView( { block: 'nearest' } );
+	}
+
 	function formatDate( ts ) {
 		return new Date( ts * 1000 ).toLocaleString();
 	}
@@ -545,16 +586,7 @@
 	}
 
 	const SOURCE_BLURBS = {
-		csv: 'A spreadsheet export, or a Google Sheet link',
-		json: 'A JSON file or an API that returns JSON',
-		remote: 'RSS or Atom feeds, WordPress exports, XML',
-		wordpress: 'Another WordPress site, through its REST API',
-		drupal: 'Drupal 8 or later, through JSON:API',
-	};
-
-	const URL_PLACEHOLDERS = {
-		csv: 'https://example.com/exports/posts.csv',
-		remote: 'https://blog.example.com/feed/',
+		json: 'A PressPort export, or any JSON file or API',
 	};
 
 	// Render
@@ -588,11 +620,22 @@
 			renderExport();
 			return;
 		}
-		root.appendChild( stepper() );
+		if ( state.tab === 'replace' ) {
+			renderReplace();
+			return;
+		}
+		const dropScreen = state.step === 'source' && isDropSource();
+		if ( ! dropScreen && ! state.direct && 'review' !== state.step ) {
+			root.appendChild( stepper() );
+		}
 		if ( state.error ) {
 			root.appendChild( notice( 'error', state.error ) );
 		}
-		if ( state.step === 'source' ) {
+		if ( 'review' === state.step ) {
+			renderReview();
+		} else if ( dropScreen ) {
+			renderDrop();
+		} else if ( state.step === 'source' ) {
 			renderSource();
 		} else if ( state.step === 'map' ) {
 			renderMap();
@@ -603,7 +646,7 @@
 
 	function stepper() {
 		const steps = [
-			[ 'source', 'Choose a source' ],
+			[ 'source', isDropSource() ? 'Upload a file' : 'Choose a source' ],
 			[ 'map', 'Map fields' ],
 			[ 'run', 'Import' ],
 		];
@@ -694,8 +737,458 @@
 			el( 'button', { type: 'submit', class: 'button button-primary pressport-btn-lg', disabled: state.busy, text: 'Connect and preview' } ),
 		] ) );
 
-		root.appendChild( cards );
+		if ( D.sources.length > 1 ) {
+			root.appendChild( cards );
+		}
 		root.appendChild( form );
+	}
+
+	/** A source whose only setting is a file upload gets the drop-and-import screen. */
+	function isDropSource() {
+		const source = D.sources.find( ( s ) => s.id === state.sourceId );
+		return !! source && 1 === source.schema.length && 'file' === source.schema[ 0 ].type;
+	}
+
+	/**
+	 * Upload screen: one large drop area and a button to choose the file, with the
+	 * upload limit underneath. Dropping a PressPort export imports it straight away.
+	 */
+	function renderDrop() {
+		const field = D.sources.find( ( s ) => s.id === state.sourceId ).schema[ 0 ];
+		const input = el( 'input', { type: 'file', id: 'pressport-import-file', accept: field.accept || '', class: 'pressport-drop-input', 'aria-label': 'File to import', onchange: ( e ) => {
+			const file = e.target.files && e.target.files[ 0 ];
+			e.target.value = ''; // Choosing the same file again still fires change.
+			if ( file ) {
+				uploadFile( field, file );
+			}
+		} } );
+
+		const area = el( 'div', { class: 'pressport-import-drop' }, [
+			el( 'span', { class: 'dashicons dashicons-cloud-upload', 'aria-hidden': 'true' } ),
+			el( 'strong', { text: 'Drop a JSON file here to import it' } ),
+			el( 'span', { class: 'pressport-muted', text: 'A PressPort export imports straight away. Other JSON files go to field mapping first.' } ),
+			el( 'button', { type: 'button', class: 'button button-primary pressport-btn-lg', disabled: state.busy, text: 'Choose a JSON file', onclick: () => input.click() } ),
+		] );
+		[ 'dragenter', 'dragover' ].forEach( ( t ) => area.addEventListener( t, ( e ) => {
+			e.preventDefault();
+			area.classList.add( 'is-dragover' );
+		} ) );
+		[ 'dragleave', 'dragend', 'drop' ].forEach( ( t ) => area.addEventListener( t, ( e ) => {
+			if ( 'dragleave' !== t || ! area.contains( e.relatedTarget ) ) {
+				area.classList.remove( 'is-dragover' );
+			}
+		} ) );
+		area.addEventListener( 'drop', ( e ) => {
+			e.preventDefault();
+			const file = e.dataTransfer && e.dataTransfer.files[ 0 ];
+			if ( file && ! state.busy ) {
+				uploadFile( field, file );
+			}
+		} );
+
+		root.appendChild( el( 'section', { class: 'pressport-panel pressport-import' }, [
+			area,
+			input,
+			el( 'p', { class: 'pressport-import-limit', text: 'Maximum upload size: ' + D.maxUpload } ),
+		] ) );
+	}
+
+	/** Check the file type, then upload it. */
+	function uploadFile( field, file ) {
+		const exts = ( field.accept || '' ).split( ',' ).map( ( a ) => a.trim().toLowerCase() ).filter( ( a ) => a.startsWith( '.' ) );
+		if ( exts.length && ! exts.some( ( x ) => file.name.toLowerCase().endsWith( x ) ) ) {
+			modal.open( {
+				kind: 'preview',
+				bar: false,
+				title: 'This file can’t be imported',
+				tone: 'error',
+				note: '“' + file.name + '” is not a ' + exts.join( ' or ' ) + ' file. Export one from PressPort → Export on the other site.',
+				dismissible: true,
+				actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
+			} );
+			return;
+		}
+		if ( Number( D.maxUploadBytes ) && file.size > Number( D.maxUploadBytes ) ) {
+			modal.open( {
+				kind: 'preview',
+				bar: false,
+				title: 'This file is too large',
+				tone: 'error',
+				note: '“' + file.name + '” is ' + formatBytes( file.size ) + '. This server accepts uploads up to ' + D.maxUpload + '.',
+				dismissible: true,
+				actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
+			} );
+			return;
+		}
+		const fd = new FormData();
+		fd.append( 'source', state.sourceId );
+		fd.append( 'file_' + field.key, file );
+		requestPreview( fd, { upload: file } );
+	}
+
+	/** Whether a previewed job came from a PressPort export (it carries its own mapping). */
+	function isExport( job ) {
+		return !! ( job.settings && ( job.settings.pressport_site || job.settings.pressport_post_type ) );
+	}
+
+	/**
+	 * Ask before importing a PressPort export straight away. With duplicates found
+	 * (d from checkDuplicates), the choice is whether to skip them.
+	 */
+	function confirmImport( d ) {
+		const job = state.job;
+		const total = Number( job.total ) || 0;
+		const from = job.settings.pressport_site ? hostOf( job.settings.pressport_site ) : '';
+		const intro = ( from ? 'Exported from ' + from + '. ' : '' ) + 'Everything is imported as ' + postType( state.options.post_type ).label + ', with the field mapping saved in the file.';
+		const review = { label: 'Review mapping', onClick: () => {
+			modal.close();
+			state.direct = false;
+			state.step = 'map';
+			render();
+		} };
+		const cancel = { label: 'Cancel', onClick: () => modal.close() };
+		const base = {
+			kind: 'confirm',
+			icon: 'file',
+			bar: false,
+			title: 'Import ' + total.toLocaleString() + ' ' + ( 1 === total ? 'item' : 'items' ) + '?',
+			dismissible: true,
+		};
+		if ( d && d.count ) {
+			modal.open( Object.assign( base, duplicateSummary( d ), {
+				message: intro + ' ' + duplicateMessage( d ) + changedMessage( d ),
+				actions: duplicateActions( d, () => start( false, true ), () => confirmImport( d ) ).concat( review, cancel ),
+			} ) );
+			return;
+		}
+		modal.open( Object.assign( base, {
+			message: intro + ' You can roll the import back from History.',
+			actions: [ { label: 'Import', primary: true, onClick: () => start( false, true ) }, review, cancel ],
+		} ) );
+	}
+
+	/** The mapping as it will be saved: ACF fields only when they belong to the chosen type. */
+	function mappingToSave() {
+		const allowed = new Set( acfFields( state.options.post_type ).flatMap( ( f ) => [ f.key, f.name ] ) );
+		const mapping = Object.assign( {}, state.mapping, { acf: {} } );
+		Object.entries( state.mapping.acf ).forEach( ( [ k, v ] ) => {
+			if ( v && ( allowed.has( k ) || ! ( D.acf && D.acf.active ) ) ) {
+				mapping.acf[ k ] = v;
+			}
+		} );
+		return mapping;
+	}
+
+	/** Count the records already on this site, with the mapping and options as they stand. */
+	function checkDuplicates() {
+		return api( 'duplicates', { job: state.job.id, mapping: mappingToSave(), options: state.options } );
+	}
+
+	/** "12 of them are already on this site…"; `of` names what the count is out of. */
+	function duplicateMessage( d, of ) {
+		const n = Number( d.count );
+		return n.toLocaleString() + ' ' + ( of || 'of them' ) + ( 1 === n ? ' is' : ' are' ) + ' already on this site. Skip them to import only the new items, or import everything anyway.';
+	}
+
+	/** Count chips and a few examples for the duplicates dialog. */
+	function duplicateSummary( d ) {
+		const examples = ( d.examples || [] ).map( ( x ) => '“' + x.title + '” (#' + x.post_id + ')' );
+		const more = Number( d.count ) - examples.length;
+		return {
+			stats: [
+				{ key: 'created', value: Number( d.total ) - Number( d.count ), label: 'New' },
+				{ key: 'updated', value: d.before, label: 'Imported before' },
+				{ key: 'updated', value: d.existing, label: 'Same slug, SKU or file' },
+			].filter( ( s, i ) => 0 === i || Number( s.value ) ),
+			note: examples.length ? 'Already here: ' + examples.join( ', ' ) + ( more > 0 ? ' and ' + more.toLocaleString() + ' more' : '' ) + '.' : '',
+		};
+	}
+
+	/**
+	 * "Review changes" (when some duplicates differ from what is here) / "Skip duplicates" /
+	 * "Import anyway". Records imported before keep "Update them" when that was chosen in
+	 * the options; otherwise skipping or copying covers both kinds.
+	 */
+	function duplicateActions( d, go, reopen ) {
+		const choose = ( skip, updateIds, replaceIds, copyIds ) => {
+			const update = state.options.duplicate === 'update';
+			state.options.skip_existing = skip ? 1 : 0;
+			state.options.duplicate = update ? 'update' : ( skip ? 'skip' : 'create' );
+			state.options.update_ids = updateIds || [];
+			state.options.replace_ids = replaceIds || [];
+			state.options.copy_ids = copyIds || [];
+			go();
+		};
+		const posts = ( d.changed || [] ).length;
+		const images = ( d.images || [] ).length;
+		const changed = posts + images;
+		const actions = [
+			{ label: 'Skip duplicates', primary: ! changed, onClick: () => choose( true ) },
+			{ label: 'Import anyway', onClick: () => choose( false ) },
+		];
+		if ( changed ) {
+			const noun = ! posts ? ( 1 === images ? ' image' : ' images' ) : ( ! images ? ( 1 === posts ? ' change' : ' changes' ) : ' items' );
+			actions.unshift( { label: 'Review ' + changed + noun, primary: true, onClick: () => {
+				modal.close();
+				state.review = {
+					d,
+					selected: new Set(),
+					media: new Map(), // attachment id => 'update' | 'replace'; unset means skip.
+					back: state.step,
+					reopen,
+					apply: ( ids, replaceIds, copyIds ) => choose( true, ids, replaceIds, copyIds ),
+				};
+				state.step = 'review';
+				render();
+				window.scrollTo( 0, 0 );
+			} } );
+		}
+		return actions;
+	}
+
+	function changedMessage( d ) {
+		const n = ( d.changed || [] ).length;
+		const m = ( d.images || [] ).length;
+		return ( n ? ' ' + n.toLocaleString() + ( 1 === n ? ' of them differs' : ' of them differ' ) + ' from what is here: review the changes to choose which to update.' : '' ) +
+			( m ? ' ' + m.toLocaleString() + ( 1 === m ? ' is media' : ' are media' ) + ': compare ' + ( 1 === m ? 'it' : 'them' ) + ' with the copy on this site to update the details or replace the file.' : '' );
+	}
+
+	/**
+	 * Review screen: each duplicate that differs from the post on this site, with what
+	 * would change. Only the ticked ones are updated; every other duplicate is skipped.
+	 */
+	function renderReview() {
+		const r = state.review;
+		const items = r.d.changed || [];
+		const images = r.d.images || [];
+		const count = el( 'span', { class: 'pressport-actionbar-status', 'aria-live': 'polite' } );
+		const go = el( 'button', { type: 'button', class: 'button button-primary' } );
+		const boxes = [];
+		const radios = [];
+		const sync = () => {
+			const n = r.selected.size + r.media.size;
+			count.textContent = n + ' of ' + ( items.length + images.length ) + ' selected';
+			go.textContent = n ? 'Import with ' + n + ' selected' : 'Import without updating';
+			boxes.forEach( ( b ) => {
+				b.checked = r.selected.has( Number( b.value ) );
+			} );
+			radios.forEach( ( [ b, id, v ] ) => {
+				b.checked = ( r.media.get( id ) || 'skip' ) === v;
+			} );
+		};
+		const setAll = ( on ) => {
+			items.forEach( ( it ) => ( on ? r.selected.add( it.post_id ) : r.selected.delete( it.post_id ) ) );
+			sync();
+		};
+		const setAllMedia = ( v ) => {
+			images.forEach( ( it ) => ( 'skip' === v ? r.media.delete( it.post_id ) : r.media.set( it.post_id, v ) ) );
+			sync();
+		};
+
+		if ( items.length ) {
+			root.appendChild( el( 'section', { class: 'pressport-panel pressport-review-head' }, [
+				el( 'h2', { text: 'Review changes' } ),
+				el( 'p', { text: items.length + ( 1 === items.length ? ' item in this import is' : ' items in this import are' ) + ' already on this site and differ from it. Tick the ones to update with the imported version. Everything else that is already here is skipped.' } ),
+				el( 'p', { class: 'pressport-muted', text: 'Custom fields, terms and images are updated too and are not shown here. WordPress keeps a revision of each post or page that is updated, so you can restore the old version from the editor.' } ),
+				el( 'div', { class: 'pressport-review-tools' }, [
+					el( 'button', { type: 'button', class: 'button button-small', text: 'Select all', onclick: () => setAll( true ) } ),
+					el( 'button', { type: 'button', class: 'button button-small', text: 'Select none', onclick: () => setAll( false ) } ),
+				] ),
+			] ) );
+		}
+
+		root.appendChild( el( 'ol', { class: 'pressport-review' }, items.map( ( it, i ) => {
+			const id = 'pressport-review-' + it.post_id;
+			const box = el( 'input', { type: 'checkbox', id, value: it.post_id, onchange: ( e ) => {
+				if ( e.target.checked ) {
+					r.selected.add( it.post_id );
+				} else {
+					r.selected.delete( it.post_id );
+				}
+				sync();
+			} } );
+			boxes.push( box );
+			const fields = Object.keys( it.changes ).map( ( k ) => it.changes[ k ] );
+			return el( 'li', { class: 'pressport-panel pressport-review-item' }, [
+				el( 'div', { class: 'pressport-review-row' }, [
+					box,
+					el( 'label', { for: id }, [
+						el( 'strong', { text: it.title || '(untitled)' } ),
+						el( 'span', { class: 'pressport-muted', text: it.type + ' #' + it.post_id + ' · ' + ( 'before' === it.kind ? 'imported before' : 'same ' + it.label ) + ' · changes: ' + fields.map( ( f ) => f.label.toLowerCase() ).join( ', ' ) } ),
+					] ),
+				] ),
+				el( 'details', { class: 'pressport-review-body', open: i < 3 }, [
+					el( 'summary', { text: 'Show changes' } ),
+					...fieldChanges( fields ),
+				] ),
+			] );
+		} ) ) );
+
+		if ( images.length ) {
+			root.appendChild( el( 'section', { class: 'pressport-panel pressport-review-head' }, [
+				el( 'h2', { text: 'Compare media' } ),
+				el( 'p', { text: images.length + ( 1 === images.length ? ' file in this import is' : ' files in this import are' ) + ' already in the Media Library. For each one, choose what to do. Skipped files are left as they are.' } ),
+				el( 'p', { class: 'pressport-muted', text: '"Update details" keeps the file on this site and copies the title, caption, description and alt text. "Replace image" also swaps in the imported file, in the same Media Library item, so pages that use it show the new image. A replaced file cannot be rolled back. "Keep both" adds the imported file as a new item and leaves this one alone.' } ),
+				el( 'div', { class: 'pressport-review-tools' }, [
+					el( 'button', { type: 'button', class: 'button button-small', text: 'Skip all', onclick: () => setAllMedia( 'skip' ) } ),
+					el( 'button', { type: 'button', class: 'button button-small', text: 'Update all details', onclick: () => setAllMedia( 'update' ) } ),
+					el( 'button', { type: 'button', class: 'button button-small', text: 'Replace all', onclick: () => setAllMedia( 'replace' ) } ),
+					el( 'button', { type: 'button', class: 'button button-small', text: 'Keep both for all', onclick: () => setAllMedia( 'copy' ) } ),
+				] ),
+			] ) );
+			root.appendChild( el( 'ol', { class: 'pressport-review' }, images.map( ( it ) => {
+				const fields = Object.keys( it.changes ).map( ( k ) => it.changes[ k ] );
+				const choice = ( v, label ) => {
+					const id = 'pressport-media-' + it.post_id + '-' + v;
+					const radio = el( 'input', { type: 'radio', id, name: 'pressport-media-' + it.post_id, value: v, onchange: () => {
+						if ( 'skip' === v ) {
+							r.media.delete( it.post_id );
+						} else {
+							r.media.set( it.post_id, v );
+						}
+						sync();
+					} } );
+					radios.push( [ radio, it.post_id, v ] );
+					return el( 'label', { class: 'pressport-check-chip', for: id }, [ radio, el( 'span', { text: label } ) ] );
+				};
+				const figure = ( src, href, caption ) => el( 'figure', { class: 'pressport-media-pick' }, [
+					src && it.is_image
+						? el( 'a', { href, target: '_blank', rel: 'noopener' }, el( 'img', { src, alt: caption + ': ' + ( it.title || 'image' ), loading: 'lazy' } ) )
+						: el( 'span', { class: 'pressport-media-file', text: ( href || '' ).split( '/' ).pop() || '(no preview)' } ),
+					el( 'figcaption', { text: caption } ),
+				] );
+				return el( 'li', { class: 'pressport-panel pressport-review-item' }, [
+					el( 'div', { class: 'pressport-review-row' }, [
+						el( 'div', { class: 'pressport-review-title' }, [
+							el( 'strong', { text: it.title || '(untitled)' } ),
+							el( 'span', { class: 'pressport-muted', text: 'Media #' + it.post_id + ' · ' + ( 'before' === it.kind ? 'imported before' : 'same ' + it.label ) + ( fields.length ? ' · details differ: ' + fields.map( ( f ) => f.label.toLowerCase() ).join( ', ' ) : ' · same details' ) } ),
+						] ),
+					] ),
+					el( 'div', { class: 'pressport-media-compare' }, [
+						figure( it.current, it.current_full, 'On this site' ),
+						figure( it.imported_preview || it.imported, it.imported, 'In the import' ),
+					] ),
+					el( 'div', { class: 'pressport-chips', role: 'radiogroup', 'aria-label': 'What to do with ' + ( it.title || 'this file' ) }, [
+						choice( 'skip', 'Skip' ),
+						choice( 'update', 'Update details' ),
+						choice( 'replace', 'Replace image' ),
+						choice( 'copy', 'Keep both' ),
+					] ),
+					fields.length ? el( 'details', { class: 'pressport-review-body' }, [ el( 'summary', { text: 'Show detail changes' } ), ...fieldChanges( fields ) ] ) : null,
+				] );
+			} ) ) );
+		}
+
+		go.addEventListener( 'click', () => {
+			const ids = Array.from( r.selected );
+			const lists = { update: ids, replace: [], copy: [] };
+			r.media.forEach( ( v, id ) => lists[ v ].push( id ) );
+			state.step = r.back;
+			state.review = null;
+			r.apply( ids, lists.replace, lists.copy );
+		} );
+		root.appendChild( el( 'div', { class: 'pressport-actionbar' }, [
+			count,
+			el( 'div', { class: 'pressport-actionbar-buttons' }, [
+				el( 'button', { type: 'button', class: 'button', text: 'Back', onclick: () => {
+					state.step = r.back;
+					state.review = null;
+					render();
+					r.reopen();
+				} } ),
+				go,
+			] ),
+		] ) );
+		sync();
+	}
+
+	/** Each changed field: a diff for longer text, "Now / Imported" for short values. */
+	function fieldChanges( fields ) {
+		return fields.map( ( f ) => el( 'div', { class: 'pressport-review-field' }, [
+			el( 'h3', { text: f.label } ),
+			f.old.includes( '\n' ) || f.new.includes( '\n' ) || f.old.length + f.new.length > 160
+				? diffView( f.old, f.new )
+				: el( 'dl', { class: 'pressport-review-swap' }, [
+					el( 'dt', { text: 'Now' } ), el( 'dd', { class: 'is-old', text: f.old || '(empty)' } ),
+					el( 'dt', { text: 'Imported' } ), el( 'dd', { class: 'is-new', text: f.new || '(empty)' } ),
+				] ),
+		] ) );
+	}
+
+	/**
+	 * Line diff of two texts: unchanged lines around each change, the rest folded.
+	 * Uses a longest-common-subsequence table after trimming the shared start and end;
+	 * a pair too large for that is shown as "all removed, all added".
+	 */
+	function diffView( oldText, newText ) {
+		const a = oldText.split( '\n' );
+		const b = newText.split( '\n' );
+		let start = 0;
+		while ( start < a.length && start < b.length && a[ start ] === b[ start ] ) {
+			start++;
+		}
+		let endA = a.length;
+		let endB = b.length;
+		while ( endA > start && endB > start && a[ endA - 1 ] === b[ endB - 1 ] ) {
+			endA--;
+			endB--;
+		}
+		const x = a.slice( start, endA );
+		const y = b.slice( start, endB );
+		let mid = [];
+		if ( x.length * y.length > 4000000 ) {
+			mid = x.map( ( s ) => [ '-', s ] ).concat( y.map( ( s ) => [ '+', s ] ) );
+		} else {
+			const w = y.length + 1;
+			const t = new Uint32Array( ( x.length + 1 ) * w );
+			for ( let i = x.length - 1; i >= 0; i-- ) {
+				for ( let j = y.length - 1; j >= 0; j-- ) {
+					t[ i * w + j ] = x[ i ] === y[ j ] ? t[ ( i + 1 ) * w + j + 1 ] + 1 : Math.max( t[ ( i + 1 ) * w + j ], t[ i * w + j + 1 ] );
+				}
+			}
+			let i = 0;
+			let j = 0;
+			while ( i < x.length || j < y.length ) {
+				if ( i < x.length && j < y.length && x[ i ] === y[ j ] ) {
+					mid.push( [ ' ', x[ i++ ] ] );
+					j++;
+				} else if ( i < x.length && ( j >= y.length || t[ ( i + 1 ) * w + j ] >= t[ i * w + j + 1 ] ) ) {
+					mid.push( [ '-', x[ i++ ] ] ); // On a tie, removed lines come before added ones.
+				} else {
+					mid.push( [ '+', y[ j++ ] ] );
+				}
+			}
+		}
+		const rows = a.slice( 0, start ).map( ( s ) => [ ' ', s ] ).concat( mid, a.slice( endA ).map( ( s ) => [ ' ', s ] ) );
+
+		// Keep 2 lines of context around changes; fold longer unchanged runs.
+		const near = rows.map( () => false );
+		rows.forEach( ( row, k ) => {
+			if ( ' ' !== row[ 0 ] ) {
+				for ( let c = Math.max( 0, k - 2 ); c <= Math.min( rows.length - 1, k + 2 ); c++ ) {
+					near[ c ] = true;
+				}
+			}
+		} );
+		const out = [];
+		let folded = 0;
+		const flush = () => {
+			if ( folded ) {
+				out.push( el( 'li', { class: 'is-fold', text: '⋯ ' + folded + ( 1 === folded ? ' unchanged line' : ' unchanged lines' ) } ) );
+				folded = 0;
+			}
+		};
+		rows.forEach( ( row, k ) => {
+			if ( ! near[ k ] ) {
+				folded++;
+				return;
+			}
+			flush();
+			const kind = { ' ': 'is-same', '-': 'is-old', '+': 'is-new' }[ row[ 0 ] ];
+			out.push( el( 'li', { class: kind }, [ el( 'span', { class: 'pressport-diff-sign', 'aria-label': { ' ': 'Unchanged', '-': 'Removed', '+': 'Added' }[ row[ 0 ] ], text: ' ' === row[ 0 ] ? '' : ( '-' === row[ 0 ] ? '−' : '+' ) } ), el( 'span', { text: row[ 1 ] || ' ' } ) ] ) );
+		} );
+		flush();
+		return el( 'ol', { class: 'pressport-diff' }, out );
 	}
 
 	/**
@@ -737,12 +1230,12 @@
 			return zone;
 		}
 		const modeKey = state.sourceId + ':' + f.key;
-		const mode = state.fileMode[ modeKey ] || ( f.remote_default === 'url' ? 'url' : 'upload' );
+		const mode = state.fileMode[ modeKey ] || 'upload';
 		const urlInput = el( 'input', {
 			id: id + '-url',
 			name: 'settings[' + f.key + '_url]',
 			type: 'url',
-			placeholder: URL_PLACEHOLDERS[ state.sourceId ] || 'https://',
+			placeholder: 'https://',
 			autocomplete: 'off',
 			'aria-label': f.label + ' URL',
 		} );
@@ -772,10 +1265,9 @@
 		};
 		tabs.url = el( 'button', { type: 'button', class: 'pressport-seg', text: 'From a URL', onclick: () => setMode( 'url', true ) } );
 		tabs.upload = el( 'button', { type: 'button', class: 'pressport-seg', text: 'Upload a file', onclick: () => setMode( 'upload', true ) } );
-		const order = f.remote_default === 'url' ? [ tabs.url, tabs.upload ] : [ tabs.upload, tabs.url ];
 
 		const wrap = el( 'div', { class: 'pressport-file-field' }, [
-			el( 'div', { class: 'pressport-segmented', role: 'group', 'aria-label': f.label + ': how to provide it' }, order ),
+			el( 'div', { class: 'pressport-segmented', role: 'group', 'aria-label': f.label + ': how to provide it' }, [ tabs.upload, tabs.url ] ),
 			uploadPane,
 			urlPane,
 		] );
@@ -805,12 +1297,7 @@
 		} );
 		const urlField = source.schema.find( ( f ) => f.type === 'url' && fd.get( 'settings[' + f.key + ']' ) );
 		const connectTo = urlField ? hostOf( String( fd.get( 'settings[' + urlField.key + ']' ) ) ) : '';
-		const readingMsg = remote
-			? 'Downloading the file from ' + hostOf( remote ) + ' and reading the first records…'
-			: ( connectTo ? 'Connecting to ' + connectTo + ' and reading the first records…' : 'Reading the first records…' );
 
-		state.busy = true;
-		state.error = '';
 		const submit = form.querySelector( '[type="submit"]' );
 		if ( submit ) {
 			submit.disabled = true;
@@ -819,10 +1306,32 @@
 		if ( oldNotice ) {
 			oldNotice.remove();
 		}
+		requestPreview( fd, { upload, remote, connectTo, label: source.label, onError: ( err ) => {
+			if ( submit ) {
+				submit.disabled = false;
+			}
+			// Keep the form as typed; just surface the error.
+			form.parentNode.insertBefore( notice( 'error', err.message ), form );
+		} } );
+	}
 
+	/**
+	 * Send a source to the server and read its first records. A PressPort export goes
+	 * straight to the import confirmation; anything else opens the mapping step.
+	 *
+	 * ctx: { upload: File, remote: url, connectTo: host, label, onError( err ) }
+	 */
+	function requestPreview( fd, ctx ) {
+		const upload = ctx.upload || null;
+		const readingMsg = ctx.remote
+			? 'Downloading the file from ' + hostOf( ctx.remote ) + ' and reading the first records…'
+			: ( ctx.connectTo ? 'Connecting to ' + ctx.connectTo + ' and reading the first records…' : 'Reading the first records…' );
+
+		state.busy = true;
+		state.error = '';
 		modal.open( {
 			kind: 'preview',
-			title: upload ? 'Uploading ' + upload.name : ( remote ? 'Fetching remote file' : 'Connecting to ' + source.label ),
+			title: upload ? 'Uploading ' + upload.name : ( ctx.remote ? 'Fetching remote file' : 'Connecting to ' + ctx.label ),
 			message: upload ? 'Sending the file to your server.' : readingMsg,
 			percent: upload ? 0 : null,
 			detail: upload ? '0 B of ' + formatBytes( upload.size ) : '',
@@ -841,24 +1350,27 @@
 			: api( 'preview', fd );
 
 		req.then( ( data ) => {
-			modal.close();
 			state.job = data.job;
 			state.records = data.records;
-			state.fields = data.fields;
+			state.fields = ( data.fields || [] ).map( String ); // Numeric JSON keys may arrive as numbers.
 			state.mapping = normalizeMapping( data.job.mapping );
 			state.options = Object.assign( {}, D.defaults, data.job.options );
 			state.suggested = {};
-			state.step = 'map';
 			state.busy = false;
+			if ( isExport( data.job ) ) {
+				state.direct = true;
+				render();
+				modal.update( { title: 'Checking for duplicates', message: 'Looking for items in this file that are already on this site…', percent: null, detail: '' } );
+				checkDuplicates().then( confirmImport ).catch( duplicateCheckFailed );
+				return;
+			}
+			modal.close();
+			state.step = 'map';
 			render();
 		} ).catch( ( err ) => {
 			state.busy = false;
-			if ( submit ) {
-				submit.disabled = false;
-			}
-			// Keep the form as typed; just surface the error.
 			modal.update( {
-				title: 'Could not connect',
+				title: upload ? 'Could not read the file' : 'Could not connect',
 				message: '',
 				percent: 100,
 				tone: 'error',
@@ -868,7 +1380,12 @@
 				onDismiss: null,
 				actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
 			} );
-			form.parentNode.insertBefore( notice( 'error', err.message ), form );
+			if ( ctx.onError ) {
+				ctx.onError( err );
+			} else {
+				state.error = err.message;
+				render();
+			}
 		} );
 	}
 
@@ -886,7 +1403,7 @@
 				el( 'strong', { text: 'Connected to ' + source.label } ),
 				el( 'span', { text: ( total === null ? 'Unknown number of' : total.toLocaleString() ) + ' records, ' + state.fields.length + ' fields' + ( job.settings.file_url || job.settings.url || job.settings.site_url ? ' from ' + hostOf( job.settings.file_url || job.settings.url || job.settings.site_url ) : '' ) } ),
 			] ),
-			el( 'button', { type: 'button', class: 'button', text: 'Change source', onclick: () => {
+			el( 'button', { type: 'button', class: 'button', text: isDropSource() ? 'Choose another file' : 'Change source', onclick: () => {
 				state.step = 'source';
 				state.error = '';
 				render();
@@ -895,16 +1412,19 @@
 
 		// Preview table.
 		const cols = state.fields.slice( 0, 40 );
-		root.appendChild( el( 'details', { class: 'pressport-panel pressport-preview-panel', open: true }, [
-			el( 'summary', {}, [
-				el( 'h2', { text: 'Preview' } ),
-				el( 'span', { class: 'pressport-muted', text: 'First ' + state.records.length + ' records' + ( state.fields.length > cols.length ? ', ' + cols.length + ' of ' + state.fields.length + ' fields shown' : '' ) } ),
-			] ),
-			el( 'div', { class: 'pressport-preview-scroll', tabindex: 0, 'aria-label': 'Preview records' }, el( 'table', { class: 'pressport-preview' }, [
-				el( 'thead', {}, el( 'tr', {}, cols.map( ( c ) => el( 'th', { scope: 'col', text: c } ) ) ) ),
-				el( 'tbody', {}, state.records.map( ( r ) => el( 'tr', {}, cols.map( ( c ) => el( 'td', { title: r[ c ] || '', text: truncate( r[ c ], 80 ) } ) ) ) ) ),
-			] ) ),
-		] ) );
+		// No records when a job's cached copy is gone: an empty table would only say "First 0 records".
+		if ( state.records.length ) {
+			root.appendChild( el( 'details', { class: 'pressport-panel pressport-preview-panel', open: true }, [
+				el( 'summary', {}, [
+					el( 'h2', { text: 'Preview' } ),
+					el( 'span', { class: 'pressport-muted', text: 'First ' + state.records.length + ' records' + ( state.fields.length > cols.length ? ', ' + cols.length + ' of ' + state.fields.length + ' fields shown' : '' ) } ),
+				] ),
+				el( 'div', { class: 'pressport-preview-scroll', tabindex: 0, 'aria-label': 'Preview records' }, el( 'table', { class: 'pressport-preview' }, [
+					el( 'thead', {}, el( 'tr', {}, cols.map( ( c ) => el( 'th', { scope: 'col', text: c } ) ) ) ),
+					el( 'tbody', {}, state.records.map( ( r ) => el( 'tr', {}, cols.map( ( c ) => el( 'td', { title: r[ c ] || '', text: truncate( r[ c ], 80 ) } ) ) ) ) ),
+				] ) ),
+			] ) );
+		}
 
 		const grid = el( 'div', { class: 'pressport-grid' } );
 		grid.appendChild( renderMappingCard() );
@@ -1139,7 +1659,7 @@
 			row( 'Import as', el( 'select', { onchange: ( e ) => {
 				o.post_type = e.target.value;
 				render();
-			} }, D.postTypes.map( ( p ) => el( 'option', { value: p.name, text: p.label + ' (' + p.name + ')', selected: p.name === o.post_type } ) ) ) ),
+			} }, D.postTypes.map( ( p ) => el( 'option', { value: p.name, text: p.label + ' (' + p.name + ')', selected: p.name === o.post_type } ) ) ), 'Used for every record, unless "Post type" is mapped and names a type this site has.' ),
 			row( 'Default status', el( 'select', { onchange: set( 'default_status' ) }, [ [ 'publish', 'Published' ], [ 'draft', 'Draft' ], [ 'pending', 'Pending review' ], [ 'private', 'Private' ] ].map( ( [ v, l ] ) =>
 				el( 'option', { value: v, text: l, selected: v === o.default_status } ) ) ), 'Used when a record has no status, or one PressPort does not recognise.' ),
 			row( 'Default author', el( 'select', { onchange: set( 'default_author' ) }, D.users.map( ( u ) =>
@@ -1153,22 +1673,46 @@
 				toggle( 'import_content_images', 'Download images in content', 'Copies <img> files into the Media Library and rewrites their URLs.' ),
 				toggle( 'create_terms', 'Create missing categories and terms' ),
 				toggle( 'create_authors', 'Create missing authors', 'New users get the Author role and a random password.' ),
+				toggle( 'rewrite_links', 'Point links to the old site here', 'PressPort exports only. Files in wp-content keep their old URLs unless images in content are downloaded.' ),
 			] ),
 		] );
 	}
 
-	function start( dry ) {
+	/**
+	 * Save and run. A real import first looks for records already on this site and
+	 * asks what to do with them; `checked` skips that once the user has answered.
+	 */
+	function start( dry, checked ) {
 		state.options.dry_run = dry ? 1 : 0;
+		if ( ! dry && ! checked ) {
+			state.options.skip_existing = 0;
+			modal.open( { kind: 'confirm', title: 'Checking for duplicates', message: 'Looking for items in this import that are already on this site…', percent: null, actions: [] } );
+			const ask = ( d ) => modal.open( Object.assign( {
+				kind: 'confirm',
+				icon: 'file',
+				bar: false,
+				dismissible: true,
+				title: 'Some items are already here',
+				message: duplicateMessage( d, 'of ' + Number( d.total ).toLocaleString() + ' records' ) + changedMessage( d ),
+				actions: duplicateActions( d, () => start( false, true ), () => ask( d ) ).concat( { label: 'Cancel', onClick: () => modal.close() } ),
+			}, duplicateSummary( d ) ) );
+			checkDuplicates().then( ( d ) => {
+				if ( ! d.count ) {
+					start( false, true );
+					return;
+				}
+				ask( d );
+			} ).catch( duplicateCheckFailed );
+			return;
+		}
+		if ( state.busy ) {
+			return; // Already saving: a second click on Import must not start it twice.
+		}
 		state.busy = true;
 		state.error = '';
+		modal.update( { actions: [ { label: 'Starting…', primary: true, disabled: true } ] } );
 		render();
-		const allowed = new Set( acfFields( state.options.post_type ).flatMap( ( f ) => [ f.key, f.name ] ) );
-		const mapping = Object.assign( {}, state.mapping, { acf: {} } );
-		Object.entries( state.mapping.acf ).forEach( ( [ k, v ] ) => {
-			if ( v && ( allowed.has( k ) || ! ( D.acf && D.acf.active ) ) ) {
-				mapping.acf[ k ] = v;
-			}
-		} );
+		const mapping = mappingToSave();
 		api( 'save', { job: state.job.id, mapping, options: state.options } ).then( ( data ) => {
 			state.job = data.job;
 			state.results = [];
@@ -1184,6 +1728,23 @@
 			state.busy = false;
 			state.error = err.message;
 			render();
+		} );
+	}
+
+	/** The duplicate check failed: show why, and let the user import anyway or stop. */
+	function duplicateCheckFailed( err ) {
+		modal.open( {
+			kind: 'confirm',
+			bar: false,
+			tone: 'error',
+			dismissible: true,
+			title: 'Could not check for duplicates',
+			message: 'Items that are already on this site may be imported again.',
+			note: err.message,
+			actions: [
+				{ label: 'Import anyway', primary: true, onClick: () => start( false, true ) },
+				{ label: 'Cancel', onClick: () => modal.close() },
+			],
 		} );
 	}
 
@@ -1205,6 +1766,8 @@
 		} else if ( done ) {
 			statusText = dry ? 'Dry run complete. Nothing was saved.' : 'Import complete';
 			tone = 'success';
+		} else if ( job.status === 'draft' ) {
+			statusText = 'Not started. Nothing was imported.';
 		} else if ( state.error ) {
 			statusText = 'Stopped. Progress is saved.';
 			tone = 'error';
@@ -1216,7 +1779,7 @@
 		}
 
 		const actions = el( 'div', { class: 'pressport-actions' } );
-		if ( ! done ) {
+		if ( ! done && 'draft' !== job.status ) {
 			actions.appendChild( state.paused
 				? el( 'button', { type: 'button', class: 'button button-primary', text: 'Resume', disabled: state.running, onclick: resume } )
 				: el( 'button', { type: 'button', class: 'button', text: 'Pause', onclick: pause } ) );
@@ -1234,7 +1797,7 @@
 				actions.appendChild( el( 'a', { class: 'button button-primary', href: D.adminUrl + 'edit.php?post_type=' + encodeURIComponent( job.options.post_type ), text: 'View imported content' } ) );
 			}
 			actions.appendChild( el( 'button', { type: 'button', class: 'button', text: 'Import', onclick: reset } ) );
-			if ( ! dry && job.status === 'complete' && Number( s.created ) > 0 ) {
+			if ( ! dry && job.status === 'complete' && importedCount( job ) > 0 ) {
 				actions.appendChild( el( 'button', { type: 'button', class: 'button pressport-danger pressport-push', text: 'Roll back this import', onclick: () => rollback( job.id ) } ) );
 			}
 		}
@@ -1493,11 +2056,17 @@
 		state.options = Object.assign( {}, D.defaults );
 		state.error = '';
 		state.paused = false;
+		state.direct = false;
 		if ( state.tab !== 'new' ) {
 			window.location.href = D.importUrl;
 			return;
 		}
 		render();
+	}
+
+	/** Posts the job created over all its runs (stats only cover the last; jobs saved before created_total fall back to them). */
+	function importedCount( job ) {
+		return Number( job.created_total ) || Number( job.stats.created ) || 0;
 	}
 
 	function rollback( jobId ) {
@@ -1531,6 +2100,9 @@
 			if ( state.job && state.job.id === jobId ) {
 				state.job = data.job;
 			}
+			if ( data.error ) {
+				throw new Error( data.error );
+			}
 			if ( data.done ) {
 				modal.update( {
 					title: 'Rollback complete',
@@ -1555,6 +2127,7 @@
 				title: 'Rollback stopped',
 				message: 'Some items may already be deleted. You can run the rollback again to finish it.',
 				tone: 'error',
+				detail: removed ? removed.toLocaleString() + ' item' + ( removed === 1 ? '' : 's' ) + ' deleted' : '',
 				note: err.message,
 				dismissible: true,
 				onDismiss: null,
@@ -1576,11 +2149,6 @@
 	// Export
 
 	const EXPORT_STATUSES = [ [ 'publish', 'Published' ], [ 'draft', 'Draft' ], [ 'pending', 'Pending review' ], [ 'private', 'Private' ], [ 'future', 'Scheduled' ] ];
-	const EXPORT_FORMATS = [
-		[ 'json', 'JSON', 'Best for moving content between sites. Importing it with PressPort maps every field automatically.' ],
-		[ 'csv', 'CSV', 'Opens in Excel or Google Sheets for editing. Lists use "|", nested ACF data is stored as JSON.' ],
-		[ 'xml', 'XML (WordPress export)', 'Standard WXR file. Imports with PressPort or with Tools > Import > WordPress.' ],
-	];
 
 	function renderExport() {
 		const x = state.exportArgs = state.exportArgs || Object.assign( {}, D.exportDefaults, { statuses: ( D.exportDefaults.statuses || [ 'publish' ] ).slice() } );
@@ -1614,6 +2182,7 @@
 			] );
 		};
 		const acfCount = acfFields( x.post_type ).length;
+		const isMedia = x.post_type === 'attachment';
 
 		const form = el( 'form', { class: 'pressport-panel pressport-export', onsubmit: ( e ) => {
 			e.preventDefault();
@@ -1629,7 +2198,7 @@
 							render();
 						} }, D.postTypes.map( ( p ) => el( 'option', { value: p.name, text: p.label + ' (' + p.name + ')', selected: p.name === x.post_type } ) ) ),
 					] ),
-					el( 'fieldset', { class: 'pressport-opt' }, [
+					isMedia ? null : el( 'fieldset', { class: 'pressport-opt' }, [
 						el( 'legend', { class: 'pressport-opt-label', text: 'Status' } ),
 						el( 'div', { class: 'pressport-chips' }, EXPORT_STATUSES.map( ( [ v, l ] ) => {
 							const id = 'pressport-export-status-' + v;
@@ -1648,7 +2217,7 @@
 						} ) ),
 					] ),
 					el( 'fieldset', { class: 'pressport-opt' }, [
-						el( 'legend', { class: 'pressport-opt-label', text: 'Published between' } ),
+						el( 'legend', { class: 'pressport-opt-label', text: isMedia ? 'Uploaded between' : 'Published between' } ),
 						el( 'div', { class: 'pressport-date-range' }, [
 							el( 'input', { type: 'date', 'aria-label': 'From', value: x.after, onchange: ( e ) => set( 'after', e.target.value ) } ),
 							el( 'span', { class: 'pressport-muted', text: 'and' } ),
@@ -1661,29 +2230,16 @@
 					el( 'h2', { text: 'Include' } ),
 					el( 'div', { class: 'pressport-toggles is-flush' }, [
 						toggle( 'include_terms', 'Categories, tags and terms', 'Hierarchy is kept as "Parent > Child".' ),
-						toggle( 'include_image', 'Featured images', 'Exported as URLs; the importing site downloads them.' ),
-						toggle( 'include_meta', 'Custom fields', 'Public post meta. Private keys starting with "_" are left out.' ),
+						isMedia ? null : toggle( 'include_image', 'Featured images', 'Exported as URLs; the importing site downloads them.' ),
+						toggle( 'include_meta', 'Custom fields', 'Public post meta. Private keys starting with "_" and keys listed in Settings are left out.' ),
 						D.acf && D.acf.active
 							? toggle( 'include_acf', 'ACF fields', acfCount ? acfCount + ' field' + ( acfCount === 1 ? '' : 's' ) + ' on this content type. Images become URLs, related posts become references.' : 'No ACF fields on this content type.', ! acfCount )
 							: toggle( 'include_acf', 'ACF fields', 'Advanced Custom Fields is not active on this site.', true ),
 						D.woo && D.woo.active && x.post_type === 'product'
-							? toggle( 'include_woo', 'WooCommerce product data', 'Prices, stock, attributes, downloads and variations. Images become URLs; related products travel as SKUs.' )
+							? toggle( 'include_woo', 'WooCommerce product data', 'Prices, stock, attributes, downloads and variations. Images become URLs; related products link up by ID or SKU.' )
 							: null,
 					] ),
 				] ),
-			] ),
-			el( 'fieldset', { class: 'pressport-opt pressport-export-formats' }, [
-				el( 'legend', { class: 'pressport-opt-label', text: 'Format' } ),
-				el( 'div', { class: 'pressport-tiles' }, EXPORT_FORMATS.map( ( [ v, l, help ] ) =>
-					el( 'label', { class: 'pressport-tile' + ( x.format === v ? ' is-selected' : '' ) }, [
-						el( 'input', { type: 'radio', name: 'pressport_export_format', value: v, checked: x.format === v, onchange: () => {
-							x.format = v;
-							render();
-						} } ),
-						el( 'span', { class: 'pressport-source-icon pressport-icon-fmt-' + v, 'aria-hidden': 'true' } ),
-						el( 'span', { class: 'pressport-tile-text' }, [ el( 'strong', { text: l } ), el( 'span', { text: help } ) ] ),
-					] )
-				) ),
 			] ),
 			el( 'footer', { class: 'pressport-panel-foot' }, [ countEl, submit ] ),
 		] );
@@ -1692,7 +2248,7 @@
 		if ( state.lastExport ) {
 			const le = state.lastExport;
 			root.appendChild( el( 'section', { class: 'pressport-summary' }, [
-				el( 'span', { class: 'pressport-source-icon pressport-icon-fmt-' + le.format, 'aria-hidden': 'true' } ),
+				el( 'span', { class: 'pressport-source-icon pressport-icon-json', 'aria-hidden': 'true' } ),
 				el( 'div', { class: 'pressport-summary-text' }, [
 					el( 'strong', { text: le.filename } ),
 					el( 'span', { text: le.done.toLocaleString() + ' items, ' + le.size + '. The download link works for 24 hours.' } ),
@@ -1705,11 +2261,10 @@
 
 	function runExport() {
 		const x = state.exportArgs;
-		const fmt = EXPORT_FORMATS.find( ( f ) => f[ 0 ] === x.format );
 		modal.open( {
 			kind: 'export',
 			title: 'Exporting ' + postType( x.post_type ).label.toLowerCase() + ' content',
-			message: 'Writing a ' + fmt[ 1 ] + ' file. Keep this tab open.',
+			message: 'Writing a JSON file. Keep this tab open.',
 			percent: null,
 			detail: 'Counting…',
 			actions: [],
@@ -1719,11 +2274,16 @@
 			title: 'Export stopped',
 			message: '',
 			tone: 'error',
+			detail: '',
 			note: err.message,
 			dismissible: true,
 			actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
 		} );
 		const step = ( id ) => api( 'export_run', { export: id } ).then( ( d ) => {
+			if ( d.error ) {
+				fail( { message: d.error } );
+				return;
+			}
 			if ( d.complete ) {
 				state.lastExport = d;
 				const extras = [];
@@ -1735,9 +2295,7 @@
 				}
 				modal.update( {
 					title: 'Export ready',
-					message: d.format === 'json'
-						? 'Import it on the other site with PressPort (JSON feed / file, or URL or feed). The fields map themselves.'
-						: ( d.format === 'xml' ? 'Import it with PressPort (URL or feed) or with Tools > Import > WordPress.' : 'Import it with PressPort as a CSV file.' ),
+					message: 'Import it on the other site with PressPort → Import. The fields map themselves.',
 					percent: 100,
 					tone: 'success',
 					detail: d.done.toLocaleString() + ' items' + ( extras.length ? ' with ' + extras.join( ' and ' ) : '' ) + ', ' + d.size,
@@ -1766,6 +2324,339 @@
 		} ).catch( fail );
 	}
 
+	// Find & Replace
+
+	function renderReplace() {
+		const r = state.replace = state.replace || {
+			search: '',
+			replace: '',
+			tables: ( D.tables || [] ).map( ( t ) => t.name ),
+			case_insensitive: 0,
+			whole_urls: 1,
+			guids: 0,
+			dry_run: 1,
+			result: null,
+		};
+		const submit = el( 'button', { type: 'submit', class: 'button button-primary pressport-btn-lg', text: r.dry_run ? 'Run dry run' : 'Replace' } );
+		const tableCount = el( 'span', { class: 'pressport-help' } );
+		const errorSlot = el( 'div', { 'aria-live': 'assertive' } );
+		const sync = () => {
+			tableCount.textContent = r.tables.length + ' of ' + ( D.tables || [] ).length + ' tables selected';
+			submit.textContent = r.dry_run ? 'Run dry run' : 'Replace';
+			// Drop a validation message once what it complained about is fixed.
+			if ( errorSlot.firstChild && r.search && r.tables.length ) {
+				errorSlot.innerHTML = '';
+			}
+		};
+		const toggle = ( k, label, help ) => {
+			const id = 'pressport-replace-' + k;
+			return el( 'div', { class: 'pressport-toggle' }, [
+				el( 'input', { type: 'checkbox', role: 'switch', id, class: 'pressport-switch', checked: !! r[ k ], onchange: ( e ) => {
+					r[ k ] = e.target.checked ? 1 : 0;
+					sync();
+				} } ),
+				el( 'label', { for: id }, [ el( 'span', { text: label } ), help ? el( 'span', { class: 'pressport-help', text: help } ) : null ] ),
+			] );
+		};
+		const text = ( k, label, placeholder ) => el( 'div', { class: 'pressport-opt' }, [
+			el( 'label', { class: 'pressport-opt-label', for: 'pressport-replace-' + k, text: label } ),
+			el( 'input', { type: 'text', id: 'pressport-replace-' + k, class: 'pressport-code-input', value: r[ k ], placeholder, autocomplete: 'off', spellcheck: 'false', oninput: ( e ) => {
+				r[ k ] = e.target.value;
+				sync();
+			} } ),
+		] );
+		const boxes = ( D.tables || [] ).map( ( t ) => {
+			const id = 'pressport-table-' + t.name;
+			return el( 'label', { class: 'pressport-table-option', for: id }, [
+				el( 'input', { type: 'checkbox', id, value: t.name, checked: r.tables.includes( t.name ), onchange: ( e ) => {
+					r.tables = e.target.checked ? r.tables.concat( t.name ) : r.tables.filter( ( n ) => n !== t.name );
+					sync();
+				} } ),
+				el( 'code', { text: t.name } ),
+				el( 'span', { class: 'pressport-help', text: '~' + t.rows.toLocaleString() + ' rows, ' + formatBytes( t.size ) } ),
+			] );
+		} );
+		const selectAll = ( on ) => {
+			r.tables = on ? ( D.tables || [] ).map( ( t ) => t.name ) : [];
+			boxes.forEach( ( b ) => {
+				b.firstChild.checked = on;
+			} );
+			sync();
+		};
+
+		root.appendChild( el( 'form', { class: 'pressport-panel pressport-export pressport-replace', onsubmit: ( e ) => {
+			e.preventDefault();
+			const problem = ! r.search ? 'Enter the text to search for.' : ( ! r.tables.length ? 'No database tables are selected. Please select at least one.' : '' );
+			errorSlot.innerHTML = '';
+			if ( problem ) {
+				errorSlot.appendChild( notice( 'error', problem ) );
+				return;
+			}
+			runReplace();
+		} }, [
+			errorSlot,
+			el( 'div', { class: 'pressport-export-grid' }, [
+				el( 'section', {}, [
+					el( 'h2', { text: 'Find and replace' } ),
+					text( 'search', 'Search for', 'http://old-site.test' ),
+					text( 'replace', 'Replace with', 'https://new-site.com' ),
+					el( 'div', { class: 'pressport-toggles is-flush' }, [
+						toggle( 'dry_run', 'Dry run', 'Count and preview the changes without saving anything.' ),
+						toggle( 'whole_urls', 'Whole URLs only', 'When you search for a web address or domain, only that exact site matches: http://old.test is not changed inside http://old.test.example.com or http://old.testing.com, and old.test is not changed inside sub.old.test.' ),
+						toggle( 'case_insensitive', 'Ignore case', 'Match "Example" and "example" alike.' ),
+						toggle( 'guids', 'Replace GUIDs', 'Post GUIDs are permanent IDs that feed readers rely on. Leave this off unless you know you need it.' ),
+					] ),
+					el( 'p', { class: 'pressport-help', text: 'PressPort\'s own history and tracking data are left alone, so later imports still recognise content they brought in.' } ),
+				] ),
+				el( 'section', {}, [
+					el( 'h2', { text: 'Tables' } ),
+					el( 'div', { class: 'pressport-table-tools' }, [
+						tableCount,
+						el( 'button', { type: 'button', class: 'button-link', text: 'All', onclick: () => selectAll( true ) } ),
+						el( 'button', { type: 'button', class: 'button-link', text: 'None', onclick: () => selectAll( false ) } ),
+					] ),
+					el( 'div', { class: 'pressport-table-list' }, boxes ),
+				] ),
+			] ),
+			el( 'footer', { class: 'pressport-panel-foot' }, [
+				el( 'span', { class: 'pressport-help', text: 'Real runs keep the original values so they can be rolled back. A database backup is still the safest net.' } ),
+				submit,
+			] ),
+		] ) );
+		sync();
+
+		if ( r.result ) {
+			drawReplaceResult( r.result );
+		}
+		drawReplaceRuns();
+	}
+
+	/** Real runs, with rollback. Dry runs change nothing, so they are not listed. */
+	function drawReplaceRuns() {
+		const wrap = el( 'section', { class: 'pressport-panel pressport-history-panel pressport-replace-runs' } );
+		root.appendChild( wrap );
+		if ( ! state.replaceRuns ) {
+			wrap.appendChild( el( 'p', { class: 'pressport-muted pressport-loading', text: 'Loading past replacements…' } ) );
+			api( 'replace_history', {} ).then( ( d ) => {
+				state.replaceRuns = d.runs;
+				wrap.remove();
+				drawReplaceRuns();
+			} ).catch( ( err ) => {
+				wrap.innerHTML = '';
+				wrap.appendChild( notice( 'error', err.message ) );
+			} );
+			return;
+		}
+		const runs = state.replaceRuns;
+		wrap.appendChild( el( 'header', { class: 'pressport-history-head' }, [
+			el( 'h2', { class: 'pressport-history-title', text: 'Past replacements' } ),
+			el( 'span', { class: 'pressport-muted', text: runs.length ? runs.length + ' run' + ( runs.length === 1 ? '' : 's' ) : '' } ),
+		] ) );
+		if ( ! runs.length ) {
+			wrap.appendChild( el( 'p', { class: 'pressport-muted pressport-loading', text: 'Replacements you run for real show up here, and can be rolled back.' } ) );
+			return;
+		}
+		const labels = { running: 'Running', complete: 'Complete', stopped: 'Stopped', failed: 'Failed', rolling_back: 'Rolling back', rollback_failed: 'Rollback incomplete', rolled_back: 'Rolled back' };
+		const body = el( 'tbody' );
+		runs.forEach( ( run ) => {
+			const actions = el( 'div', { class: 'pressport-row-actions' } );
+			if ( run.can_resume ) {
+				actions.appendChild( el( 'button', { type: 'button', class: 'button button-small button-primary', text: 'Resume', onclick: () => runReplace( run ) } ) );
+			}
+			if ( run.can_undo ) {
+				actions.appendChild( el( 'button', { type: 'button', class: 'button button-small pressport-danger', text: { rolling_back: 'Finish rollback', rollback_failed: 'Retry rollback' }[ run.status ] || 'Roll back', onclick: () => rollbackReplace( run ) } ) );
+			}
+			actions.appendChild( el( 'button', { type: 'button', class: 'pressport-link-danger', text: 'Delete', title: 'Remove from this list. The changes stay, but can no longer be rolled back.', onclick: () => {
+				// eslint-disable-next-line no-alert
+				if ( window.confirm( run.status === 'rolled_back' ? 'Remove this run from the list?' : 'Remove this run from the list? Its changes stay in the database, but can no longer be rolled back.' ) ) {
+					api( 'replace_forget', { run: run.id } ).then( () => {
+						state.replaceRuns = state.replaceRuns.filter( ( x ) => x.id !== run.id );
+						render();
+					} ).catch( showError );
+				}
+			} } ) );
+			let result = run.changes.toLocaleString() + ' replacement' + ( run.changes === 1 ? '' : 's' ) + ' in ' + run.rows.toLocaleString() + ' row' + ( run.rows === 1 ? '' : 's' );
+			if ( run.status === 'rolled_back' ) {
+				result = run.restored.toLocaleString() + ' value' + ( run.restored === 1 ? '' : 's' ) + ' restored' + ( run.kept ? ', ' + run.kept.toLocaleString() + ' kept because they were edited since' : '' );
+			}
+			body.appendChild( el( 'tr', {}, [
+				el( 'td', {}, [
+					el( 'code', { class: 'pressport-replace-pair', text: run.search + ' → ' + run.replace } ),
+					el( 'span', { class: 'pressport-help' }, [
+						run.user ? run.user + ', ' : '',
+						el( 'time', { datetime: new Date( run.created * 1000 ).toISOString(), title: formatDate( run.created ), text: relativeTime( run.created ) } ),
+					] ),
+				] ),
+				el( 'td', {}, el( 'span', { class: 'pressport-badge pressport-badge-' + run.status, text: labels[ run.status ] || run.status } ) ),
+				el( 'td', { class: 'pressport-h-result' }, el( 'span', { class: 'pressport-help', text: result } ) ),
+				el( 'td', {}, actions ),
+			] ) );
+		} );
+		wrap.appendChild( el( 'div', { class: 'pressport-table-scroll' }, el( 'table', { class: 'pressport-history' }, [
+			el( 'thead', {}, el( 'tr', {}, [ 'Replacement', 'Status', 'Result', '' ].map( ( h ) => el( 'th', { scope: 'col', text: h } ) ) ) ),
+			body,
+		] ) ) );
+	}
+
+	function rollbackReplace( run ) {
+		// eslint-disable-next-line no-alert
+		if ( ! window.confirm( 'Roll back "' + run.search + '" → "' + run.replace + '"? Original values are put back. Anything edited since the replacement is kept as it is.' ) ) {
+			return;
+		}
+		modal.open( {
+			kind: 'replace',
+			title: 'Rolling back',
+			message: 'Keep this tab open.',
+			percent: null,
+			detail: 'Starting…',
+			actions: [],
+			dismissible: false,
+		} );
+		const done = () => {
+			state.replaceRuns = null;
+			render();
+		};
+		const step = () => api( 'replace_rollback', { run: run.id } ).then( ( d ) => {
+			if ( d.status !== 'rolled_back' ) {
+				modal.update( {
+					percent: d.size ? ( d.undo_offset / d.size ) * 100 : null,
+					detail: d.restored.toLocaleString() + ' values restored',
+				} );
+				return step();
+			}
+			modal.update( {
+				title: 'Rolled back',
+				message: d.kept ? d.kept.toLocaleString() + ' value' + ( d.kept === 1 ? ' was' : 's were' ) + ' edited after the replacement, so ' + ( d.kept === 1 ? 'it was' : 'they were' ) + ' left as ' + ( d.kept === 1 ? 'it is' : 'they are' ) + '.' : 'Every replaced value is back to what it was.',
+				percent: 100,
+				tone: 'success',
+				detail: d.restored.toLocaleString() + ' value' + ( d.restored === 1 ? '' : 's' ) + ' restored',
+				dismissible: true,
+				onDismiss: null,
+				actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
+			} );
+			done();
+		} );
+		step().catch( ( err ) => {
+			modal.update( {
+				title: 'Rollback stopped',
+				message: 'Run it again to continue where it stopped.',
+				tone: 'error',
+				note: err.message,
+				dismissible: true,
+				actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
+			} );
+			done();
+		} );
+	}
+
+	/** Start a run from the form, or pick up a stopped one (`resumeRun`, from Past replacements). */
+	function runReplace( resumeRun ) {
+		const r = state.replace;
+		const question = resumeRun
+			? 'Resume replacing "' + resumeRun.search + '" with "' + resumeRun.replace + '"? It picks up where it stopped.'
+			: ( r.dry_run ? '' : 'Replace "' + r.search + '" with "' + r.replace + '" in ' + r.tables.length + ' tables? This changes the database. You can roll it back afterwards from Past replacements.' );
+		// eslint-disable-next-line no-alert
+		if ( question && ! window.confirm( question ) ) {
+			return;
+		}
+		const args = resumeRun
+			? { search: resumeRun.search, replace: resumeRun.replace, dry_run: 0 }
+			: { search: r.search, replace: r.replace, tables: r.tables, case_insensitive: r.case_insensitive, whole_urls: r.whole_urls, guids: r.guids, dry_run: r.dry_run };
+		modal.open( {
+			kind: 'replace',
+			title: args.dry_run ? 'Dry run' : 'Replacing',
+			message: 'Keep this tab open.',
+			percent: null,
+			detail: 'Starting…',
+			actions: [],
+			dismissible: false,
+		} );
+		const fail = ( err ) => modal.update( {
+			title: 'Find and replace stopped',
+			message: '',
+			tone: 'error',
+			note: err.message,
+			dismissible: true,
+			actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
+		} );
+		const step = ( id ) => api( 'replace_run', { run: id } ).then( ( d ) => {
+			if ( ! d.complete ) {
+				modal.update( {
+					percent: d.total ? Math.min( 99, ( d.done / d.total ) * 100 ) : null,
+					detail: d.table + ': ' + d.done.toLocaleString() + ' of about ' + d.total.toLocaleString() + ' rows',
+				} );
+				return step( id );
+			}
+			const sum = d.tables.reduce( ( a, t ) => ( { rows: a.rows + t.rows, changes: a.changes + t.changes } ), { rows: 0, changes: 0 } );
+			r.result = Object.assign( d, { args } );
+			if ( ! d.dry_run ) {
+				state.replaceRuns = null; // Refresh the list of past runs.
+			}
+			modal.update( {
+				title: d.error ? 'Find and replace stopped' : ( d.dry_run ? 'Dry run finished' : 'Replace finished' ),
+				message: d.error ? d.error + ' What was replaced so far can be rolled back.' : ( d.dry_run ? 'Nothing was saved. Check the changes below, then turn off Dry run to replace for real.' : 'The database has been updated. You can roll it back from Past replacements.' ),
+				percent: 100,
+				tone: d.error ? 'error' : 'success',
+				detail: sum.changes.toLocaleString() + ' replacement' + ( sum.changes === 1 ? '' : 's' ) + ' in ' + sum.rows.toLocaleString() + ' row' + ( sum.rows === 1 ? '' : 's' ),
+				dismissible: true,
+				onDismiss: null,
+				actions: [ { label: 'See details', primary: true, onClick: () => {
+					modal.close();
+					render();
+					const res = root.querySelector( '.pressport-replace-results' );
+					if ( res ) {
+						res.scrollIntoView( { behavior: 'smooth' } );
+					}
+				} } ],
+			} );
+			render();
+		} );
+		( resumeRun ? step( resumeRun.id ) : api( 'replace_start', { args } ).then( ( d ) => step( d.id ) ) ).catch( fail );
+	}
+
+	function drawReplaceResult( d ) {
+		const a = d.args;
+		const changed = d.tables.filter( ( t ) => t.changes );
+		const skipped = d.tables.filter( ( t ) => t.skipped );
+		const unsafe = d.tables.filter( ( t ) => t.unsafe );
+		const body = el( 'tbody' );
+		changed.forEach( ( t ) => {
+			const detail = el( 'tr', { class: 'pressport-export-log-row', hidden: true }, el( 'td', { colspan: 4, class: 'pressport-export-log' },
+				el( 'ol', { class: 'pressport-log pressport-replace-samples' }, t.samples.map( ( s ) => el( 'li', {}, [
+					el( 'span', { class: 'pressport-help', text: s.column + ' (row ' + s.row + ')' } ),
+					el( 'del', { text: ( s.cut[ 0 ] ? '…' : '' ) + s.before + ( s.cut[ 1 ] ? '…' : '' ) } ),
+					el( 'ins', { text: ( s.cut[ 0 ] ? '…' : '' ) + s.after + ( s.cut[ 1 ] ? '…' : '' ) } ),
+				] ) ) ) ) );
+			const btn = el( 'button', { type: 'button', class: 'button button-small', 'aria-expanded': 'false', text: 'Show changes', onclick: () => {
+				detail.hidden = ! detail.hidden;
+				btn.setAttribute( 'aria-expanded', detail.hidden ? 'false' : 'true' );
+				btn.textContent = detail.hidden ? 'Show changes' : 'Hide changes';
+			} } );
+			body.appendChild( el( 'tr', {}, [
+				el( 'td', {}, el( 'code', { text: t.name } ) ),
+				el( 'td', { text: t.rows.toLocaleString() } ),
+				el( 'td', { text: t.changes.toLocaleString() } ),
+				el( 'td', {}, el( 'div', { class: 'pressport-row-actions' }, btn ) ),
+			] ) );
+			body.appendChild( detail );
+		} );
+		if ( ! changed.length ) {
+			body.appendChild( el( 'tr', {}, el( 'td', { colspan: 4, class: 'pressport-muted pressport-no-match', text: 'No matches for "' + a.search + '" in the selected tables.' } ) ) );
+		}
+		root.appendChild( el( 'section', { class: 'pressport-panel pressport-history-panel pressport-replace-results' }, [
+			el( 'header', { class: 'pressport-history-head' }, [
+				el( 'h2', { class: 'pressport-history-title', text: d.dry_run ? 'Dry run results' : 'Results' } ),
+				el( 'span', { class: 'pressport-muted', text: '"' + a.search + '" → "' + a.replace + '"' } ),
+			] ),
+			el( 'div', { class: 'pressport-table-scroll' }, el( 'table', { class: 'pressport-history' }, [
+				el( 'thead', {}, el( 'tr', {}, [ 'Table', d.dry_run ? 'Rows to change' : 'Rows changed', 'Replacements', '' ].map( ( h ) => el( 'th', { scope: 'col', text: h } ) ) ) ),
+				body,
+			] ) ),
+			skipped.length ? el( 'p', { class: 'pressport-help pressport-loading', text: 'Skipped: ' + skipped.map( ( t ) => t.name + ' (' + t.skipped + ')' ).join( '; ' ) } ) : null,
+			unsafe.length ? el( 'p', { class: 'pressport-help pressport-loading', text: 'Values left as they are because they contain objects that can’t be safely edited: ' + unsafe.map( ( t ) => t.name + ' (' + t.unsafe + ')' ).join( '; ' ) } ) : null,
+		] ) );
+	}
+
 	// History
 
 	function renderHistory() {
@@ -1781,6 +2672,95 @@
 			wrap.innerHTML = '';
 			wrap.appendChild( notice( 'error', err.message ) );
 		} );
+
+		const exportsWrap = el( 'section', { class: 'pressport-panel pressport-history-panel pressport-exports-panel', 'aria-busy': 'true' }, el( 'p', { class: 'pressport-muted pressport-loading', text: 'Loading exports…' } ) );
+		root.appendChild( exportsWrap );
+		api( 'exports', {} ).then( ( data ) => {
+			exportsWrap.removeAttribute( 'aria-busy' );
+			drawExports( exportsWrap, data.exports );
+		} ).catch( ( err ) => {
+			exportsWrap.innerHTML = '';
+			exportsWrap.appendChild( notice( 'error', err.message ) );
+		} );
+	}
+
+	const EXPORT_STATUS_LABELS = { running: 'Running', complete: 'Complete', stopped: 'Stopped' };
+
+	function drawExports( wrap, exports ) {
+		wrap.innerHTML = '';
+		wrap.appendChild( el( 'header', { class: 'pressport-history-head' }, [
+			el( 'h2', { class: 'pressport-history-title', text: 'Exports' } ),
+			el( 'span', { class: 'pressport-muted', text: exports.length ? exports.length + ' export' + ( exports.length === 1 ? '' : 's' ) : '' } ),
+			el( 'a', { class: 'button pressport-push', href: D.exportUrl, text: 'Export' } ),
+		] ) );
+		if ( ! exports.length ) {
+			wrap.appendChild( el( 'p', { class: 'pressport-muted pressport-loading', text: 'Exports you run show up here with a log of what went into the file.' } ) );
+			return;
+		}
+		const body = el( 'tbody' );
+		exports.forEach( ( x ) => exportRows( x, body, () => drawExports( wrap, exports.filter( ( e ) => e.id !== x.id ) ) ) );
+		wrap.appendChild( el( 'div', { class: 'pressport-table-scroll' }, el( 'table', { class: 'pressport-history' }, [
+			el( 'thead', {}, el( 'tr', {}, [ 'Export', 'Status', 'Result', '' ].map( ( h ) => el( 'th', { scope: 'col', text: h } ) ) ) ),
+			body,
+		] ) ) );
+	}
+
+	/** A history row for one export, plus a hidden row that holds its log. */
+	function exportRows( x, body, onForget ) {
+		const logRow = el( 'tr', { class: 'pressport-export-log-row', hidden: true }, el( 'td', { colspan: 4, class: 'pressport-export-log' } ) );
+		const actions = el( 'div', { class: 'pressport-row-actions' } );
+		if ( x.url ) {
+			actions.appendChild( el( 'a', { class: 'button button-small button-primary', href: x.url, text: 'Download' } ) );
+		}
+		const viewBtn = el( 'button', { type: 'button', class: 'button button-small', 'aria-expanded': 'false', text: 'View log', onclick: () => {
+			const open = logRow.hidden;
+			logRow.hidden = ! open;
+			viewBtn.setAttribute( 'aria-expanded', open ? 'true' : 'false' );
+			viewBtn.textContent = open ? 'Hide log' : 'View log';
+			if ( open && ! logRow.dataset.loaded ) {
+				const cell = logRow.firstChild;
+				cell.textContent = 'Loading…';
+				api( 'export_log', { export: x.id } ).then( ( d ) => {
+					logRow.dataset.loaded = '1';
+					cell.innerHTML = '';
+					cell.appendChild( el( 'ol', { class: 'pressport-log' }, d.log.map( ( e ) => el( 'li', { class: 'pressport-log-' + e.l }, [
+						el( 'time', { datetime: new Date( e.t * 1000 ).toISOString(), text: new Date( e.t * 1000 ).toLocaleTimeString() } ),
+						el( 'span', { text: e.m } ),
+					] ) ) ) );
+				} ).catch( ( err ) => {
+					cell.textContent = err.message;
+				} );
+			}
+		} } );
+		actions.appendChild( viewBtn );
+		actions.appendChild( el( 'button', { type: 'button', class: 'pressport-link-danger', text: 'Delete', title: 'Remove from history, with its file if it is still kept.', onclick: () => {
+			// eslint-disable-next-line no-alert
+			if ( window.confirm( 'Remove this export from history?' ) ) {
+				api( 'export_forget', { export: x.id } ).then( onForget ).catch( showError );
+			}
+		} } ) );
+
+		const who = [ x.user, x.via === 'cli' ? 'WP-CLI' : '' ].filter( Boolean ).join( ' via ' );
+		let result = x.done.toLocaleString() + ' of ' + x.total.toLocaleString() + ' items';
+		if ( x.status === 'complete' ) {
+			result = x.done.toLocaleString() + ' item' + ( x.done === 1 ? '' : 's' ) + ( x.size ? ', ' + x.size : '' ) + ( x.url ? '' : '. File no longer kept' );
+		}
+		body.appendChild( el( 'tr', {}, [
+			el( 'td', { class: 'pressport-h-source' }, [
+				el( 'span', { class: 'pressport-source-icon is-sm pressport-icon-json', 'aria-hidden': 'true' } ),
+				el( 'div', {}, [
+					el( 'strong', { text: x.label } ),
+					el( 'span', { class: 'pressport-help' }, [
+						who ? who + ', ' : '',
+						el( 'time', { datetime: new Date( x.created * 1000 ).toISOString(), title: formatDate( x.created ), text: relativeTime( x.created ) } ),
+					] ),
+				] ),
+			] ),
+			el( 'td', {}, el( 'span', { class: 'pressport-badge pressport-badge-' + x.status, text: EXPORT_STATUS_LABELS[ x.status ] || x.status } ) ),
+			el( 'td', { class: 'pressport-h-result' }, el( 'span', { class: 'pressport-help', text: result } ) ),
+			el( 'td', {}, actions ),
+		] ) );
+		body.appendChild( logRow );
 	}
 
 	function restartJob( job ) {
@@ -1860,7 +2840,7 @@
 		if ( [ 'complete', 'rolled_back', 'failed' ].includes( job.status ) ) {
 			btn( 'Run again', () => restartJob( job ) );
 		}
-		if ( ! dry && job.status !== 'rolled_back' && Number( s.created ) > 0 ) {
+		if ( ! dry && ! [ 'rolled_back', 'running' ].includes( job.status ) && importedCount( job ) > 0 ) {
 			btn( 'Roll back', () => rollback( job.id ), 'pressport-danger' );
 		}
 		actions.appendChild( el( 'button', { type: 'button', class: 'pressport-link-danger', text: 'Delete', title: 'Remove from history. Imported content is kept.', onclick: () => {
@@ -1869,7 +2849,7 @@
 				api( 'delete', { job: job.id } ).then( () => {
 					state.historyJobs = ( state.historyJobs || [] ).filter( ( j ) => j.id !== job.id );
 					drawHistory( root.querySelector( '.pressport-history-panel' ) );
-				} );
+				} ).catch( showError );
 			}
 		} } ) );
 
@@ -1878,7 +2858,7 @@
 			el( 'td', { class: 'pressport-h-source' }, [
 				el( 'span', { class: 'pressport-source-icon is-sm pressport-icon-' + job.source, 'aria-hidden': 'true' } ),
 				el( 'div', {}, [
-					el( 'strong', { text: job.label } ),
+					el( 'strong', { text: job.settings.file_name || job.label } ),
 					el( 'span', { class: 'pressport-help' }, [
 						where ? hostOf( where ) + ' to ' : 'To ',
 						job.options.post_type + ', ',
@@ -1904,7 +2884,14 @@
 			return;
 		}
 		api( 'job', { job: id } ).then( ( data ) => {
+			// A draft was never started, so its options have not been through the duplicate check.
+			resume = resume && 'draft' !== data.job.status;
 			state.job = data.job;
+			state.mapping = normalizeMapping( data.job.mapping );
+			state.options = Object.assign( {}, D.defaults, data.job.options );
+			state.fields = ( data.job.fields || [] ).map( String );
+			state.records = data.job.records || [];
+			state.suggested = {};
 			state.step = 'run';
 			state.error = '';
 			state.paused = ! resume;

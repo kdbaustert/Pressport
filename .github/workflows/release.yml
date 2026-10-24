@@ -1,0 +1,74 @@
+name: Release
+
+# Push a tag like v0.1.0 to publish a release. The full CI suite runs first; the
+# zip is only built and published when every check passes.
+on:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Build and publish
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches the plugin version
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          header=$(sed -n 's/^ \* Version: *//p' pressport.php | tr -d '[:space:]')
+          constant=$(sed -n "s/^define( 'PRESSPORT_VERSION', '\(.*\)' );/\1/p" pressport.php)
+          echo "tag=$tag header=$header constant=$constant"
+          if [ "$tag" != "$header" ] || [ "$tag" != "$constant" ]; then
+            echo "::error::Tag v$tag does not match the plugin header ($header) and PRESSPORT_VERSION ($constant) in pressport.php."
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+          # Anything below 1.0.0, or with a suffix like -beta.1, is published as a pre-release.
+          case "$tag" in
+            0.*|*-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Build the plugin zip
+        run: |
+          # .gitattributes marks the development files export-ignore, so only the plugin ships.
+          git archive --format=zip --prefix=pressport/ -o "pressport-${{ steps.version.outputs.version }}.zip" HEAD
+          unzip -l "pressport-${{ steps.version.outputs.version }}.zip"
+
+      - name: Check the zip
+        run: |
+          zip="pressport-${{ steps.version.outputs.version }}.zip"
+          list=$(unzip -Z1 "$zip")
+          for required in pressport/pressport.php pressport/uninstall.php pressport/readme.txt pressport/assets/admin.js pressport/includes/class-pressport-importer.php; do
+            echo "$list" | grep -qx "$required" || { echo "::error::$required is missing from the zip."; exit 1; }
+          done
+          if echo "$list" | grep -E '^pressport/(tests|vendor|\.github)/|^pressport/(composer\.(json|lock)|phpcs\.xml\.dist|phpunit\.xml\.dist)$'; then
+            echo "::error::Development files ended up in the zip (listed above)."
+            exit 1
+          fi
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=(--title "PressPort ${{ steps.version.outputs.version }}" --generate-notes --verify-tag)
+          if [ "${{ steps.version.outputs.prerelease }}" = "true" ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" "pressport-${{ steps.version.outputs.version }}.zip" "${flags[@]}"

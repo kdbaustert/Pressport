@@ -12,6 +12,8 @@ defined( 'ABSPATH' ) || exit;
  */
 class PressPort_Runner {
 
+	const LOCK_TTL = 5 * MINUTE_IN_SECONDS; // A lock older than this was left by a request that died.
+
 	/**
 	 * Prepare a source, create a job and return a preview.
 	 *
@@ -39,24 +41,32 @@ class PressPort_Runner {
 			return new WP_Error( 'pressport_empty', __( 'The source returned no records.', 'pressport' ) );
 		}
 
-		$fields = array();
+		// Fields the source found while preparing (it may look past the sample), plus those in the sample.
+		$fields = array_fill_keys( isset( $prepared['fields'] ) ? (array) $prepared['fields'] : array(), true );
 		foreach ( $batch['records'] as $record ) {
 			foreach ( array_keys( $record ) as $key ) {
 				$fields[ $key ] = true;
 			}
 		}
+		// Numeric keys come back as integers; field names are strings everywhere else.
+		$names = array_map( 'strval', array_keys( $fields ) );
 
 		$job = PressPort_Job::create( $source_id, $prepared );
 		if ( null === $job->data['total'] && isset( $batch['total'] ) ) {
 			$job->data['total'] = $batch['total'];
 		}
-		$job->data['mapping']['fields'] = array_intersect( $source->suggested_mapping(), array_keys( $fields ) );
+		$job->data['mapping']['fields'] = array_intersect( $source->suggested_mapping(), $names );
 
 		// Files exported by PressPort carry their own mapping: apply it.
-		$embedded = isset( $prepared['pressport_mapping'] ) ? $prepared['pressport_mapping'] : ( isset( $prepared['delegate_settings']['pressport_mapping'] ) ? $prepared['delegate_settings']['pressport_mapping'] : null );
+		$embedded = isset( $prepared['pressport_mapping'] ) ? $prepared['pressport_mapping'] : null;
 		if ( is_array( $embedded ) ) {
-			$job->data['mapping'] = self::apply_embedded_mapping( $job->data['mapping'], $embedded, array_keys( $fields ) );
+			$job->data['mapping'] = self::apply_embedded_mapping( $job->data['mapping'], $embedded, $names );
 			$job->log( 'info', __( 'This file was exported by PressPort; its field mapping was applied.', 'pressport' ) );
+		}
+		// ...and the type it was exported from: import into that type when this site has it.
+		$exported_type = isset( $prepared['pressport_post_type'] ) ? $prepared['pressport_post_type'] : '';
+		if ( '' !== $exported_type && PressPort_Importer::importable_post_type( $exported_type ) ) {
+			$job->data['options']['post_type'] = $exported_type;
 		}
 		$job->log( 'info', sprintf( /* translators: %s: source label */ __( 'Connected to source: %s', 'pressport' ), call_user_func( array( get_class( $source ), 'label' ) ) ) );
 		$job->save();
@@ -64,7 +74,7 @@ class PressPort_Runner {
 		return array(
 			'job'     => $job,
 			'records' => $batch['records'],
-			'fields'  => array_keys( $fields ),
+			'fields'  => $names,
 			'mapping' => $job->data['mapping'],
 		);
 	}
@@ -108,32 +118,109 @@ class PressPort_Runner {
 	}
 
 	/**
+	 * Read every record of a job and count the ones already on this site, so the
+	 * user can choose before importing. Nothing is saved.
+	 *
+	 * @param PressPort_Job $job      Job, with the mapping and options it will run with.
+	 * @param int           $examples How many example titles to return.
+	 * @return array|WP_Error { total, count, before, existing, examples: [{ title, post_id, kind, label }],
+	 *                        changed: [{ post_id, title, type, kind, label, changes }],
+	 *                        images: [{ post_id, title, kind, label, current, current_full, imported, is_image, changes }] }
+	 */
+	public static function find_duplicates( PressPort_Job $job, $examples = 5 ) {
+		$source = $job->source();
+		if ( is_wp_error( $source ) ) {
+			return $source;
+		}
+		if ( function_exists( 'set_time_limit' ) && ! ( defined( 'WP_CLI' ) && WP_CLI ) ) {
+			@set_time_limit( 300 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		}
+		$out    = array(
+			'total'    => 0,
+			'count'    => 0,
+			'before'   => 0,
+			'existing' => 0,
+			'examples' => array(),
+			'changed'  => array(), // Duplicates whose content differs: the user reviews these before updating.
+			'images'   => array(), // Media duplicates, shown side by side.
+		);
+		$cursor = null;
+		do {
+			$batch = $source->fetch( $cursor, 200 );
+			if ( is_wp_error( $batch ) ) {
+				return $batch;
+			}
+			foreach ( $batch['records'] as $record ) {
+				++$out['total'];
+				$match = PressPort_Importer::find_duplicate( $record, $job );
+				if ( ! $match ) {
+					continue;
+				}
+				++$out['count'];
+				++$out[ $match['kind'] ];
+				$title = html_entity_decode( get_the_title( $match['post_id'] ), ENT_QUOTES, 'UTF-8' );
+				if ( count( $out['examples'] ) < $examples ) {
+					$out['examples'][] = array(
+						'title'   => $title,
+						'post_id' => $match['post_id'],
+						'kind'    => $match['kind'],
+						'label'   => $match['label'],
+					);
+				}
+				if ( ! empty( $match['image'] ) ) {
+					// Media duplicates are compared by eye: the user picks update details or replace the file.
+					$out['images'][] = array_merge(
+						$match['image'],
+						array(
+							'post_id' => $match['post_id'],
+							'title'   => $title,
+							'kind'    => $match['kind'],
+							'label'   => $match['label'],
+						)
+					);
+				} elseif ( $match['changes'] ) {
+					$type             = get_post_type_object( get_post_type( $match['post_id'] ) );
+					$out['changed'][] = array(
+						'post_id' => $match['post_id'],
+						'title'   => $title,
+						'type'    => $type ? $type->labels->singular_name : '',
+						'kind'    => $match['kind'],
+						'label'   => $match['label'],
+						'changes' => $match['changes'],
+					);
+				}
+			}
+			$cursor = $batch['next'];
+		} while ( null !== $cursor && ! empty( $batch['records'] ) );
+		return $out;
+	}
+
+	/**
 	 * Process the next batch of a job.
 	 *
 	 * @param PressPort_Job $job Job.
 	 * @return array|WP_Error { done: bool, results: array[] }
 	 */
 	public static function run_batch( PressPort_Job $job ) {
+		$lock = self::lock( $job );
+		if ( ! $lock ) {
+			return new WP_Error( 'pressport_locked', __( 'A batch for this job is already running.', 'pressport' ) );
+		}
 		if ( in_array( $job->data['status'], array( 'complete', 'rolled_back', 'cancelled' ), true ) ) {
+			self::unlock( $job, $lock );
 			return array(
 				'done'    => true,
 				'results' => array(),
 			);
 		}
 
-		$lock = 'pressport_lock_' . $job->data['id'];
-		if ( get_transient( $lock ) ) {
-			return new WP_Error( 'pressport_locked', __( 'A batch for this job is already running.', 'pressport' ) );
-		}
-		set_transient( $lock, 1, 5 * MINUTE_IN_SECONDS );
-
 		$source = $job->source();
 		if ( is_wp_error( $source ) ) {
-			delete_transient( $lock );
+			self::unlock( $job, $lock );
 			return $source;
 		}
 
-		if ( function_exists( 'set_time_limit' ) ) {
+		if ( function_exists( 'set_time_limit' ) && ! ( defined( 'WP_CLI' ) && WP_CLI ) ) {
 			@set_time_limit( 300 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 		}
 		wp_defer_term_counting( true );
@@ -147,7 +234,7 @@ class PressPort_Runner {
 			$job->log( 'error', $batch->get_error_message() );
 			$job->data['status'] = 'failed';
 			$job->save();
-			delete_transient( $lock );
+			self::unlock( $job, $lock );
 			return $batch;
 		}
 
@@ -169,6 +256,9 @@ class PressPort_Runner {
 			}
 			++$job->data['stats']['processed'];
 			++$job->data['stats'][ $result['action'] ];
+			if ( 'created' === $result['action'] && empty( $job->data['options']['dry_run'] ) ) {
+				++$job->data['created_total'];
+			}
 			$level = 'failed' === $result['action'] ? 'error' : ( ! empty( $result['warning'] ) ? 'warning' : ( 'skipped' === $result['action'] ? 'info' : 'success' ) );
 			$job->log( $level, $result['message'] );
 			$results[] = $result;
@@ -182,8 +272,11 @@ class PressPort_Runner {
 			$job->log(
 				'info',
 				sprintf(
-					/* translators: 1: created, 2: updated, 3: skipped, 4: failed */
-					__( 'Import finished: %1$d created, %2$d updated, %3$d skipped, %4$d failed.', 'pressport' ),
+					empty( $job->data['options']['dry_run'] )
+						/* translators: 1: created, 2: updated, 3: skipped, 4: failed */
+						? __( 'Import finished: %1$d created, %2$d updated, %3$d skipped, %4$d failed.', 'pressport' )
+						/* translators: 1: created, 2: updated, 3: skipped, 4: failed */
+						: __( 'Dry run finished, nothing was saved: %1$d would be created, %2$d updated, %3$d skipped, %4$d failed.', 'pressport' ),
 					$s['created'],
 					$s['updated'],
 					$s['skipped'],
@@ -195,7 +288,7 @@ class PressPort_Runner {
 
 		wp_defer_term_counting( false );
 		wp_defer_comment_counting( false );
-		delete_transient( $lock );
+		self::unlock( $job, $lock );
 
 		return array(
 			'done'    => $done,
@@ -207,52 +300,110 @@ class PressPort_Runner {
 	 * Delete a batch of posts (and their imported media) created by a job.
 	 *
 	 * @param PressPort_Job $job   Job.
-	 * @param int    $limit Posts per batch.
-	 * @return array { deleted: int, remaining: int, done: bool }
+	 * @param int           $limit Posts per batch.
+	 * @return array { deleted: int, remaining: int, done: bool, error: string }
 	 */
 	public static function rollback_batch( PressPort_Job $job, $limit = 25 ) {
-		$ids = get_posts(
-			array(
-				'post_type'        => 'any',
-				'post_status'      => 'any',
-				'meta_key'         => '_pressport_job_id', // phpcs:ignore WordPress.DB.SlowDBQuery
-				'meta_value'       => $job->data['id'], // phpcs:ignore WordPress.DB.SlowDBQuery
-				'fields'           => 'ids',
-				'posts_per_page'   => $limit,
-				'suppress_filters' => true,
-			)
-		);
-		// Attachments are not part of 'any' when their status is 'inherit' under some setups; query explicitly.
-		$attachments = get_posts(
-			array(
-				'post_type'      => 'attachment',
-				'post_status'    => 'inherit',
-				'meta_key'       => '_pressport_job_id', // phpcs:ignore WordPress.DB.SlowDBQuery
-				'meta_value'     => $job->data['id'], // phpcs:ignore WordPress.DB.SlowDBQuery
-				'fields'         => 'ids',
-				'posts_per_page' => $limit,
-			)
-		);
-		$ids     = array_unique( array_merge( $ids, $attachments ) );
+		$lock = self::lock( $job );
+		if ( ! $lock ) {
+			return array(
+				'deleted'   => 0,
+				'remaining' => $job->imported_count(),
+				'done'      => true,
+				'error'     => __( 'An import batch for this job is running. Try again when it finishes.', 'pressport' ),
+			);
+		}
+		$cli     = defined( 'WP_CLI' ) && WP_CLI;
 		$deleted = 0;
-		foreach ( $ids as $id ) {
-			$ok = 'attachment' === get_post_type( $id ) ? wp_delete_attachment( $id, true ) : wp_delete_post( $id, true );
-			if ( $ok ) {
-				++$deleted;
+		$denied  = 0;
+		$offset  = 0; // Posts left in place (not allowed, or the delete failed) stay tagged: page past them.
+		do {
+			$ids  = $job->imported_query( $limit, $offset )->posts;
+			$full = count( $ids ) === (int) $limit;
+			foreach ( $ids as $id ) {
+				if ( ! $cli && ! current_user_can( 'delete_post', $id ) ) {
+					++$denied;
+					++$offset;
+					continue;
+				}
+				$ok = 'attachment' === get_post_type( $id ) ? wp_delete_attachment( $id, true ) : wp_delete_post( $id, true );
+				if ( $ok ) {
+					++$deleted;
+				} else {
+					++$offset;
+				}
+			}
+			// Page on only until something is deleted, so each batch either makes progress or proves none is possible.
+		} while ( 0 === $deleted && $full );
+		$remaining = $job->imported_count();
+		$error     = '';
+		if ( 0 === $remaining ) {
+			$job->data['status']        = 'rolled_back';
+			$job->data['cursor']        = null;
+			$job->data['created_total'] = 0;
+			$job->log( 'info', __( 'Rollback complete: imported content was deleted.', 'pressport' ) );
+		} elseif ( 0 === $deleted ) {
+			// Nothing could be deleted, so another batch would only fail again: stop without claiming success.
+			/* translators: %d: number of items */
+			$error = sprintf( __( 'Rollback stopped: %d imported items could not be deleted.', 'pressport' ), $remaining );
+			$job->log( 'error', $error );
+			if ( $denied ) {
+				/* translators: %d: number of items */
+				$job->log( 'warning', sprintf( _n( '%d of them was kept because you are not allowed to delete it.', '%d of them were kept because you are not allowed to delete them.', $denied, 'pressport' ), $denied ) );
 			}
 		}
-		$remaining = $job->imported_count();
-		$done      = 0 === $remaining || 0 === $deleted;
-		if ( $done ) {
-			$job->data['status'] = 'rolled_back';
-			$job->data['cursor'] = null;
-			$job->log( 'info', __( 'Rollback complete: imported content was deleted.', 'pressport' ) );
-		}
 		$job->save();
+		self::unlock( $job, $lock );
 		return array(
 			'deleted'   => $deleted,
 			'remaining' => $remaining,
-			'done'      => $done,
+			'done'      => 0 === $remaining || '' !== $error,
+			'error'     => $error,
 		);
+	}
+
+	/**
+	 * Take a job's batch lock, then reload the job so changes saved while waiting
+	 * are not overwritten. The insert either adds the row or fails in one query,
+	 * so two requests can't both get it (add_option() upserts, so it can't do this).
+	 *
+	 * @param PressPort_Job $job Job (reloaded in place).
+	 * @return string|false Token for unlock(), or false while another request holds the lock.
+	 */
+	public static function lock( PressPort_Job $job ) {
+		global $wpdb;
+		$name  = 'pressport_lock_' . $job->data['id'];
+		$token = ( time() + self::LOCK_TTL ) . ':' . wp_generate_password( 8, false );
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery -- the options API has no atomic insert.
+		$taken = $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')", $name, $token ) );
+		if ( ! $taken ) {
+			$held = (string) $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", $name ) );
+			if ( '' !== $held && (int) $held < time() ) {
+				// Expired: take it over, unless another request just did.
+				$taken = $wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s AND option_value = %s", $token, $name, $held ) );
+			}
+		}
+		// phpcs:enable
+		if ( ! $taken ) {
+			return false;
+		}
+		// This request may have cached the job before another one saved it.
+		wp_cache_delete( 'pressport_job_' . $job->data['id'], 'options' );
+		$fresh = PressPort_Job::load( $job->data['id'] );
+		if ( $fresh ) {
+			$job->data = $fresh->data;
+		}
+		return $token;
+	}
+
+	/**
+	 * Release a lock taken with lock() (only if it is still ours).
+	 *
+	 * @param PressPort_Job $job   Job.
+	 * @param string        $token Token from lock().
+	 */
+	public static function unlock( PressPort_Job $job, $token ) {
+		global $wpdb;
+		$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s", 'pressport_lock_' . $job->data['id'], $token ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 	}
 }

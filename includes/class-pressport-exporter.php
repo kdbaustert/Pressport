@@ -8,7 +8,7 @@
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Writes posts to a JSON or CSV file, in batches, with everything PressPort needs
+ * Writes posts to a JSON file, in batches, with everything PressPort needs
  * to rebuild them elsewhere: core fields, author email, hierarchical terms,
  * featured image URL, custom fields and ACF fields (images as URLs, related posts
  * as { id, slug, title } references, terms as names, users as emails).
@@ -18,6 +18,9 @@ defined( 'ABSPATH' ) || exit;
 class PressPort_Exporter {
 
 	const STATE_PREFIX = 'pressport_export_';
+	// Not under STATE_PREFIX: cleanup() deletes everything there after a day.
+	const LOG_PREFIX = 'pressport_exportlog_';
+	const LOG_INDEX  = 'pressport_exportlog_ids';
 
 	/**
 	 * Default export arguments.
@@ -25,18 +28,53 @@ class PressPort_Exporter {
 	 * @return array
 	 */
 	public static function defaults() {
+		$s = PressPort_Settings::get();
 		return array(
 			'post_type'     => 'post',
-			'statuses'      => array( 'publish' ),
+			'statuses'      => (array) $s['export_statuses'],
 			'after'         => '',
 			'before'        => '',
-			'include_acf'   => 1,
-			'include_meta'  => 1,
-			'include_terms' => 1,
-			'include_image' => 1,
-			'include_woo'   => 1,
-			'format'        => 'json',
+			'include_acf'   => (int) $s['export_include_acf'],
+			'include_meta'  => (int) $s['export_include_meta'],
+			'include_terms' => (int) $s['export_include_terms'],
+			'include_image' => (int) $s['export_include_image'],
+			'include_woo'   => (int) $s['export_include_woo'],
+			'exclude_meta'  => self::meta_patterns( $s['export_exclude_meta'] ),
 		);
+	}
+
+	/**
+	 * Meta keys to leave out, from a list or text with one key per line (or comma separated).
+	 * A trailing * matches every key starting with what comes before it.
+	 *
+	 * @param string|array $raw Keys.
+	 * @return string[]
+	 */
+	public static function meta_patterns( $raw ) {
+		$items = is_array( $raw ) ? $raw : preg_split( '/[\r\n,]+/', (string) $raw );
+		$keys  = array();
+		foreach ( $items as $item ) {
+			$star = '*' === substr( trim( (string) $item ), -1 );
+			$key  = sanitize_text_field( rtrim( trim( (string) $item ), '*' ) );
+			if ( '' !== $key ) {
+				$keys[] = $key . ( $star ? '*' : '' );
+			}
+		}
+		return array_values( array_unique( $keys ) );
+	}
+
+	/**
+	 * @param string   $key      Meta key.
+	 * @param string[] $patterns From meta_patterns().
+	 * @return bool
+	 */
+	protected static function meta_excluded( $key, array $patterns ) {
+		foreach ( $patterns as $pattern ) {
+			if ( '*' === substr( $pattern, -1 ) ? 0 === strpos( $key, substr( $pattern, 0, -1 ) ) : $key === $pattern ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -58,6 +96,9 @@ class PressPort_Exporter {
 		if ( in_array( 'any', $statuses, true ) || ! $statuses ) {
 			$statuses = $allowed;
 		}
+		if ( 'attachment' === $post_type ) {
+			$statuses = array( 'inherit' ); // Media has no publish status of its own.
+		}
 		$date = static function ( $value ) {
 			$value = trim( (string) $value );
 			return preg_match( '/^\d{4}-\d{2}-\d{2}$/', $value ) ? $value : '';
@@ -72,7 +113,7 @@ class PressPort_Exporter {
 			'include_terms' => empty( $args['include_terms'] ) ? 0 : 1,
 			'include_image' => empty( $args['include_image'] ) ? 0 : 1,
 			'include_woo'   => empty( $args['include_woo'] ) ? 0 : 1,
-			'format'        => in_array( $args['format'], array( 'csv', 'xml' ), true ) ? $args['format'] : 'json',
+			'exclude_meta'  => self::meta_patterns( $args['exclude_meta'] ),
 		);
 	}
 
@@ -96,6 +137,21 @@ class PressPort_Exporter {
 			'ignore_sticky_posts'    => true,
 			'update_post_term_cache' => ! empty( $args['include_terms'] ),
 		);
+		if ( 'attachment' === $args['post_type'] ) {
+			// Files sold as product downloads stay private: they travel with the product export instead.
+			$q['meta_query'] = array( // phpcs:ignore WordPress.DB.SlowDBQuery
+				'relation' => 'OR',
+				array(
+					'key'     => '_wp_attached_file',
+					'value'   => 'woocommerce_uploads/',
+					'compare' => 'NOT LIKE',
+				),
+				array(
+					'key'     => '_wp_attached_file',
+					'compare' => 'NOT EXISTS',
+				),
+			);
+		}
 		$range = array();
 		if ( $args['after'] ) {
 			$range['after'] = $args['after'];
@@ -139,20 +195,194 @@ class PressPort_Exporter {
 			'created'   => time(),
 			'total'     => self::count( $args ),
 			'done'      => 0,
-			'page'      => 1,
+			'last_id'   => 0,
 			'work'      => $dir . 'export-' . $id . '.jsonl', // One item per line until finished.
 			'file'      => '',
 			'meta_keys' => array(),
 			'acf_names' => array(),
 			'taxes'     => array(),
-			'woo'       => false,
 			'complete'  => false,
 		);
 		if ( false === file_put_contents( $state['work'], '' ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
 			return new WP_Error( 'pressport_export_write', __( 'Could not write to the uploads folder.', 'pressport' ) );
 		}
 		self::save_state( $state );
+		self::log_start( $state );
 		return $state;
+	}
+
+	// Export history: a lasting record of each export, kept after its file expires.
+
+	/**
+	 * @param string $id Export id.
+	 * @return array|null
+	 */
+	public static function history_entry( $id ) {
+		$entry = get_option( self::LOG_PREFIX . sanitize_key( $id ) );
+		return is_array( $entry ) ? $entry : null;
+	}
+
+	/**
+	 * Every logged export, newest first, without their log lines.
+	 *
+	 * @return array[]
+	 */
+	public static function history() {
+		$out = array();
+		foreach ( (array) get_option( self::LOG_INDEX, array() ) as $id ) {
+			$entry = self::history_entry( $id );
+			if ( $entry ) {
+				$state          = self::load_state( $id );
+				$entry['lines'] = count( $entry['log'] );
+				// The file is only kept for a day; an export whose state is gone before it finished was abandoned.
+				$entry['available'] = $state && ! empty( $state['complete'] ) && is_readable( $state['file'] );
+				if ( 'running' === $entry['status'] && ! $state ) {
+					$entry['status'] = 'stopped';
+				}
+				unset( $entry['log'] );
+				$out[] = $entry;
+			}
+		}
+		usort(
+			$out,
+			static function ( $a, $b ) {
+				return $b['created'] - $a['created'];
+			}
+		);
+		return $out;
+	}
+
+	/**
+	 * Remove an export from history (and its file, if it is still there).
+	 *
+	 * @param string $id Export id.
+	 */
+	public static function forget( $id ) {
+		$id    = sanitize_key( $id );
+		$state = self::load_state( $id );
+		if ( $state ) {
+			self::delete( $state );
+		}
+		delete_option( self::LOG_PREFIX . $id );
+		update_option( self::LOG_INDEX, array_values( array_diff( (array) get_option( self::LOG_INDEX, array() ), array( $id ) ) ), false );
+	}
+
+	/**
+	 * @param array $state State, just started.
+	 */
+	protected static function log_start( array $state ) {
+		$args     = $state['args'];
+		$type     = get_post_type_object( $args['post_type'] );
+		$user     = get_userdata( (int) $state['user'] );
+		$statuses = PressPort_Settings::export_statuses();
+		$included = array(
+			'include_terms' => __( 'terms', 'pressport' ),
+			'include_image' => __( 'featured images', 'pressport' ),
+			'include_meta'  => __( 'custom fields', 'pressport' ),
+			'include_acf'   => __( 'ACF fields', 'pressport' ),
+			'include_woo'   => __( 'WooCommerce data', 'pressport' ),
+		);
+		foreach ( $included as $key => $label ) {
+			if ( empty( $args[ $key ] ) || ( 'include_woo' === $key && ! PressPort_Woo::is_product_type( $args['post_type'] ) ) ) {
+				unset( $included[ $key ] );
+			}
+		}
+		$entry = array(
+			'id'        => $state['id'],
+			'created'   => $state['created'],
+			'finished'  => 0,
+			'user'      => $user ? $user->display_name : '',
+			'via'       => defined( 'WP_CLI' ) && WP_CLI ? 'cli' : 'admin',
+			'post_type' => $args['post_type'],
+			'label'     => $type ? $type->labels->name : $args['post_type'],
+			'total'     => (int) $state['total'],
+			'done'      => 0,
+			'size'      => 0,
+			'filename'  => '',
+			'status'    => 'running',
+			'log'       => array(),
+		);
+		$lines = array(
+			/* translators: 1: post type, 2: count */
+			sprintf( __( 'Exporting %1$s: %2$d items match.', 'pressport' ), $entry['label'], $entry['total'] ),
+			'attachment' === $args['post_type'] ? '' : sprintf(
+				/* translators: %s: statuses */
+				__( 'Status: %s.', 'pressport' ),
+				implode(
+					', ',
+					array_map(
+						static function ( $s ) use ( $statuses ) {
+							return isset( $statuses[ $s ] ) ? $statuses[ $s ] : $s;
+						},
+						$args['statuses']
+					)
+				)
+			),
+			$args['after'] || $args['before'] ? sprintf(
+				/* translators: 1: start date, 2: end date */
+				__( 'Published between %1$s and %2$s.', 'pressport' ),
+				$args['after'] ? $args['after'] : __( 'the first post', 'pressport' ),
+				$args['before'] ? $args['before'] : __( 'today', 'pressport' )
+			) : '',
+			/* translators: %s: list of what is included */
+			sprintf( __( 'Including: %s.', 'pressport' ), $included ? implode( ', ', $included ) : __( 'post fields only', 'pressport' ) ),
+			/* translators: %s: meta keys */
+			! empty( $args['include_meta'] ) && ! empty( $args['exclude_meta'] ) ? sprintf( __( 'Leaving out custom fields: %s.', 'pressport' ), implode( ', ', $args['exclude_meta'] ) ) : '',
+		);
+		foreach ( array_filter( $lines ) as $line ) {
+			$entry['log'][] = self::log_line( 'info', $line );
+		}
+		update_option( self::LOG_PREFIX . $entry['id'], $entry, false );
+		$ids   = (array) get_option( self::LOG_INDEX, array() );
+		$ids[] = $entry['id'];
+		update_option( self::LOG_INDEX, array_values( array_unique( $ids ) ), false );
+	}
+
+	/**
+	 * Add lines to an export's log and update its totals.
+	 *
+	 * @param array $state State.
+	 * @param array $lines From log_line().
+	 */
+	protected static function log_progress( array $state, array $lines ) {
+		$entry = self::history_entry( $state['id'] );
+		if ( ! $entry ) {
+			return;
+		}
+		$entry['done'] = (int) $state['done'];
+		$entry['log']  = array_merge( $entry['log'], $lines );
+		if ( ! empty( $state['error'] ) ) {
+			$entry['status']   = 'failed';
+			$entry['finished'] = time();
+			$entry['log'][]    = self::log_line( 'error', $state['error'] );
+		} elseif ( ! empty( $state['complete'] ) ) {
+			$entry['status']   = 'complete';
+			$entry['finished'] = time();
+			$entry['size']     = (int) $state['size'];
+			$entry['filename'] = $state['filename'];
+			$entry['log'][]    = self::log_line(
+				'success',
+				/* translators: 1: count, 2: file name, 3: size */
+				sprintf( __( 'Wrote %1$d items to %2$s (%3$s).', 'pressport' ), $entry['done'], $entry['filename'], size_format( $entry['size'] ) )
+			);
+		}
+		if ( count( $entry['log'] ) > PressPort_Job::MAX_LOG ) {
+			$entry['log'] = array_slice( $entry['log'], -PressPort_Job::MAX_LOG );
+		}
+		update_option( self::LOG_PREFIX . $entry['id'], $entry, false );
+	}
+
+	/**
+	 * @param string $level   info|success|warning|error.
+	 * @param string $message Message.
+	 * @return array
+	 */
+	protected static function log_line( $level, $message ) {
+		return array(
+			't' => time(),
+			'l' => $level,
+			'm' => $message,
+		);
 	}
 
 	/**
@@ -179,92 +409,110 @@ class PressPort_Exporter {
 	 * @return array State.
 	 */
 	public static function run_batch( array &$state, $limit = 50 ) {
+		global $wpdb;
 		if ( $state['complete'] ) {
 			return $state;
 		}
-		$q     = new WP_Query( self::query_args( $state['args'], $state['page'], $limit ) );
+		// Page by ID, not offset: posts deleted between batches would shift later ones out of the export.
+		$after = isset( $state['last_id'] ) ? (int) $state['last_id'] : 0;
+		$ids   = array_map( 'intval', $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND ID > %d ORDER BY ID ASC LIMIT %d", $state['args']['post_type'], $after, $limit ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$posts = $ids ? ( new WP_Query( array_merge( self::query_args( $state['args'], 1, $limit ), array( 'post__in' => $ids ) ) ) )->posts : array();
 		$lines = '';
-		foreach ( $q->posts as $post ) {
+		$log   = array();
+		foreach ( $posts as $post ) {
 			$item   = self::export_post( $post, $state['args'] );
 			$lines .= wp_json_encode( $item, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) . "\n";
+			/* translators: 1: title, 2: post id */
+			$log[]              = self::log_line( 'success', sprintf( __( 'Exported "%1$s" (#%2$d).', 'pressport' ), '' !== $post->post_title ? $post->post_title : __( '(untitled)', 'pressport' ), $post->ID ) );
 			$state['meta_keys'] = array_values( array_unique( array_merge( $state['meta_keys'], array_keys( $item['meta'] ) ) ) );
 			$state['acf_names'] = array_values( array_unique( array_merge( $state['acf_names'], array_keys( $item['acf'] ) ) ) );
 			$state['taxes']     = array_values( array_unique( array_merge( $state['taxes'], array_keys( $item['terms'] ) ) ) );
-			if ( isset( $item['woo'] ) ) {
-				$state['woo'] = true;
-			}
 			++$state['done'];
 		}
-		if ( '' !== $lines ) {
-			file_put_contents( $state['work'], $lines, FILE_APPEND ); // phpcs:ignore WordPress.WP.AlternativeFunctions
-		}
-		++$state['page'];
-		if ( count( $q->posts ) < $limit || $state['done'] >= $state['total'] ) {
-			self::finish( $state );
+		if ( '' !== $lines && false === file_put_contents( $state['work'], $lines, FILE_APPEND ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
+			self::fail( $state );
+		} else {
+			$state['last_id'] = $ids ? end( $ids ) : $after;
+			if ( count( $ids ) < $limit || $state['done'] >= $state['total'] ) {
+				self::finish( $state );
+			}
 		}
 		self::save_state( $state );
+		self::log_progress( $state, $log );
 		return $state;
 	}
 
 	/**
-	 * Build the final JSON or CSV file from the work file.
+	 * Build the final JSON file from the work file.
 	 *
 	 * @param array $state State (updated in place).
 	 */
 	protected static function finish( array &$state ) {
 		$args = $state['args'];
-		$name = sanitize_file_name( 'pressport-' . $args['post_type'] . '-' . gmdate( 'Y-m-d-His' ) . '.' . $args['format'] );
+		$name = sanitize_file_name( 'pressport-' . $args['post_type'] . '-' . gmdate( 'Y-m-d-His' ) . '.json' );
 		$dest = PressPort_Util::storage_dir() . 'export-' . $state['id'] . '-' . $name;
 		$in   = fopen( $state['work'], 'rb' ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 		$out  = fopen( $dest, 'wb' ); // phpcs:ignore WordPress.WP.AlternativeFunctions
-
-		if ( 'xml' === $args['format'] ) {
-			self::write_wxr( $in, $out, $state );
-		} elseif ( 'csv' === $args['format'] ) {
-			$columns = self::csv_columns( $state );
-			fwrite( $out, "\xEF\xBB\xBF" ); // phpcs:ignore WordPress.WP.AlternativeFunctions -- UTF-8 BOM for Excel.
-			fputcsv( $out, $columns, ',', '"', '\\' );
-			while ( false !== ( $line = fgets( $in ) ) ) { // phpcs:ignore WordPress.CodeAnalysis.AssignmentInCondition
-				$item = json_decode( $line, true );
-				if ( ! is_array( $item ) ) {
-					continue;
-				}
-				$flat = self::csv_row( $item );
-				$row  = array();
-				foreach ( $columns as $col ) {
-					$row[] = isset( $flat[ $col ] ) ? $flat[ $col ] : '';
-				}
-				fputcsv( $out, $row, ',', '"', '\\' );
+		if ( ! $in || ! $out ) {
+			if ( $in ) {
+				fclose( $in ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 			}
-		} else {
-			$header = array(
-				'version'   => PRESSPORT_VERSION,
-				'exported'  => gmdate( 'c' ),
-				'site'      => home_url(),
-				'post_type' => $args['post_type'],
-				'count'     => $state['done'],
-				'mapping'   => self::mapping_for( $state ),
-			);
-			fwrite( $out, '{"pressport":' . wp_json_encode( $header, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT ) . ",\n\"items\":[\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions
-			$first = true;
-			while ( false !== ( $line = fgets( $in ) ) ) { // phpcs:ignore WordPress.CodeAnalysis.AssignmentInCondition
-				$line = rtrim( $line, "\r\n" );
-				if ( '' === $line ) {
-					continue;
-				}
-				fwrite( $out, ( $first ? '' : ",\n" ) . $line ); // phpcs:ignore WordPress.WP.AlternativeFunctions
-				$first = false;
+			if ( $out ) {
+				fclose( $out ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 			}
-			fwrite( $out, "\n]}\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+			self::fail( $state );
+			return;
 		}
+		$header = array(
+			'version'   => PRESSPORT_VERSION,
+			'exported'  => gmdate( 'c' ),
+			'site'      => home_url(),
+			'post_type' => $args['post_type'],
+			'count'     => $state['done'],
+			'mapping'   => self::mapping_for( $state ),
+		);
+		// A full disk must not leave a cut-off file marked complete: every write is checked.
+		$write = static function ( $data ) use ( $out ) {
+			return strlen( $data ) === fwrite( $out, $data ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		};
+		$ok    = $write( '{"pressport":' . wp_json_encode( $header, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT ) . ",\n\"items\":[\n" );
+		$first = true;
+		while ( $ok && false !== ( $line = fgets( $in ) ) ) { // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition
+			$line = rtrim( $line, "\r\n" );
+			if ( '' === $line ) {
+				continue;
+			}
+			$ok    = $write( ( $first ? '' : ",\n" ) . $line );
+			$first = false;
+		}
+		$ok = $ok && $write( "\n]}\n" );
 		fclose( $in ); // phpcs:ignore WordPress.WP.AlternativeFunctions
-		fclose( $out ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$ok = fclose( $out ) && $ok; // phpcs:ignore WordPress.WP.AlternativeFunctions
+		if ( ! $ok ) {
+			wp_delete_file( $dest );
+			self::fail( $state );
+			return;
+		}
 		wp_delete_file( $state['work'] );
 
 		$state['file']     = $dest;
 		$state['filename'] = $name;
 		$state['size']     = (int) filesize( $dest );
 		$state['complete'] = true;
+	}
+
+	/**
+	 * Stop an export whose file could not be written. It counts as complete so
+	 * batch loops end, with no file to download.
+	 *
+	 * @param array $state State (updated in place).
+	 */
+	protected static function fail( array &$state ) {
+		$state['error']    = __( 'Could not write the export file in the uploads folder.', 'pressport' );
+		$state['complete'] = true;
+		$state['file']     = '';
+		$state['filename'] = '';
+		$state['size']     = 0;
 	}
 
 	/**
@@ -275,16 +523,21 @@ class PressPort_Exporter {
 	 */
 	public static function mapping_for( array $state ) {
 		$fields = array(
-			'source_id'          => 'id',
-			'post_title'         => 'title',
-			'post_content'       => 'content',
-			'post_excerpt'       => 'excerpt',
-			'post_date'          => 'date_gmt',
-			'post_name'          => 'slug',
-			'post_status'        => 'status',
-			'post_author'        => 'author',
-			'menu_order'         => 'menu_order',
-			'comment_status'     => 'comment_status',
+			'source_id'      => 'id',
+			'post_type'      => 'post_type',
+			'post_title'     => 'title',
+			'post_content'   => 'content',
+			'post_excerpt'   => 'excerpt',
+			'post_date'      => 'date_gmt',
+			'post_name'      => 'slug',
+			'post_status'    => 'status',
+			'post_author'    => 'author',
+			'menu_order'     => 'menu_order',
+			'comment_status' => 'comment_status',
+			'post_parent'    => 'parent.id',
+			'post_password'  => 'password',
+			'page_template'  => 'template',
+			'post_format'    => 'format',
 		);
 		if ( ! empty( $state['args']['include_terms'] ) ) {
 			if ( in_array( 'category', $state['taxes'], true ) ) {
@@ -294,7 +547,10 @@ class PressPort_Exporter {
 				$fields['tags'] = 'terms.post_tag';
 			}
 		}
-		if ( ! empty( $state['args']['include_image'] ) ) {
+		if ( 'attachment' === $state['args']['post_type'] ) {
+			$fields['media_url'] = 'file';
+			$fields['media_alt'] = 'alt';
+		} elseif ( ! empty( $state['args']['include_image'] ) ) {
 			$fields['featured_image']     = 'featured_image';
 			$fields['featured_image_alt'] = 'featured_image_alt';
 		}
@@ -319,10 +575,11 @@ class PressPort_Exporter {
 			$acf[ $name ] = 'acf.' . $name;
 		}
 		return array(
-			'fields'     => $fields,
-			'meta'       => $meta,
-			'taxonomies' => $taxonomies,
-			'acf'        => $acf,
+			'fields'      => $fields,
+			'meta'        => $meta,
+			'taxonomies'  => $taxonomies,
+			'acf'         => $acf,
+			'meta_native' => 1, // Arrays in "meta" are JSON arrays/objects, not JSON text as in older exports.
 		);
 	}
 
@@ -352,13 +609,21 @@ class PressPort_Exporter {
 			'parent'         => $post->post_parent ? self::post_ref( (int) $post->post_parent ) : null,
 			'menu_order'     => (int) $post->menu_order,
 			'comment_status' => $post->comment_status,
+			'password'       => $post->post_password,
+			'template'       => (string) get_post_meta( $post->ID, '_wp_page_template', true ),
+			'format'         => (string) get_post_format( $post ),
 			'link'           => get_permalink( $post ),
 			'terms'          => array(),
 			'meta'           => array(),
 			'acf'            => array(),
 		);
 
-		if ( ! empty( $args['include_image'] ) ) {
+		if ( 'attachment' === $post->post_type ) {
+			// Caption and description are the excerpt and content; the file itself travels as a URL.
+			$item['file']      = (string) wp_get_attachment_url( $post->ID );
+			$item['alt']       = (string) get_post_meta( $post->ID, '_wp_attachment_image_alt', true );
+			$item['mime_type'] = $post->post_mime_type;
+		} elseif ( ! empty( $args['include_image'] ) ) {
 			$thumb                      = (int) get_post_thumbnail_id( $post );
 			$item['featured_image']     = $thumb ? (string) wp_get_attachment_url( $thumb ) : '';
 			$item['featured_image_id']  = $thumb;
@@ -367,7 +632,7 @@ class PressPort_Exporter {
 
 		if ( ! empty( $args['include_terms'] ) ) {
 			foreach ( get_object_taxonomies( $post->post_type, 'objects' ) as $tax ) {
-				if ( 'post_format' === $tax->name || ! $tax->public && ! $tax->show_ui ) {
+				if ( 'post_format' === $tax->name || ( ! $tax->public && ! $tax->show_ui ) ) {
 					continue;
 				}
 				$terms = get_the_terms( $post, $tax->name );
@@ -384,13 +649,13 @@ class PressPort_Exporter {
 
 		$acf_names = array();
 		if ( ! empty( $args['include_acf'] ) && PressPort_ACF::active() ) {
-			foreach ( PressPort_ACF::fields_for_post_type( $post->post_type ) as $f ) {
+			foreach ( PressPort_ACF::fields_for_post_type( $post->post_type, $post->ID ) as $f ) {
 				$field = function_exists( 'acf_get_field' ) ? acf_get_field( $f['key'] ) : null;
 				if ( ! $field ) {
 					continue;
 				}
 				$raw = get_field( $field['key'], $post->ID, false );
-				if ( null === $raw || '' === $raw || false === $raw && 'true_false' !== $field['type'] ) {
+				if ( null === $raw || '' === $raw || ( false === $raw && 'true_false' !== $field['type'] ) ) {
 					continue;
 				}
 				$item['acf'][ $field['name'] ] = self::export_acf_value( $field, $raw );
@@ -404,11 +669,15 @@ class PressPort_Exporter {
 				if ( '' === $key || '_' === $key[0] || isset( $acf_names[ $key ] ) || is_protected_meta( $key, 'post' ) ) {
 					continue;
 				}
+				if ( ! empty( $args['exclude_meta'] ) && self::meta_excluded( $key, $args['exclude_meta'] ) ) {
+					continue;
+				}
 				if ( PressPort_ACF::active() && 0 === strpos( (string) get_post_meta( $post->ID, '_' . $key, true ), 'field_' ) ) {
 					continue; // Sub-field rows of an ACF repeater/group, e.g. items_0_title.
 				}
-				$value               = maybe_unserialize( $values[0] );
-				$item['meta'][ $key ] = is_scalar( $value ) || null === $value ? $value : wp_json_encode( $value );
+				// Arrays stay arrays; a key stored in several rows becomes { "_pressport_rows": [ ... ] }.
+				$rows                 = array_map( 'maybe_unserialize', $values );
+				$item['meta'][ $key ] = count( $rows ) > 1 ? array( '_pressport_rows' => $rows ) : $rows[0];
 			}
 		}
 
@@ -510,14 +779,18 @@ class PressPort_Exporter {
 				return $names;
 
 			case 'user':
-				$emails = array();
+				// Email and login: the same person often has a different email on each site.
+				$users = array();
 				foreach ( (array) $raw as $id ) {
 					$u = get_userdata( (int) $id );
 					if ( $u ) {
-						$emails[] = $u->user_email;
+						$users[] = array(
+							'email' => $u->user_email,
+							'login' => $u->user_login,
+						);
 					}
 				}
-				return ! empty( $field['multiple'] ) ? $emails : ( $emails ? $emails[0] : '' );
+				return ! empty( $field['multiple'] ) ? $users : ( $users ? $users[0] : '' );
 
 			case 'repeater':
 				$rows = array();
@@ -526,6 +799,7 @@ class PressPort_Exporter {
 				}
 				return $rows;
 
+			case 'clone': // Its value is keyed by the cloned fields' keys, like a group's.
 			case 'group':
 				return self::export_row( (array) $field['sub_fields'], is_array( $raw ) ? $raw : array() );
 
@@ -567,178 +841,6 @@ class PressPort_Exporter {
 			}
 		}
 		return $out;
-	}
-
-	// XML (WordPress eXtended RSS).
-
-	const NS_PRESSPORT = 'https://github.com/kdbaustert/pressport/export/1.0/';
-
-	/**
-	 * @param string $s Text.
-	 * @return string
-	 */
-	protected static function cdata( $s ) {
-		return '<![CDATA[' . str_replace( ']]>', ']]]]><![CDATA[>', (string) $s ) . ']]>';
-	}
-
-	/**
-	 * Write a WordPress export (WXR 1.2) file. It also carries PressPort extras
-	 * (ACF values, term paths, featured image URL) in a "pressport:" namespace,
-	 * which PressPort reads and other importers ignore.
-	 *
-	 * @param resource $in    JSONL work file.
-	 * @param resource $out   Output file.
-	 * @param array    $state State.
-	 */
-	protected static function write_wxr( $in, $out, array $state ) {
-		$w = static function ( $s ) use ( $out ) {
-			fwrite( $out, $s ); // phpcs:ignore WordPress.WP.AlternativeFunctions
-		};
-		$e = static function ( $s ) {
-			return htmlspecialchars( (string) $s, ENT_XML1 | ENT_QUOTES, 'UTF-8' );
-		};
-		$c = array( __CLASS__, 'cdata' );
-
-		$w( '<?xml version="1.0" encoding="UTF-8" ?>' . "\n" );
-		$w( '<!-- WordPress eXtended RSS export created by PressPort ' . $e( PRESSPORT_VERSION ) . '. Import it with PressPort ("URL or feed") or Tools > Import > WordPress. -->' . "\n" );
-		$w( '<rss version="2.0" xmlns:excerpt="http://wordpress.org/export/1.2/excerpt/" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:wfw="http://wellformedweb.org/CommentAPI/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:wp="http://wordpress.org/export/1.2/" xmlns:pressport="' . self::NS_PRESSPORT . '">' . "\n<channel>\n" );
-		$w( "\t<title>" . $e( get_bloginfo( 'name' ) ) . "</title>\n\t<link>" . $e( home_url() ) . "</link>\n\t<description>" . $e( get_bloginfo( 'description' ) ) . "</description>\n" );
-		$w( "\t<pubDate>" . gmdate( 'D, d M Y H:i:s +0000' ) . "</pubDate>\n\t<language>" . $e( get_bloginfo( 'language' ) ) . "</language>\n" );
-		$w( "\t<wp:wxr_version>1.2</wp:wxr_version>\n\t<wp:base_site_url>" . $e( site_url() ) . "</wp:base_site_url>\n\t<wp:base_blog_url>" . $e( home_url() ) . "</wp:base_blog_url>\n" );
-		$w( "\t<pressport:post_type>" . $e( $state['args']['post_type'] ) . "</pressport:post_type>\n" );
-
-		// Authors first (one pass over the work file), then items.
-		$authors = array();
-		while ( false !== ( $line = fgets( $in ) ) ) { // phpcs:ignore WordPress.CodeAnalysis.AssignmentInCondition
-			$item = json_decode( $line, true );
-			if ( is_array( $item ) && '' !== (string) $item['author_login'] ) {
-				$authors[ $item['author_login'] ] = $item;
-			}
-		}
-		foreach ( $authors as $login => $a ) {
-			$w( "\t<wp:author><wp:author_login>" . $c( $login ) . '</wp:author_login><wp:author_email>' . $c( $a['author'] ) . '</wp:author_email><wp:author_display_name>' . $c( $a['author_name'] ) . "</wp:author_display_name></wp:author>\n" );
-		}
-
-		rewind( $in );
-		while ( false !== ( $line = fgets( $in ) ) ) { // phpcs:ignore WordPress.CodeAnalysis.AssignmentInCondition
-			$item = json_decode( $line, true );
-			if ( ! is_array( $item ) ) {
-				continue;
-			}
-			$gmt = $item['date_gmt'] ? strtotime( $item['date_gmt'] ) : false;
-			$w( "\t<item>\n" );
-			$w( "\t\t<title>" . $c( $item['title'] ) . "</title>\n\t\t<link>" . $e( $item['link'] ) . "</link>\n" );
-			$w( "\t\t<pubDate>" . ( $gmt ? gmdate( 'D, d M Y H:i:s +0000', $gmt ) : '' ) . "</pubDate>\n" );
-			$w( "\t\t<dc:creator>" . $c( $item['author_login'] ) . "</dc:creator>\n\t\t<guid isPermaLink=\"false\">" . $e( $item['link'] ) . "</guid>\n\t\t<description></description>\n" );
-			$w( "\t\t<content:encoded>" . $c( $item['content'] ) . "</content:encoded>\n\t\t<excerpt:encoded>" . $c( $item['excerpt'] ) . "</excerpt:encoded>\n" );
-			$w( "\t\t<wp:post_id>" . (int) $item['id'] . "</wp:post_id>\n" );
-			$w( "\t\t<wp:post_date>" . $c( $item['date'] ) . "</wp:post_date>\n\t\t<wp:post_date_gmt>" . $c( $gmt ? gmdate( 'Y-m-d H:i:s', $gmt ) : '' ) . "</wp:post_date_gmt>\n" );
-			$w( "\t\t<wp:comment_status>" . $c( $item['comment_status'] ) . "</wp:comment_status>\n\t\t<wp:ping_status>" . $c( 'closed' ) . "</wp:ping_status>\n" );
-			$w( "\t\t<wp:post_name>" . $c( $item['slug'] ) . "</wp:post_name>\n\t\t<wp:status>" . $c( $item['status'] ) . "</wp:status>\n" );
-			$w( "\t\t<wp:post_parent>" . ( is_array( $item['parent'] ) ? (int) $item['parent']['id'] : 0 ) . "</wp:post_parent>\n\t\t<wp:menu_order>" . (int) $item['menu_order'] . "</wp:menu_order>\n" );
-			$w( "\t\t<wp:post_type>" . $c( $item['post_type'] ) . "</wp:post_type>\n\t\t<wp:post_password>" . $c( '' ) . "</wp:post_password>\n\t\t<wp:is_sticky>0</wp:is_sticky>\n" );
-			foreach ( $item['terms'] as $tax => $paths ) {
-				foreach ( (array) $paths as $path ) {
-					$parts = explode( ' > ', (string) $path );
-					$leaf  = end( $parts );
-					$w( "\t\t<category domain=\"" . $e( $tax ) . '" nicename="' . $e( sanitize_title( $leaf ) ) . '">' . $c( $leaf ) . "</category>\n" );
-				}
-			}
-			if ( ! empty( $item['featured_image_id'] ) ) {
-				$w( "\t\t<wp:postmeta><wp:meta_key>" . $c( '_thumbnail_id' ) . '</wp:meta_key><wp:meta_value>' . $c( (int) $item['featured_image_id'] ) . "</wp:meta_value></wp:postmeta>\n" );
-			}
-			foreach ( $item['meta'] as $key => $value ) {
-				$w( "\t\t<wp:postmeta><wp:meta_key>" . $c( $key ) . '</wp:meta_key><wp:meta_value>' . $c( is_scalar( $value ) ? $value : wp_json_encode( $value ) ) . "</wp:meta_value></wp:postmeta>\n" );
-			}
-			if ( $item['terms'] ) {
-				$w( "\t\t<pressport:terms>" . $c( wp_json_encode( $item['terms'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) ) . "</pressport:terms>\n" );
-			}
-			if ( $item['acf'] ) {
-				$w( "\t\t<pressport:acf>" . $c( wp_json_encode( $item['acf'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) ) . "</pressport:acf>\n" );
-			}
-			if ( ! empty( $item['woo'] ) ) {
-				$w( "\t\t<pressport:woo>" . $c( wp_json_encode( $item['woo'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) ) . "</pressport:woo>\n" );
-			}
-			if ( ! empty( $item['featured_image'] ) ) {
-				$w( "\t\t<pressport:featured_image>" . $e( $item['featured_image'] ) . "</pressport:featured_image>\n\t\t<pressport:featured_image_alt>" . $c( $item['featured_image_alt'] ) . "</pressport:featured_image_alt>\n" );
-			}
-			$w( "\t</item>\n" );
-
-			// The featured image as an attachment item, so WordPress's own importer can fetch it too.
-			if ( ! empty( $item['featured_image_id'] ) && ! empty( $item['featured_image'] ) ) {
-				$w( "\t<item>\n\t\t<title>" . $c( wp_basename( (string) wp_parse_url( $item['featured_image'], PHP_URL_PATH ) ) ) . "</title>\n" );
-				$w( "\t\t<wp:post_id>" . (int) $item['featured_image_id'] . "</wp:post_id>\n\t\t<wp:post_parent>" . (int) $item['id'] . "</wp:post_parent>\n" );
-				$w( "\t\t<wp:status>" . $c( 'inherit' ) . "</wp:status>\n\t\t<wp:post_type>" . $c( 'attachment' ) . "</wp:post_type>\n" );
-				$w( "\t\t<wp:attachment_url>" . $c( $item['featured_image'] ) . "</wp:attachment_url>\n" );
-				$w( "\t\t<wp:postmeta><wp:meta_key>" . $c( '_wp_attachment_image_alt' ) . '</wp:meta_key><wp:meta_value>' . $c( $item['featured_image_alt'] ) . "</wp:meta_value></wp:postmeta>\n\t</item>\n" );
-			}
-		}
-		$w( "</channel>\n</rss>\n" );
-	}
-
-	// CSV.
-
-	/**
-	 * @param array $state State.
-	 * @return string[]
-	 */
-	protected static function csv_columns( array $state ) {
-		$cols = array( 'id', 'title', 'content', 'excerpt', 'date', 'date_gmt', 'modified_gmt', 'slug', 'status', 'post_type', 'author', 'author_name', 'author_login', 'parent', 'menu_order', 'comment_status', 'link' );
-		if ( ! empty( $state['args']['include_image'] ) ) {
-			$cols[] = 'featured_image';
-			$cols[] = 'featured_image_alt';
-		}
-		foreach ( $state['taxes'] as $tax ) {
-			$cols[] = 'terms.' . $tax;
-		}
-		foreach ( $state['acf_names'] as $name ) {
-			$cols[] = 'acf.' . $name;
-		}
-		foreach ( $state['meta_keys'] as $key ) {
-			$cols[] = 'meta.' . $key;
-		}
-		if ( ! empty( $state['woo'] ) ) {
-			$cols[] = 'woo';
-		}
-		return $cols;
-	}
-
-	/**
-	 * Flatten one item into CSV cells. Lists of plain values become "a|b|c";
-	 * anything nested (repeaters, references) becomes JSON, which the importer decodes.
-	 *
-	 * @param array $item Item.
-	 * @return array
-	 */
-	protected static function csv_row( array $item ) {
-		$cell = static function ( $value ) {
-			if ( null === $value ) {
-				return '';
-			}
-			if ( is_bool( $value ) ) {
-				return $value ? '1' : '0';
-			}
-			if ( is_array( $value ) ) {
-				if ( PressPort_Util::is_scalar_list( $value ) ) {
-					return implode( '|', array_map( 'strval', $value ) );
-				}
-				return wp_json_encode( $value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
-			}
-			return (string) $value;
-		};
-		$row = array();
-		foreach ( $item as $key => $value ) {
-			if ( in_array( $key, array( 'terms', 'meta', 'acf' ), true ) && is_array( $value ) ) {
-				foreach ( $value as $k => $v ) {
-					$row[ $key . '.' . $k ] = $cell( $v );
-				}
-			} elseif ( 'parent' === $key && is_array( $value ) ) {
-				$row['parent'] = $value['slug'];
-			} else {
-				$row[ $key ] = $cell( $value );
-			}
-		}
-		return $row;
 	}
 
 	/**

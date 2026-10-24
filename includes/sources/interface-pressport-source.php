@@ -162,9 +162,8 @@ abstract class PressPort_Source_Base implements PressPort_Source {
 			if ( $old && $old !== $path && 0 === strpos( wp_normalize_path( $old ), wp_normalize_path( PressPort_Util::storage_dir() ) ) && file_exists( $old ) ) {
 				wp_delete_file( $old );
 			}
-			$this->settings[ $key ]              = $path;
-			$this->settings[ $key . '_url' ]     = $url;
-			$this->settings[ $key . '_fetched' ] = time();
+			$this->settings[ $key ]          = $path;
+			$this->settings[ $key . '_url' ] = $url;
 		}
 		return true;
 	}

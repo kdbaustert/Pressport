@@ -2,3 +2,5 @@
 *.zip
 /vendor/
 /node_modules/
+.phpunit.result.cache
+.claude/

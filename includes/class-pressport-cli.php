@@ -8,24 +8,18 @@
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Import content from CSV, JSON, any URL or feed, WordPress or Drupal, and export it again.
+ * Import content from a JSON file, and export it as JSON again.
  *
  * ## EXAMPLES
  *
- *     # Preview a CSV and see suggested mapping
- *     wp pressport preview csv --file=./posts.csv
+ *     # Preview a PressPort export and see the mapping it carries
+ *     wp pressport preview json --file=./pressport-product.json
  *
- *     # Import a CSV straight from a URL (Google Sheets / Dropbox share links work too)
- *     wp pressport import csv --file=https://example.com/exports/posts.csv
+ *     # Import a PressPort export, updating anything imported before
+ *     wp pressport import json --file=./pressport-product.json --duplicate=update
  *
- *     # Import a CSV as pages, skipping rows imported before
- *     wp pressport import csv --file=./pages.csv --post_type=page
- *
- *     # Import a JSON feed with a custom mapping file
- *     wp pressport import json --feed=https://example.com/feed.json --map=./mapping.json
- *
- *     # Pull posts from another WordPress site, updating existing ones
- *     wp pressport import wordpress --site_url=https://old.example.com --duplicate=update
+ *     # Import any JSON file with a custom mapping file
+ *     wp pressport import json --file=./feed.json --map=./mapping.json
  *
  *     # Run everything from one config file
  *     wp pressport import --config=./migration.json
@@ -34,7 +28,7 @@ defined( 'ABSPATH' ) || exit;
  *     wp pressport rollback abc123defg --yes
  *
  *     # Export pages with ACF fields, to import on another site
- *     wp pressport export page --format=json --output=./pages.json
+ *     wp pressport export page --output=./pages.json
  */
 class PressPort_CLI {
 
@@ -43,7 +37,7 @@ class PressPort_CLI {
 	 *
 	 * @var string[]
 	 */
-	protected $reserved = array( 'config', 'map', 'post_type', 'status', 'author', 'duplicate', 'batch_size', 'featured-images', 'content-images', 'create-authors', 'create-terms', 'dry-run', 'limit' );
+	protected $reserved = array( 'config', 'map', 'post_type', 'status', 'author', 'duplicate', 'batch_size', 'featured-images', 'content-images', 'create-authors', 'create-terms', 'rewrite-links', 'dry-run' );
 
 	/**
 	 * Show the fields, suggested mapping and first record from a source.
@@ -51,16 +45,16 @@ class PressPort_CLI {
 	 * ## OPTIONS
 	 *
 	 * <source>
-	 * : csv, json, remote, wordpress, drupal (or a custom registered source).
+	 * : json (or a custom registered source).
 	 *
 	 * [--<field>=<value>]
-	 * : Source settings, e.g. --file=posts.csv (or an https:// URL), --feed=... (JSON feed URL), --site_url=..., --api_key=...
+	 * : Source settings, e.g. --file=export.json.
 	 *
 	 * @param array $args  Args.
 	 * @param array $assoc Assoc args.
 	 */
 	public function preview( $args, $assoc ) {
-		$preview = PressPort_Runner::preview( $args[0], $this->settings_from( $assoc ), 3 );
+		$preview = PressPort_Runner::preview( $args[0], $this->settings_from( $assoc, $args[0] ), 3 );
 		if ( is_wp_error( $preview ) ) {
 			WP_CLI::error( $preview->get_error_message() );
 		}
@@ -87,7 +81,7 @@ class PressPort_CLI {
 	 * ## OPTIONS
 	 *
 	 * [<source>]
-	 * : csv, json, remote, wordpress, drupal. Optional when --config is given.
+	 * : json (or a custom registered source). Optional when --config is given.
 	 *
 	 * [--config=<file>]
 	 * : JSON file: { "source": "...", "settings": {...}, "mapping": {...}, "options": {...} }
@@ -107,6 +101,9 @@ class PressPort_CLI {
 	 * [--duplicate=<mode>]
 	 * : skip, update or create. Defaults to the PressPort setting.
 	 *
+	 * [--duplicates=<choice>]
+	 * : What to do with records already on this site (imported before, or the same slug, SKU or media file name): skip, import (as copies), or update (the posts and pages whose title, content, excerpt, status, date, slug or author differ; the rest are skipped). Asks when left out; skips without asking when there is no terminal to ask in.
+	 *
 	 * [--batch_size=<n>]
 	 * : Records per batch. Defaults to the PressPort setting.
 	 *
@@ -119,25 +116,34 @@ class PressPort_CLI {
 	 * [--create-authors]
 	 * : Create users for unknown authors.
 	 *
+	 * [--[no-]create-terms]
+	 * : Create missing categories and terms. Defaults to the PressPort setting.
+	 *
+	 * [--[no-]rewrite-links]
+	 * : Point links to the old site at this one (PressPort exports only). Defaults to the PressPort setting.
+	 *
 	 * [--dry-run]
 	 * : Show what would happen without saving.
 	 *
 	 * [--<field>=<value>]
-	 * : Source settings, e.g. --file=posts.csv (or an https:// URL), --feed=... (JSON feed URL), --site_url=..., --bundle=article.
+	 * : Source settings, e.g. --file=export.json.
 	 *
 	 * @param array $args  Args.
 	 * @param array $assoc Assoc args.
 	 */
 	public function import( $args, $assoc ) {
+		if ( isset( $assoc['duplicates'] ) && ! in_array( $assoc['duplicates'], array( 'skip', 'import', 'update' ), true ) ) {
+			WP_CLI::error( '--duplicates must be skip, import or update.' );
+		}
 		$config = array();
 		if ( ! empty( $assoc['config'] ) ) {
 			$config = $this->read_json( $assoc['config'] );
 		}
 		$source = isset( $args[0] ) ? $args[0] : ( isset( $config['source'] ) ? $config['source'] : '' );
 		if ( '' === $source ) {
-			WP_CLI::error( 'Specify a source (csv, json, remote, wordpress, drupal) or --config.' );
+			WP_CLI::error( 'Specify a source (json) or --config.' );
 		}
-		$settings = array_merge( isset( $config['settings'] ) ? (array) $config['settings'] : array(), $this->settings_from( $assoc ) );
+		$settings = array_merge( isset( $config['settings'] ) ? (array) $config['settings'] : array(), $this->settings_from( $assoc, $source ) );
 
 		$preview = PressPort_Runner::preview( $source, $settings, 1 );
 		if ( is_wp_error( $preview ) ) {
@@ -162,7 +168,8 @@ class PressPort_CLI {
 			(array) $mapping
 		);
 
-		$options = array_merge( PressPort_Job::default_options(), isset( $config['options'] ) ? (array) $config['options'] : array() );
+		// The previewed job's options: the defaults, plus the post type a PressPort export came from.
+		$options = array_merge( $job->data['options'], isset( $config['options'] ) ? (array) $config['options'] : array() );
 		$flags   = array(
 			'post_type'  => 'post_type',
 			'status'     => 'default_status',
@@ -173,6 +180,12 @@ class PressPort_CLI {
 			if ( isset( $assoc[ $flag ] ) ) {
 				$options[ $key ] = $assoc[ $flag ];
 			}
+		}
+		if ( ! array_key_exists( $options['default_status'], get_post_statuses() ) ) {
+			WP_CLI::error( sprintf( '--status must be one of: %s.', implode( ', ', array_keys( get_post_statuses() ) ) ) );
+		}
+		if ( ! in_array( $options['duplicate'], array( 'skip', 'update', 'create' ), true ) ) {
+			WP_CLI::error( '--duplicate must be skip, update or create.' );
 		}
 		if ( isset( $assoc['author'] ) ) {
 			$user = is_numeric( $assoc['author'] ) ? get_userdata( (int) $assoc['author'] ) : ( get_user_by( 'login', $assoc['author'] ) ? get_user_by( 'login', $assoc['author'] ) : get_user_by( 'email', $assoc['author'] ) );
@@ -194,18 +207,73 @@ class PressPort_CLI {
 		$options['import_featured_image'] = (int) WP_CLI\Utils\get_flag_value( $assoc, 'featured-images', ! empty( $options['import_featured_image'] ) );
 		$options['import_content_images'] = (int) WP_CLI\Utils\get_flag_value( $assoc, 'content-images', ! empty( $options['import_content_images'] ) );
 		$options['create_authors']        = (int) WP_CLI\Utils\get_flag_value( $assoc, 'create-authors', ! empty( $options['create_authors'] ) );
+		$options['create_terms']          = (int) WP_CLI\Utils\get_flag_value( $assoc, 'create-terms', ! empty( $options['create_terms'] ) );
+		$options['rewrite_links']         = (int) WP_CLI\Utils\get_flag_value( $assoc, 'rewrite-links', ! empty( $options['rewrite_links'] ) );
 		$options['dry_run']               = (int) WP_CLI\Utils\get_flag_value( $assoc, 'dry-run', ! empty( $options['dry_run'] ) );
 
 		if ( ! post_type_exists( $options['post_type'] ) ) {
 			WP_CLI::error( sprintf( 'Post type "%s" does not exist.', $options['post_type'] ) );
 		}
 		$job->data['options'] = $options;
-		$job->data['status']  = 'ready';
+		if ( empty( $options['dry_run'] ) ) {
+			$job->data['options'] = $this->ask_duplicates( $job, isset( $assoc['duplicates'] ) ? $assoc['duplicates'] : '' );
+		}
+		$job->data['status'] = 'ready';
 		$job->save();
 
-		WP_CLI::log( sprintf( 'Job %s: importing into "%s"%s', $job->data['id'], $options['post_type'], $options['dry_run'] ? ' (dry run)' : '' ) );
+		WP_CLI::log( sprintf( 'Job %s: importing into "%s"%s', $job->data['id'], $job->data['options']['post_type'], $job->data['options']['dry_run'] ? ' (dry run)' : '' ) );
 		WP_CLI::log( 'Mapping: ' . wp_json_encode( $job->data['mapping']['fields'] ) );
 		$this->run( $job );
+	}
+
+	/**
+	 * Report records already on this site and settle whether to skip them.
+	 *
+	 * @param PressPort_Job $job    Job with the options it will run with.
+	 * @param string        $choice "skip", "import", "update", or '' to ask.
+	 * @return array Options.
+	 */
+	protected function ask_duplicates( PressPort_Job $job, $choice ) {
+		$options = $job->data['options'];
+		$found   = PressPort_Runner::find_duplicates( $job );
+		if ( is_wp_error( $found ) ) {
+			WP_CLI::error( $found->get_error_message() );
+		}
+		if ( ! $found['count'] ) {
+			return $options;
+		}
+		WP_CLI::log( sprintf( '%d of %d records are already on this site: %d imported before, %d with the same slug, SKU or file name.', $found['count'], $found['total'], $found['before'], $found['existing'] ) );
+		foreach ( $found['examples'] as $x ) {
+			WP_CLI::log( sprintf( '  "%s" (#%d)', $x['title'], $x['post_id'] ) );
+		}
+		if ( $found['changed'] ) {
+			WP_CLI::log( sprintf( '%d of them differ from what is on this site:', count( $found['changed'] ) ) );
+			foreach ( $found['changed'] as $c ) {
+				WP_CLI::log( sprintf( '  "%s" (#%d): %s', $c['title'], $c['post_id'], implode( ', ', wp_list_pluck( $c['changes'], 'label' ) ) ) );
+			}
+		}
+		if ( '' === $choice ) {
+			if ( function_exists( 'posix_isatty' ) && posix_isatty( STDIN ) ) {
+				$answer = $found['changed']
+					? \cli\choose( 'Skip them (y), import them anyway as copies (n), or update the ones that differ (u)?', 'ynu', 'y' )
+					: \cli\choose( 'Skip them? Answer n to import them anyway', 'yn', 'y' );
+				$choice = array(
+					'y' => 'skip',
+					'n' => 'import',
+					'u' => 'update',
+				)[ $answer ];
+			} else {
+				$choice = 'skip';
+				WP_CLI::log( 'Skipping them. Pass --duplicates=import or --duplicates=update to change that.' );
+			}
+		}
+		// As in the admin: records imported before keep "update" when asked for; otherwise skip or copy.
+		// "update" updates the ones that differ and skips the rest.
+		$update                   = 'update' === $options['duplicate'];
+		$options['skip_existing'] = 'import' === $choice ? 0 : 1;
+		$options['duplicate']     = $update ? 'update' : ( 'import' === $choice ? 'create' : 'skip' );
+		$options['update_ids']    = 'update' === $choice ? wp_list_pluck( $found['changed'], 'post_id' ) : array();
+		return $options;
 	}
 
 	/**
@@ -227,25 +295,15 @@ class PressPort_CLI {
 	}
 
 	/**
-	 * Export content to a file that PressPort (on this or another site) can import.
+	 * Export content to a JSON file that PressPort (on this or another site) can import.
 	 *
 	 * ## OPTIONS
 	 *
 	 * [<post_type>]
 	 * : Post type to export. Default: post.
 	 *
-	 * [--format=<format>]
-	 * : json (recommended: maps itself on import), csv or xml (WordPress export format).
-	 * ---
-	 * default: json
-	 * options:
-	 *   - json
-	 *   - csv
-	 *   - xml
-	 * ---
-	 *
 	 * [--status=<statuses>]
-	 * : Comma separated statuses, or "any". Default: publish.
+	 * : Comma separated statuses, or "any". Default: the export defaults in Settings (Published).
 	 *
 	 * [--after=<date>]
 	 * : Only content published on or after this date (YYYY-MM-DD).
@@ -253,45 +311,49 @@ class PressPort_CLI {
 	 * [--before=<date>]
 	 * : Only content published on or before this date (YYYY-MM-DD).
 	 *
-	 * [--no-acf]
-	 * : Leave out ACF fields.
+	 * [--[no-]acf]
+	 * : Include ACF fields. Defaults to the export defaults in Settings; --no-acf leaves them out.
 	 *
-	 * [--no-meta]
-	 * : Leave out other custom fields.
+	 * [--[no-]meta]
+	 * : Include other custom fields. Defaults to the export defaults in Settings; --no-meta leaves them out.
 	 *
-	 * [--no-terms]
-	 * : Leave out categories, tags and other terms.
+	 * [--exclude-meta=<keys>]
+	 * : Comma separated custom field keys to leave out. End a key with * to match a prefix. Default: the list in Settings.
 	 *
-	 * [--no-featured-images]
-	 * : Leave out featured image URLs.
+	 * [--[no-]terms]
+	 * : Include categories, tags and other terms. Defaults to the export defaults in Settings; --no-terms leaves them out.
 	 *
-	 * [--no-woo]
-	 * : Leave out WooCommerce product data (prices, stock, attributes, variations).
+	 * [--[no-]featured-images]
+	 * : Include featured image URLs. Defaults to the export defaults in Settings; --no-featured-images leaves them out.
+	 *
+	 * [--[no-]woo]
+	 * : Include WooCommerce product data (prices, stock, attributes, variations). Defaults to the export defaults in Settings; --no-woo leaves them out.
 	 *
 	 * [--output=<file>]
-	 * : Where to write the file. Default: pressport-<post_type>-<date>.<format> in the current directory.
+	 * : Where to write the file. Default: pressport-<post_type>-<date>.json in the current directory.
 	 *
 	 * ## EXAMPLES
 	 *
 	 *     wp pressport export post --status=publish,draft --output=posts.json
-	 *     wp pressport export product --format=csv --after=2024-01-01
+	 *     wp pressport export product --after=2024-01-01
 	 *
 	 * @param array $args  Args.
 	 * @param array $assoc Assoc args.
 	 */
 	public function export( $args, $assoc ) {
-		$export = PressPort_Exporter::sanitize_args(
+		$defaults = PressPort_Exporter::defaults();
+		$export   = PressPort_Exporter::sanitize_args(
 			array(
 				'post_type'     => isset( $args[0] ) ? $args[0] : 'post',
-				'format'        => isset( $assoc['format'] ) ? $assoc['format'] : 'json',
-				'statuses'      => isset( $assoc['status'] ) ? $assoc['status'] : 'publish',
+				'statuses'      => isset( $assoc['status'] ) ? $assoc['status'] : $defaults['statuses'],
 				'after'         => isset( $assoc['after'] ) ? $assoc['after'] : '',
 				'before'        => isset( $assoc['before'] ) ? $assoc['before'] : '',
-				'include_acf'   => WP_CLI\Utils\get_flag_value( $assoc, 'acf', true ),
-				'include_meta'  => WP_CLI\Utils\get_flag_value( $assoc, 'meta', true ),
-				'include_terms' => WP_CLI\Utils\get_flag_value( $assoc, 'terms', true ),
-				'include_image' => WP_CLI\Utils\get_flag_value( $assoc, 'featured-images', true ),
-				'include_woo'   => WP_CLI\Utils\get_flag_value( $assoc, 'woo', true ),
+				'include_acf'   => WP_CLI\Utils\get_flag_value( $assoc, 'acf', ! empty( $defaults['include_acf'] ) ),
+				'include_meta'  => WP_CLI\Utils\get_flag_value( $assoc, 'meta', ! empty( $defaults['include_meta'] ) ),
+				'include_terms' => WP_CLI\Utils\get_flag_value( $assoc, 'terms', ! empty( $defaults['include_terms'] ) ),
+				'include_image' => WP_CLI\Utils\get_flag_value( $assoc, 'featured-images', ! empty( $defaults['include_image'] ) ),
+				'include_woo'   => WP_CLI\Utils\get_flag_value( $assoc, 'woo', ! empty( $defaults['include_woo'] ) ),
+				'exclude_meta'  => isset( $assoc['exclude-meta'] ) ? $assoc['exclude-meta'] : $defaults['exclude_meta'],
 			)
 		);
 		if ( is_wp_error( $export ) ) {
@@ -302,7 +364,7 @@ class PressPort_CLI {
 			WP_CLI::error( $state->get_error_message() );
 		}
 		if ( ! $state['total'] ) {
-			PressPort_Exporter::delete( $state );
+			PressPort_Exporter::forget( $state['id'] );
 			WP_CLI::error( 'Nothing to export with these filters.' );
 		}
 		$progress = WP_CLI\Utils\make_progress_bar( sprintf( 'Exporting %d %s', $state['total'], $export['post_type'] ), $state['total'] );
@@ -349,6 +411,9 @@ class PressPort_CLI {
 		do {
 			$result   = PressPort_Runner::rollback_batch( $job, 100 );
 			$deleted += $result['deleted'];
+			if ( ! empty( $result['error'] ) ) {
+				WP_CLI::error( sprintf( '%s (%d items deleted before it stopped.)', $result['error'], $deleted ) );
+			}
 		} while ( ! $result['done'] );
 		WP_CLI::success( sprintf( 'Deleted %d items.', $deleted ) );
 	}
@@ -423,20 +488,20 @@ class PressPort_CLI {
 	/**
 	 * Extract source settings from assoc args.
 	 *
-	 * @param array $assoc Assoc args.
+	 * @param array  $assoc  Assoc args.
+	 * @param string $source Source id.
 	 * @return array
 	 */
-	protected function settings_from( $assoc ) {
+	protected function settings_from( $assoc, $source ) {
 		$settings = array();
 		foreach ( $assoc as $key => $value ) {
 			if ( in_array( $key, $this->reserved, true ) ) {
 				continue;
 			}
-			// --url is taken by WP-CLI itself, so JSON feeds use --feed.
-			if ( 'feed' === $key ) {
-				$key = 'url';
-			}
 			if ( 'file' === $key && preg_match( '#^https?://#i', (string) $value ) ) {
+				if ( ! $this->remote_file_allowed( $source ) ) {
+					WP_CLI::error( sprintf( 'The %s source needs a local file: download it first and pass its path to --file.', $source ) );
+				}
 				// Remote file: downloaded by the source when it is prepared.
 				$settings['file_url'] = $value;
 				continue;
@@ -451,6 +516,25 @@ class PressPort_CLI {
 			$settings[ $key ] = $value;
 		}
 		return $settings;
+	}
+
+	/**
+	 * Whether a source's "file" setting may be a URL (the JSON source takes uploads only).
+	 *
+	 * @param string $source Source id.
+	 * @return bool
+	 */
+	protected function remote_file_allowed( $source ) {
+		$all = PressPort_Sources::all();
+		if ( empty( $all[ $source ] ) || ! class_exists( $all[ $source ] ) ) {
+			return true; // Unknown source: preview() reports that.
+		}
+		foreach ( call_user_func( array( $all[ $source ], 'settings_schema' ) ) as $field ) {
+			if ( 'file' === $field['key'] ) {
+				return PressPort_Source_Base::allows_remote( $field );
+			}
+		}
+		return true;
 	}
 
 	/**

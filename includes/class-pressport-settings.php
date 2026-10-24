@@ -35,12 +35,22 @@ class PressPort_Settings {
 			'import_content_images'    => 0,
 			'create_terms'             => 1,
 			'create_authors'           => 0,
+			'rewrite_links'            => 1,
+			// Export defaults.
+			'export_statuses'          => array( 'publish' ),
+			'export_include_terms'     => 1,
+			'export_include_image'     => 1,
+			'export_include_meta'      => 1,
+			'export_include_acf'       => 1,
+			'export_include_woo'       => 1,
+			'export_exclude_meta'      => '',
 			// Access.
 			'capability'               => 'manage_options',
 			// Connections.
 			'request_timeout'          => 30,
 			'allow_local_sources'      => 0,
 			'max_remote_size'          => 100, // MB.
+			'max_media_size'           => 0, // MB, 0 = no limit.
 			// Housekeeping.
 			'job_retention_days'       => 0,
 			'remove_meta_on_uninstall' => 0,
@@ -106,6 +116,7 @@ class PressPort_Settings {
 		);
 
 		add_settings_section( 'pressport_defaults', __( 'Import defaults', 'pressport' ), array( __CLASS__, 'section_defaults' ), self::PAGE );
+		add_settings_section( 'pressport_export', __( 'Export defaults', 'pressport' ), array( __CLASS__, 'section_export' ), self::PAGE );
 		add_settings_section( 'pressport_access', __( 'Access', 'pressport' ), '__return_false', self::PAGE );
 		add_settings_section( 'pressport_connections', __( 'Connections', 'pressport' ), '__return_false', self::PAGE );
 		add_settings_section( 'pressport_housekeeping', __( 'Housekeeping', 'pressport' ), '__return_false', self::PAGE );
@@ -158,13 +169,24 @@ class PressPort_Settings {
 				'import_content_images' => array( 'checkbox', __( 'Images in content', 'pressport' ), __( 'Download images found inside post content and rewrite their URLs', 'pressport' ) ),
 				'create_terms'          => array( 'checkbox', __( 'Terms', 'pressport' ), __( 'Create categories, tags and terms that don\'t exist yet', 'pressport' ) ),
 				'create_authors'        => array( 'checkbox', __( 'Authors', 'pressport' ), __( 'Create users for authors that don\'t exist yet (Author role, random password)', 'pressport' ) ),
+				'rewrite_links'         => array( 'checkbox', __( 'Links', 'pressport' ), __( 'Point links to the old site at this one', 'pressport' ), __( 'PressPort exports only. Changes links in post content; images and files in wp-content still point at the old site unless "Images in content" copies them.', 'pressport' ) ),
+			),
+			'pressport_export'       => array(
+				'export_statuses'      => array( 'checkboxes', __( 'Status', 'pressport' ), self::export_statuses() ),
+				'export_include_terms' => array( 'checkbox', __( 'Terms', 'pressport' ), __( 'Categories, tags and terms', 'pressport' ) ),
+				'export_include_image' => array( 'checkbox', __( 'Featured images', 'pressport' ), __( 'Featured image URLs', 'pressport' ) ),
+				'export_include_meta'  => array( 'checkbox', __( 'Custom fields', 'pressport' ), __( 'Public post meta', 'pressport' ) ),
+				'export_include_acf'   => array( 'checkbox', __( 'ACF fields', 'pressport' ), __( 'Advanced Custom Fields values', 'pressport' ) ),
+				'export_include_woo'   => array( 'checkbox', __( 'WooCommerce', 'pressport' ), __( 'Product data (prices, stock, attributes, variations)', 'pressport' ) ),
+				'export_exclude_meta'  => array( 'textarea', __( 'Leave out these custom fields', 'pressport' ), null, __( 'One meta key per line. End a line with * to leave out every key that starts with it, e.g. rank_math_*. Keys starting with "_" are always left out.', 'pressport' ) ),
 			),
 			'pressport_access'       => array(
 				'capability' => array( 'select', __( 'Who can run imports', 'pressport' ), self::access_levels(), __( 'Only administrators can change these settings.', 'pressport' ) ),
 			),
 			'pressport_connections'  => array(
 				'request_timeout'     => array( 'number', __( 'Request timeout', 'pressport' ), array( 5, 300 ), __( 'Seconds to wait for a remote site or feed. Image downloads get at least 60 seconds.', 'pressport' ), __( 'seconds', 'pressport' ) ),
-				'max_remote_size'     => array( 'number', __( 'Remote file size limit', 'pressport' ), array( 1, 2048 ), __( 'Largest file PressPort will download when a CSV is imported from a URL.', 'pressport' ), __( 'MB', 'pressport' ) ),
+				'max_remote_size'     => array( 'number', __( 'Remote file size limit', 'pressport' ), array( 1, 2048 ), __( 'Largest file PressPort will download when a source fetches a file from a URL.', 'pressport' ), __( 'MB', 'pressport' ) ),
+				'max_media_size'      => array( 'number', __( 'Image and media size limit', 'pressport' ), array( 0, 2048 ), __( 'Skip images and media files larger than this when importing. 0 means no limit.', 'pressport' ), __( 'MB', 'pressport' ) ),
 				'allow_local_sources' => array( 'checkbox', __( 'Local sources', 'pressport' ), __( 'Allow importing from localhost, private network addresses and non-standard ports', 'pressport' ), __( 'Turn this on to migrate from a local dev site (for example http://oldsite.test:8888). WordPress blocks these addresses by default; this only relaxes the rule for PressPort\'s own requests.', 'pressport' ) ),
 			),
 			'pressport_housekeeping' => array(
@@ -183,7 +205,7 @@ class PressPort_Settings {
 					$section,
 					array(
 						'key'       => $key,
-						'label_for' => 'checkbox' === $def[0] ? null : 'pressport_' . $key,
+						'label_for' => in_array( $def[0], array( 'checkbox', 'checkboxes' ), true ) ? null : 'pressport_' . $key,
 						'choices'   => isset( $def[2] ) ? $def[2] : null,
 						'help'      => isset( $def[3] ) ? $def[3] : '',
 						'suffix'    => isset( $def[4] ) ? $def[4] : '',
@@ -195,6 +217,25 @@ class PressPort_Settings {
 
 	public static function section_defaults() {
 		echo '<p>' . esc_html__( 'Starting values for new imports. You can still change them on the mapping screen for each import.', 'pressport' ) . '</p>';
+	}
+
+	public static function section_export() {
+		echo '<p>' . esc_html__( 'Starting values for the Export screen and wp pressport export. You can still change them for each export.', 'pressport' ) . '</p>';
+	}
+
+	/**
+	 * Statuses an export can include.
+	 *
+	 * @return array
+	 */
+	public static function export_statuses() {
+		return array(
+			'publish' => __( 'Published', 'pressport' ),
+			'draft'   => __( 'Draft', 'pressport' ),
+			'pending' => __( 'Pending review', 'pressport' ),
+			'private' => __( 'Private', 'pressport' ),
+			'future'  => __( 'Scheduled', 'pressport' ),
+		);
 	}
 
 	/**
@@ -243,6 +284,39 @@ class PressPort_Settings {
 	/**
 	 * @param array $args Field args.
 	 */
+	public static function field_checkboxes( $args ) {
+		$value = (array) self::get( $args['key'] );
+		echo '<fieldset>';
+		foreach ( $args['choices'] as $option => $label ) {
+			printf(
+				'<label><input type="checkbox" name="%2$s[%1$s][]" value="%3$s"%4$s> %5$s</label><br>',
+				esc_attr( $args['key'] ),
+				esc_attr( self::OPTION ),
+				esc_attr( $option ),
+				checked( in_array( $option, $value, true ), true, false ),
+				esc_html( $label )
+			);
+		}
+		echo '</fieldset>';
+		self::help( $args );
+	}
+
+	/**
+	 * @param array $args Field args.
+	 */
+	public static function field_textarea( $args ) {
+		printf(
+			'<textarea id="pressport_%1$s" name="%2$s[%1$s]" rows="4" cols="40" class="code">%3$s</textarea>',
+			esc_attr( $args['key'] ),
+			esc_attr( self::OPTION ),
+			esc_textarea( (string) self::get( $args['key'] ) )
+		);
+		self::help( $args );
+	}
+
+	/**
+	 * @param array $args Field args.
+	 */
 	protected static function help( $args ) {
 		if ( $args['help'] ) {
 			echo '<p class="description">' . esc_html( $args['help'] ) . '</p>';
@@ -272,16 +346,23 @@ class PressPort_Settings {
 			'batch_size'         => array( 1, 100 ),
 			'request_timeout'    => array( 5, 300 ),
 			'max_remote_size'    => array( 1, 2048 ),
+			'max_media_size'     => array( 0, 2048 ),
 			'job_retention_days' => array( 0, 3650 ),
 		);
 		foreach ( $ranges as $key => $range ) {
-			$value       = isset( $input[ $key ] ) ? (int) $input[ $key ] : $defaults[ $key ];
+			$value       = isset( $input[ $key ] ) && '' !== $input[ $key ] ? (int) $input[ $key ] : $defaults[ $key ];
 			$out[ $key ] = max( $range[0], min( $range[1], $value ) );
 		}
 
-		foreach ( array( 'import_featured_image', 'import_content_images', 'create_terms', 'create_authors', 'allow_local_sources', 'remove_meta_on_uninstall' ) as $key ) {
+		foreach ( array( 'import_featured_image', 'import_content_images', 'create_terms', 'create_authors', 'rewrite_links', 'export_include_terms', 'export_include_image', 'export_include_meta', 'export_include_acf', 'export_include_woo', 'allow_local_sources', 'remove_meta_on_uninstall' ) as $key ) {
 			$out[ $key ] = empty( $input[ $key ] ) ? 0 : 1;
 		}
+
+		$statuses               = isset( $input['export_statuses'] ) ? array_map( 'sanitize_key', (array) $input['export_statuses'] ) : array();
+		$statuses               = array_values( array_intersect( $statuses, array_keys( self::export_statuses() ) ) );
+		$out['export_statuses'] = $statuses ? $statuses : $defaults['export_statuses'];
+
+		$out['export_exclude_meta'] = isset( $input['export_exclude_meta'] ) ? implode( "\n", PressPort_Exporter::meta_patterns( $input['export_exclude_meta'] ) ) : '';
 
 		self::flush_cache();
 		return $out;
@@ -362,7 +443,7 @@ class PressPort_Settings {
 		}
 		echo '</tbody></table>';
 		echo '<p class="description">' . esc_html__( 'Large files or slow servers? Run imports from the command line instead:', 'pressport' ) . '</p>';
-		echo '<p><code>wp pressport import csv --file=posts.csv</code></p>';
+		echo '<p><code>wp pressport import json --file=export.json</code></p>';
 	}
 
 	/**
@@ -377,6 +458,16 @@ class PressPort_Settings {
 		foreach ( PressPort_Job::all() as $job ) {
 			if ( 'running' !== $job->data['status'] && (int) $job->data['updated'] < $cutoff ) {
 				$job->delete();
+			}
+		}
+		foreach ( PressPort_Exporter::history() as $entry ) {
+			if ( (int) $entry['created'] < $cutoff ) {
+				PressPort_Exporter::forget( $entry['id'] );
+			}
+		}
+		foreach ( PressPort_Replace::history() as $entry ) {
+			if ( (int) $entry['created'] < $cutoff && 'rolling_back' !== $entry['status'] ) {
+				PressPort_Replace::forget( $entry['id'] );
 			}
 		}
 	}
