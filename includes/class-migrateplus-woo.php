@@ -23,9 +23,10 @@ class MigratePlus_Woo {
 	/**
 	 * Meta key prefix for a related product that was not on this site yet. The
 	 * rest of the key is md5( "uid:<source uid>" ) or md5( "sku:<sku>" ) of the
-	 * missing product; the value is the relation (upsell, cross_sell, grouped).
-	 * When a product with that uid or SKU is imported, link_pending() adds it to
-	 * the waiting product and deletes the meta.
+	 * missing product; the value is the relation (upsell, cross_sell, grouped, or
+	 * a coupon's product and excluded_product). When a product with that uid or
+	 * SKU is imported, link_pending() adds it to the waiting product or coupon and
+	 * deletes the meta.
 	 *
 	 * @var string
 	 */
@@ -374,6 +375,51 @@ class MigratePlus_Woo {
 		return $refs;
 	}
 
+	/**
+	 * Make a coupon's product and category restrictions portable. They travel as
+	 * custom fields holding this site's ids; under "woo" the same products go as
+	 * source ids and SKUs, as up-sells do, and the categories as term paths, for
+	 * import_coupon(). Only the restrictions the item carries as custom fields.
+	 *
+	 * @param WP_Post $post Coupon.
+	 * @param array   $item Export item (by reference).
+	 */
+	public static function export_coupon( WP_Post $post, array &$item ) {
+		if ( ! self::active() || 'shop_coupon' !== $post->post_type ) {
+			return;
+		}
+		$coupon     = new WC_Coupon( $post->ID );
+		$products   = array(
+			'product_ids'         => array( 'product_refs', $coupon->get_product_ids( 'edit' ) ),
+			'exclude_product_ids' => array( 'excluded_product_refs', $coupon->get_excluded_product_ids( 'edit' ) ),
+		);
+		$categories = array(
+			'product_categories'         => array( 'product_categories', $coupon->get_product_categories( 'edit' ) ),
+			'exclude_product_categories' => array( 'excluded_product_categories', $coupon->get_excluded_product_categories( 'edit' ) ),
+		);
+		$woo        = array();
+		foreach ( $products as $meta_key => list( $key, $ids ) ) {
+			if ( array_key_exists( $meta_key, $item['meta'] ) ) {
+				$woo[ $key ] = self::refs( $ids );
+			}
+		}
+		foreach ( $categories as $meta_key => list( $key, $ids ) ) {
+			if ( ! array_key_exists( $meta_key, $item['meta'] ) ) {
+				continue;
+			}
+			$woo[ $key ] = array();
+			foreach ( $ids as $term_id ) {
+				$term = get_term( (int) $term_id, 'product_cat' );
+				if ( $term instanceof WP_Term ) {
+					$woo[ $key ][] = MigratePlus_Exporter::term_path( $term, true );
+				}
+			}
+		}
+		if ( $woo ) {
+			$item['woo'] = $woo;
+		}
+	}
+
 	// Signed file links.
 
 	/**
@@ -539,6 +585,53 @@ class MigratePlus_Woo {
 		// Variable-* types (e.g. variable-subscription) extend WC_Product_Variable.
 		if ( $product instanceof WC_Product_Variable && ! empty( $woo['variations'] ) ) {
 			self::import_variations( $product, (array) $woo['variations'], isset( $woo['default_attributes'] ) ? (array) $woo['default_attributes'] : array(), $ctx, $warnings );
+		}
+	}
+
+	/**
+	 * Point an imported coupon's product and category restrictions at this site's
+	 * products and categories (see export_coupon()). Products are matched as
+	 * up-sells are, by source id then SKU, and one not here yet is added when it
+	 * is imported; categories by name path, then slug. A coupon from an older
+	 * export has no "woo" payload and keeps the ids its custom fields brought.
+	 *
+	 * @param int             $post_id  Coupon post id.
+	 * @param array           $record   Flat record.
+	 * @param MigratePlus_Job $job      Job.
+	 * @param array           $opts     Job options.
+	 * @param string[]        $warnings Warnings (by reference).
+	 */
+	public static function import_coupon( $post_id, array $record, MigratePlus_Job $job, array $opts, array &$warnings ) {
+		$woo = self::read_payload( $record );
+		if ( null === $woo || ! self::active() ) {
+			return;
+		}
+		$ctx = array(
+			'post_id' => (int) $post_id,
+			'job'     => $job,
+		);
+		try {
+			$coupon = new WC_Coupon( (int) $post_id );
+			foreach ( array(
+				'product'          => 'set_product_ids',
+				'excluded_product' => 'set_excluded_product_ids',
+			) as $field => $method ) {
+				$refs = self::read_refs( $woo, $field );
+				if ( null !== $refs ) {
+					$coupon->$method( self::resolve_refs( $refs, $field, $ctx, $warnings ) );
+				}
+			}
+			foreach ( array(
+				'product_categories'          => 'set_product_categories',
+				'excluded_product_categories' => 'set_excluded_product_categories',
+			) as $key => $method ) {
+				if ( array_key_exists( $key, $woo ) ) {
+					$coupon->$method( MigratePlus_Importer::resolve_terms( 'product_cat', array_map( 'strval', (array) $woo[ $key ] ), ! empty( $opts['create_terms'] ), $warnings ) );
+				}
+			}
+			$coupon->save();
+		} catch ( Exception $e ) {
+			$warnings[] = __( 'WooCommerce: ', 'migrateplus' ) . $e->getMessage();
 		}
 	}
 
@@ -924,14 +1017,14 @@ class MigratePlus_Woo {
 			}
 			add_post_meta( $post_id, self::PENDING_META . md5( '' !== $uid ? 'uid:' . $uid : 'sku:' . $sku ), $field );
 			/* translators: %s: SKU or source product id */
-			$warnings[] = sprintf( __( 'Related product %s (up-sell, cross-sell or grouped) is not on this site yet. It will be linked when it is imported.', 'migrateplus' ), '' !== $sku ? '"' . $sku . '"' : '#' . $source_id );
+			$warnings[] = sprintf( __( 'Related product %s (up-sell, cross-sell, grouped or coupon product) is not on this site yet. It will be linked when it is imported.', 'migrateplus' ), '' !== $sku ? '"' . $sku . '"' : '#' . $source_id );
 		}
 		return array_values( array_unique( $ids ) );
 	}
 
 	/**
-	 * Add a just-imported product to the products that were waiting for it (see
-	 * PENDING_META), matched by its source uid or SKU.
+	 * Add a just-imported product to the products and coupons that were waiting
+	 * for it (see PENDING_META), matched by its source uid or SKU.
 	 *
 	 * @param WC_Product $product  Product just saved.
 	 * @param string[]   $warnings Warnings (by reference).
@@ -946,15 +1039,17 @@ class MigratePlus_Woo {
 			$keys[] = 'sku:' . $product->get_sku();
 		}
 		$accessors = array(
-			'upsell'     => array( 'get_upsell_ids', 'set_upsell_ids' ),
-			'cross_sell' => array( 'get_cross_sell_ids', 'set_cross_sell_ids' ),
-			'grouped'    => array( 'get_children', 'set_children' ),
+			'upsell'           => array( 'get_upsell_ids', 'set_upsell_ids' ),
+			'cross_sell'       => array( 'get_cross_sell_ids', 'set_cross_sell_ids' ),
+			'grouped'          => array( 'get_children', 'set_children' ),
+			'product'          => array( 'get_product_ids', 'set_product_ids' ),
+			'excluded_product' => array( 'get_excluded_product_ids', 'set_excluded_product_ids' ),
 		);
 		foreach ( $keys as $key ) {
 			$meta_key = self::PENDING_META . md5( $key );
 			$waiting  = get_posts(
 				array(
-					'post_type'        => 'product',
+					'post_type'        => array( 'product', 'shop_coupon' ),
 					'post_status'      => 'any',
 					'posts_per_page'   => -1,
 					'fields'           => 'ids',
@@ -963,7 +1058,7 @@ class MigratePlus_Woo {
 				)
 			);
 			foreach ( $waiting as $waiting_id ) {
-				$other = wc_get_product( $waiting_id );
+				$other = 'shop_coupon' === get_post_type( $waiting_id ) ? new WC_Coupon( $waiting_id ) : wc_get_product( $waiting_id );
 				foreach ( array_unique( get_post_meta( $waiting_id, $meta_key, false ) ) as $field ) {
 					if ( $other && isset( $accessors[ $field ] ) && method_exists( $other, $accessors[ $field ][1] ) ) {
 						list( $get, $set ) = $accessors[ $field ];

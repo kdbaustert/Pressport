@@ -61,11 +61,7 @@ class Test_Sources extends WP_UnitTestCase {
 		if ( PHP_VERSION_ID < 80100 ) {
 			$data->setAccessible( true ); // Needed before PHP 8.1, deprecated in 8.5.
 		}
-		try {
-			$sources = $data->invoke( null, 'new' )['sources'];
-		} catch ( TypeError $e ) {
-			$this->markTestIncomplete( 'Bug: a registered class that does not implement MigratePlus_Source is passed to call_user_func() in bootstrap_data(), a fatal TypeError on every MigratePlus admin page but Settings. ' . $e->getMessage() );
-		}
+		$sources = $data->invoke( null, 'new' )['sources'];
 		$this->assertSame( array( 'json', 'books' ), array_column( $sources, 'id' ) );
 		$this->assertSame( 'Book feed', $sources[1]['label'] );
 		$this->assertSame( 'count', $sources[1]['schema'][0]['key'] );

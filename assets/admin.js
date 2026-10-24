@@ -526,7 +526,8 @@
 			message,
 			actions: [
 				{ label, primary: true, danger, onClick: () => {
-					modal.update( { icon: 'working', dismissible: false, actions: [ { label: label + '…', primary: true, danger, disabled: true } ] } );
+					// No icon of its own: the tone's shows, the spinner now and the result's once onConfirm updates the modal.
+					modal.update( { icon: null, dismissible: false, actions: [ { label: label + '…', primary: true, danger, disabled: true } ] } );
 					onConfirm();
 				} },
 				{ label: 'Cancel', onClick: () => modal.close() },
@@ -2404,6 +2405,9 @@
 
 	const EXPORT_STATUSES = [ [ 'publish', 'Published' ], [ 'draft', 'Draft' ], [ 'pending', 'Pending review' ], [ 'private', 'Private' ], [ 'future', 'Scheduled' ] ];
 
+	// Shared by every render of the export screen, so a change made just after a re-render still sends one count.
+	let exportCountTimer = null;
+
 	function renderExport() {
 		const x = state.exportArgs = state.exportArgs || Object.assign( {}, D.exportDefaults, {
 			statuses: ( D.exportDefaults.statuses || [ 'publish' ] ).slice(),
@@ -2411,11 +2415,10 @@
 		} );
 		const countEl = el( 'span', { class: 'migrateplus-export-count', 'aria-live': 'polite', text: 'Counting…' } );
 		const submit = el( 'button', { type: 'submit', class: 'button button-primary migrateplus-btn-lg', text: 'Export' } );
-		let timer = null;
 		const recount = () => {
-			clearTimeout( timer );
+			clearTimeout( exportCountTimer );
 			countEl.textContent = 'Counting…';
-			timer = setTimeout( () => {
+			exportCountTimer = setTimeout( () => {
 				api( 'export_count', { args: x } ).then( ( d ) => {
 					const counts = Object.entries( d.counts || {} );
 					const each = counts.length > 1 ? ' (' + counts.map( ( [ type, n ] ) => n.toLocaleString() + ' ' + ( 1 === n ? postType( type ).label : postType( type ).plural || postType( type ).label ).toLowerCase() ).join( ', ' ) + ')' : '';
@@ -3204,7 +3207,7 @@
 			body.innerHTML = '';
 			pick.reset();
 			const q = state.historyQuery.trim().toLowerCase();
-			const shown = jobs.filter( ( job ) => ! q || [ job.label, job.options.post_type, STATUS_LABELS[ job.status ], job.settings.site_url, job.settings.url, job.settings.file_url ]
+			const shown = jobs.filter( ( job ) => ! q || [ job.settings.file_name, job.label, job.options.post_type, STATUS_LABELS[ job.status ], job.settings.site_url, job.settings.url, job.settings.file_url ]
 				.some( ( v ) => v && String( v ).toLowerCase().includes( q ) ) );
 			shown.forEach( ( job ) => body.appendChild( historyRow( job, pick ) ) );
 			if ( ! shown.length ) {

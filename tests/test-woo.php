@@ -480,9 +480,7 @@ class Test_Woo extends WP_UnitTestCase {
 		$this->import_doc( $doc )->delete();
 
 		$new = new WC_Coupon( 'mugs10' );
-		if ( array( $this->imported( $mug->get_id() )->get_id() ) !== $new->get_product_ids() ) {
-			$this->markTestIncomplete( 'Bug: a coupon\'s product_ids are imported as the old site\'s IDs, not mapped to the imported products.' );
-		}
+		$this->assertSame( array( $this->imported( $mug->get_id() )->get_id() ), $new->get_product_ids() );
 	}
 
 	public function test_products_and_media_in_one_file() {

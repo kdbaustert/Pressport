@@ -203,11 +203,7 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 				return $sources + array( 'ghost' => 'MigratePlus_No_Such_Source' );
 			}
 		);
-		try {
-			$out = $this->ajax( 'preview', array( 'source' => 'ghost' ) );
-		} catch ( TypeError $e ) {
-			$this->markTestIncomplete( 'Bug: ajax_preview() only checks the source id is registered, then calls settings_schema() on a class that may not exist: a fatal TypeError instead of an error message. ' . $e->getMessage() );
-		}
+		$out = $this->ajax( 'preview', array( 'source' => 'ghost' ) );
 		$this->assertFalse( $out['success'] );
 	}
 

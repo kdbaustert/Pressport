@@ -104,7 +104,7 @@ class MigratePlus_Admin {
 	protected static function bootstrap_data( $view ) {
 		$sources = array();
 		foreach ( MigratePlus_Sources::all() as $id => $class ) {
-			if ( class_exists( $class ) ) {
+			if ( MigratePlus_Sources::usable( $class ) ) {
 				$sources[] = array(
 					'id'     => $id,
 					'label'  => call_user_func( array( $class, 'label' ) ),
@@ -333,7 +333,7 @@ class MigratePlus_Admin {
 		// phpcs:disable WordPress.Security.NonceVerification -- verified in guard().
 		$source_id = isset( $_POST['source'] ) ? sanitize_key( wp_unslash( $_POST['source'] ) ) : '';
 		$all       = MigratePlus_Sources::all();
-		if ( empty( $all[ $source_id ] ) ) {
+		if ( empty( $all[ $source_id ] ) || ! MigratePlus_Sources::usable( $all[ $source_id ] ) ) {
 			self::fail( new WP_Error( 'migrateplus_source', __( 'Choose a source.', 'migrateplus' ) ) );
 		}
 		$class    = $all[ $source_id ];
@@ -818,7 +818,7 @@ class MigratePlus_Admin {
 	 */
 	protected static function source_label( $id ) {
 		$all = MigratePlus_Sources::all();
-		return isset( $all[ $id ] ) && class_exists( $all[ $id ] ) ? call_user_func( array( $all[ $id ], 'label' ) ) : $id;
+		return isset( $all[ $id ] ) && MigratePlus_Sources::usable( $all[ $id ] ) ? call_user_func( array( $all[ $id ], 'label' ) ) : $id;
 	}
 
 	// Export.

@@ -287,9 +287,8 @@ class Test_CLI extends WP_UnitTestCase {
 		$file = $this->export_from_old_site();
 
 		$this->assertStringContainsString( $error, $this->wp_error( 'import', array( 'json' ), $assoc + array( 'file' => $file ) ) );
-		if ( MigratePlus_Job::all() ) {
-			$this->markTestIncomplete( 'Bug: an import refused for a bad flag after the preview leaves a draft job behind, listed by wp migrateplus jobs.' );
-		}
+		// No draft job is left behind for wp migrateplus jobs to list.
+		$this->assertSame( array(), MigratePlus_Job::all() );
 	}
 
 	public function test_jobs_resume_and_rollback() {

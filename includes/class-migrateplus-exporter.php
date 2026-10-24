@@ -783,6 +783,9 @@ class MigratePlus_Exporter {
 		if ( ! empty( $args['include_woo'] ) && MigratePlus_Woo::is_product_type( $post->post_type ) ) {
 			MigratePlus_Woo::export_product( $post, $item, $args );
 		}
+		if ( 'shop_coupon' === $post->post_type ) {
+			MigratePlus_Woo::export_coupon( $post, $item );
+		}
 
 		if ( ! empty( $args['include_comments'] ) ) {
 			$item['comments'] = self::export_comments( $post, $args );

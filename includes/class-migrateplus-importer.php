@@ -337,6 +337,9 @@ class MigratePlus_Importer {
 		// WooCommerce product fields (prices, stock, attributes, variations).
 		if ( MigratePlus_Woo::is_product_type( $type ) ) {
 			MigratePlus_Woo::import( $post_id, $record, $job, $opts, $base, $warnings );
+		} elseif ( 'shop_coupon' === $type ) {
+			// After the custom fields: a coupon's product and category restrictions arrived there as the old site's ids.
+			MigratePlus_Woo::import_coupon( $post_id, $record, $job, $opts, $warnings );
 		}
 
 		$comments = empty( $mapping['fields']['comments'] ) ? null : MigratePlus_ACF::read( $record, $mapping['fields']['comments'] );

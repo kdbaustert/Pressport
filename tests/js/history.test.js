@@ -82,9 +82,7 @@ describe('History', () => {
     assert.deepEqual(json(env.sent('history_delete')[0], 'items'), [{ kind: 'job', id: 'reviews' }])
   })
 
-  // BUG in admin.js: search looks at the source label, post type, status and
-  // URLs but not settings.file_name, the name each row shows.
-  it('search finds a row by its file name', { skip: 'admin.js bug: search ignores file_name' }, async () => {
+  it('search finds a row by its file name', async () => {
     const env = await history()
     env.type(env.$('#migrateplus-history-search'), 'authors')
     assert.deepEqual(names(imports(env)), ['authors.json'])
@@ -135,9 +133,7 @@ describe('History', () => {
     })
   }
 
-  // BUG in admin.js: ask() sets icon 'working' on confirm and modal.update()
-  // merges options, so the summary keeps the spinner instead of its tone icon.
-  it('shows the success icon on the summary', { skip: 'admin.js bug: icon "working" outlives ask()' }, async () => {
+  it('shows the success icon on the summary', async () => {
     const env = await history({ history_delete: { deleted: [{ id: 'books' }], skipped: [] } })
     env.check(boxes(imports(env))[0])
     env.click(bulk(imports(env)))

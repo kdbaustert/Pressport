@@ -174,6 +174,33 @@ class MigratePlus_CLI {
 		}
 		$settings = array_merge( isset( $config['settings'] ) ? (array) $config['settings'] : array(), $this->settings_from( $assoc, $source ) );
 
+		// Options from --config or a saved mapping, then the flags. Checked here: preview() saves a job that a
+		// refusal after it would leave behind. The defaults preview() adds to them come from Settings, already valid.
+		$given = isset( $config['options'] ) ? (array) $config['options'] : array();
+		$flags = array(
+			'post_type'  => 'post_type',
+			'status'     => 'default_status',
+			'duplicate'  => 'duplicate',
+			'batch_size' => 'batch_size',
+		);
+		foreach ( $flags as $flag => $key ) {
+			if ( isset( $assoc[ $flag ] ) ) {
+				$given[ $key ] = $assoc[ $flag ];
+			}
+		}
+		if ( isset( $given['default_status'] ) && ! array_key_exists( $given['default_status'], get_post_statuses() ) ) {
+			WP_CLI::error( sprintf( '--status must be one of: %s.', implode( ', ', array_keys( get_post_statuses() ) ) ) );
+		}
+		if ( isset( $given['duplicate'] ) && ! in_array( $given['duplicate'], array( 'skip', 'update', 'create' ), true ) ) {
+			WP_CLI::error( '--duplicate must be skip, update or create.' );
+		}
+		if ( isset( $assoc['force-status'] ) ) {
+			$given['force_status'] = 'keep' === $assoc['force-status'] ? '' : $assoc['force-status'];
+		}
+		if ( ! empty( $given['force_status'] ) && ! in_array( $given['force_status'], array( 'publish', 'draft', 'pending', 'private' ), true ) ) {
+			WP_CLI::error( '--force-status must be publish, draft, pending, private or keep.' );
+		}
+
 		$preview = MigratePlus_Runner::preview( $source, $settings, 1 );
 		if ( is_wp_error( $preview ) ) {
 			WP_CLI::error( $preview->get_error_message() );
@@ -202,30 +229,7 @@ class MigratePlus_CLI {
 		);
 
 		// The previewed job's options: the defaults, plus the post type a MigratePlus export came from.
-		$options = array_merge( $job->data['options'], isset( $config['options'] ) ? (array) $config['options'] : array() );
-		$flags   = array(
-			'post_type'  => 'post_type',
-			'status'     => 'default_status',
-			'duplicate'  => 'duplicate',
-			'batch_size' => 'batch_size',
-		);
-		foreach ( $flags as $flag => $key ) {
-			if ( isset( $assoc[ $flag ] ) ) {
-				$options[ $key ] = $assoc[ $flag ];
-			}
-		}
-		if ( ! array_key_exists( $options['default_status'], get_post_statuses() ) ) {
-			WP_CLI::error( sprintf( '--status must be one of: %s.', implode( ', ', array_keys( get_post_statuses() ) ) ) );
-		}
-		if ( ! in_array( $options['duplicate'], array( 'skip', 'update', 'create' ), true ) ) {
-			WP_CLI::error( '--duplicate must be skip, update or create.' );
-		}
-		if ( isset( $assoc['force-status'] ) ) {
-			$options['force_status'] = 'keep' === $assoc['force-status'] ? '' : $assoc['force-status'];
-		}
-		if ( ! empty( $options['force_status'] ) && ! in_array( $options['force_status'], array( 'publish', 'draft', 'pending', 'private' ), true ) ) {
-			WP_CLI::error( '--force-status must be publish, draft, pending, private or keep.' );
-		}
+		$options = array_merge( $job->data['options'], $given );
 		if ( isset( $assoc['author'] ) ) {
 			$user = is_numeric( $assoc['author'] ) ? get_userdata( (int) $assoc['author'] ) : ( get_user_by( 'login', $assoc['author'] ) ? get_user_by( 'login', $assoc['author'] ) : get_user_by( 'email', $assoc['author'] ) );
 			if ( ! $user ) {
@@ -673,7 +677,7 @@ class MigratePlus_CLI {
 	 */
 	protected function remote_file_allowed( $source ) {
 		$all = MigratePlus_Sources::all();
-		if ( empty( $all[ $source ] ) || ! class_exists( $all[ $source ] ) ) {
+		if ( empty( $all[ $source ] ) || ! MigratePlus_Sources::usable( $all[ $source ] ) ) {
 			return true; // Unknown source: preview() reports that.
 		}
 		foreach ( call_user_func( array( $all[ $source ], 'settings_schema' ) ) as $field ) {

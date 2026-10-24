@@ -31,9 +31,7 @@ describe('Export', () => {
     assert.equal(env.modal.primary().getAttribute('href'), 'https://example.test/dl/exp1')
   })
 
-  // BUG in admin.js: each render starts its own recount timer and only clears
-  // its own, so a change within 250 ms of the last render sends two counts.
-  it('sends one count per change', { skip: 'admin.js bug: recount debounce does not survive re-render' }, async () => {
+  it('sends one count per change', async () => {
     const env = exportScreen()
     env.check(env.$('#migrateplus-export-type-page'))
     env.clock.tick(250)

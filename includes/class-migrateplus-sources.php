@@ -30,6 +30,17 @@ class MigratePlus_Sources {
 	}
 
 	/**
+	 * Whether a registered class can be used as a source: it exists and implements
+	 * MigratePlus_Source, so its static label() and settings_schema() can be called.
+	 *
+	 * @param mixed $class_name Class name from all().
+	 * @return bool
+	 */
+	public static function usable( $class_name ) {
+		return is_string( $class_name ) && class_exists( $class_name ) && is_subclass_of( $class_name, 'MigratePlus_Source' );
+	}
+
+	/**
 	 * Instantiate a source.
 	 *
 	 * @param string $id       Source id.
