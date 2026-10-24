@@ -90,7 +90,7 @@ To check the mapping or do a dry run first, choose **Review mapping** instead of
 
 Drop any JSON file that holds a list of records. MigratePlus shows a preview of the first records and suggests a field for the title. Pick a source field for each WordPress field you need (title, content, date, custom fields, ACF fields and so on), run a **Dry run** to see what would be created, then **Start import**.
 
-To skip the mapping next time, give it a name under **Saved mappings** on the same screen and click **Save mapping**. That stores the field mapping and the import options (post type, statuses, what to do with records imported before, images, terms, authors and so on), but not one-off choices such as a dry run or the duplicates you approved. Choose a saved mapping in the select and click **Apply** to use it; any source field it maps that this file doesn't have is left unmapped, and a notice lists them. Rename and Delete sit beside it. Saved mappings are shared by everyone on the site who may run imports.
+To skip the mapping next time, give it a name under **Saved mappings** on the same screen and click **Save mapping**. That stores the field mapping and the import options (post type, statuses, what to do with records imported before, images, terms, authors and so on), but not one-off choices such as a dry run or the duplicates you approved. Choose a saved mapping in the select and click **Apply** to use it; any source field it maps that this file doesn't have is left unmapped, and a notice lists them. Rename and Delete sit beside it. Saved mappings are shared by everyone on the site who may run imports, and a site keeps up to 50; delete one or save over it to add another.
 
 When you upload a file with the same top-level fields as a saved mapping (in any order; nested lists such as `authors.0.name` don't count), that mapping is selected for you and a notice says so. It isn't applied until you click **Apply**. If several match, the one saved last is selected. MigratePlus exports carry their own mapping and never use saved ones.
 
@@ -111,8 +111,8 @@ See [WP-CLI](#wp-cli) below for all the options.
 | --- | --- |
 | **MigratePlus → Import** | Drop or choose a JSON file. A MigratePlus export imports after one confirmation; other JSON files go through field mapping, options and an optional dry run first. |
 | **MigratePlus → Export** | Export one or more content types as a JSON file, with terms, featured images, custom fields, ACF fields, WooCommerce product data, comments and navigation menus. |
-| **MigratePlus → History** | All past imports: view logs, resume, run again, roll back, or delete the record. Tick several records (imports or exports) and click **Delete selected** to delete them in one go; running imports and exports are skipped. Exports are listed below them, each with a log of what went into the file and a download link while the file is kept (24 hours). |
 | **MigratePlus → Find & Replace** | Replace text across the site's database tables, with a dry run and sample changes per table (administrators only). |
+| **MigratePlus → History** | All past imports: view logs, resume, run again, roll back, or delete the record. Tick several records (imports or exports) and click **Delete selected** to delete them in one go; running imports and exports are skipped. Exports are listed below them, each with a log of what went into the file and a download link while the file is kept (24 hours). |
 | **MigratePlus → Settings** | Defaults and plugin-wide options (administrators only). |
 
 ### Settings
@@ -131,7 +131,7 @@ The settings page also includes a quick server check: upload folder, upload limi
 
 Drop a `.json` or `.json.gz` file onto **MigratePlus → Import**, or choose one. Its size is limited by your server's upload limit, shown under the drop area; a compressed export is usually several times smaller.
 
-A compressed file is recognised by its first bytes, not its name, so one that lost its `.gz` still works. It is unpacked into MigratePlus's storage folder a chunk at a time and then read like any JSON file. The unpacked JSON may be no larger than PHP's memory limit (1 GB when the memory limit is off), because the import reads the whole file into memory and couldn't handle more anyway; that also stops a file that unpacks into something enormous. Change the limit with the `migrateplus_max_json_size` filter. Compressed files need PHP's zlib extension; without it the import says so, and the Export page doesn't offer compression.
+A compressed file is recognised by its first bytes, not its name, so one that lost its `.gz` still works. It is unpacked into MigratePlus's storage folder a chunk at a time and then read like any JSON file. The unpacked JSON may be no larger than an eighth of PHP's memory limit (1 GB when the memory limit is off), because the import reads the whole file into memory and decoding it takes several times its size; that also stops a file that unpacks into something enormous. Change the limit with the `migrateplus_max_json_size` filter. Compressed files need PHP's zlib extension; without it the import says so, and the Export page doesn't offer compression.
 
 - **A MigratePlus export** is recognised from its header. MigratePlus asks once (how many items, which site they came from, which post type they import as) and then imports straight away with the mapping saved in the file. **Import as** follows the post type it was exported from when this site has that type, so a product export imports as WooCommerce products. Choose **Review mapping** instead to check the fields or run a dry run first.
 - **A MigratePlus export with several post types** gets the same single question and imports as one job: Media first, then the other types in the order the file lists them, then its menus. Each item imports as its own type. The progress window shows how far each part has got. One rollback in History removes everything the import created, whatever its type.
@@ -179,6 +179,8 @@ Before an import starts, MigratePlus reads the whole file and looks for items al
 - **Media** duplicates are shown side by side: the image on this site and the one in the import, with any title, caption, description or alt text that differs. For each, choose **Skip**, **Update details** (keep this site's file, copy the details) or **Replace image** (swap in the imported file as well, in the same Media Library item, so pages using it show the new image and its URL stays the same when the file type matches) or **Keep both** (add the imported file as a new item and leave this one alone). The imported preview is fetched through this site, so it shows even when your browser can't reach the old site. A replaced file can't be rolled back.
 
 On the command line, `wp migrateplus import` lists the duplicates and the ones that differ, then asks. Pass `--duplicates=skip`, `--duplicates=import` or `--duplicates=update` (update every one that differs, skip the rest) to answer in advance; without a terminal to ask in, it skips them.
+
+A dry run can't ask, so it skips duplicates (or does what `--duplicates` says), in the admin and on the command line. Its counts then match what a real run that skips them would do.
 
 ## WP-CLI
 
@@ -268,7 +270,7 @@ add_action( 'migrateplus_after_import_record', function ( $post_id, $record, $jo
 // Override the capability needed to run imports
 add_filter( 'migrateplus_capability', fn () => 'edit_pages' );
 
-// The most JSON a .json.gz upload may unpack to (default: PHP's memory limit, or 1 GB when unlimited)
+// The most JSON a .json.gz upload may unpack to (default: an eighth of PHP's memory limit, or 1 GB when unlimited)
 add_filter( 'migrateplus_max_json_size', fn () => 512 * MB_IN_BYTES );
 
 // Rewrite a remote file URL before it's downloaded (e.g. sign it or add a token)
@@ -363,6 +365,7 @@ Import the file on another site with WooCommerce active. It imports as **Product
 
 - Uploaded and cached source files live in `wp-content/uploads/migrateplus/` (web access denied). They are removed when their history entry is deleted or the plugin is uninstalled.
 - Uninstalling removes settings, saved mappings, history and cached files. Imported content is always kept.
+- MigratePlus used to be called PressPort. The first time the renamed plugin loads, it moves an existing install's settings, history, saved mappings, tracking data and uploads folder over once, so re-imports still recognise what was imported before. Files exported under the old name still import. The WP-CLI command is now `wp migrateplus`, and hooks start with `migrateplus_`.
 
 ## Contributing
 

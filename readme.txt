@@ -13,7 +13,7 @@ Move content between WordPress sites as JSON, with ACF and WooCommerce support, 
 
 **Not ready for use yet.** MigratePlus is still in development and hasn't had a stable release. Don't run it on a live site until one is published. If you want to try it, use a test site or a copy you can throw away.
 
-MigratePlus adds its own **MigratePlus** menu to wp-admin with four pages:
+MigratePlus adds its own **MigratePlus** menu to wp-admin with five pages:
 
 * **Import**: drop a JSON file (.json, or .json.gz compressed) onto the page, or choose one.
     * *A MigratePlus export* is recognised, and after one confirmation it imports straight away with the field mapping and post type saved in the file. "Review mapping" opens the mapping step first. An export with several post types imports in one go too: Media first, then the other types, then its menus, with progress shown per part.
@@ -22,8 +22,8 @@ MigratePlus adds its own **MigratePlus** menu to wp-admin with four pages:
     * Imports run in small batches so large ones don't time out, with a progress window (live counts and time remaining), a live log, pause/resume and a dry-run mode.
 * **Export**: export posts, pages or any post type as a JSON file with terms, featured images, custom fields, ACF fields and WooCommerce product data. Tick several content types to put them in one file; Media always goes first, so the import downloads each file once and the posts after it reuse it. Navigation menus can go in the file too, also on their own. The file can be compressed (.json.gz) for a site with a low upload limit. It maps itself when imported with MigratePlus on another site.
     * *Media* exports the Media Library: each file as a URL, with its title, caption, description and alt text. Importing it downloads the files into the other site's Media Library. Files sold as WooCommerce downloads are left out; they travel with the product export.
-* **History**: every import you have run. View the log, resume an import that stopped, run it again, or roll it back. Exports are listed too, each with a log of what went into the file.
 * **Find & Replace**: replace text across the database, for example an old domain after a migration. Serialized data stays valid, and web addresses only match whole, so http://old.test leaves http://old.test.example.com alone. Starts as a dry run with sample changes per table. Real runs can be rolled back from Past replacements; values edited since the replacement are left alone. Administrators only.
+* **History**: every import you have run. View the log, resume an import that stopped, run it again, or roll it back. Exports are listed too, each with a log of what went into the file. Tick several entries to delete them in one go; running ones are skipped.
 * **Settings**: default import options, who can use the importer, download limits and housekeeping.
 
 = Features =
@@ -75,11 +75,11 @@ A MigratePlus export imports into the post type it was exported from when the im
 
 Export it again with "Compress the file (.json.gz)" on, which usually makes it several times smaller. Or lower the batch size in Settings, or run the import with WP-CLI, which has no upload limit or browser timeout.
 
-A .json.gz may unpack to no more than PHP's memory limit (1 GB when there is none), since the import reads the whole file into memory. The `migrateplus_max_json_size` filter changes that.
+A .json.gz may unpack to no more than an eighth of PHP's memory limit (1 GB when there is none), since the import reads the whole file into memory and decoding it takes several times its size. The `migrateplus_max_json_size` filter changes that.
 
 = Can I undo an import? =
 
-Yes. Use "Roll back" on the History page (or `wp migrateplus rollback <job-id>`). It deletes the posts and media that import created. If you have deleted the history entry, the import can no longer be rolled back.
+Yes. Use "Roll back" on the History page (or `wp migrateplus rollback <job-id>`). It deletes the posts, media, comments and menus that import created, and gives theme locations it changed their previous menu back. If you have deleted the history entry, the import can no longer be rolled back.
 
 = Will uninstalling delete my imported posts? =
 
@@ -121,13 +121,19 @@ Imported posts and menu items carry the meta keys `_migrateplus_job_id`, `_migra
 
 == Notes ==
 
-* Saved mappings are stored in the `migrateplus_mappings` option (not autoloaded) and removed on uninstall.
+* Saved mappings are stored in the `migrateplus_mappings` option (not autoloaded) and removed on uninstall. A site keeps up to 50.
 * Uploaded files and cached records are kept in wp-content/uploads/migrateplus/ (web access denied) and removed when their history entry is deleted or the plugin is uninstalled.
 * WooCommerce downloadable files are copied into the importing site's protected woocommerce_uploads folder, so they pass WooCommerce's approved download directories check. Because that folder refuses direct requests on the old site too, the export carries a private link for each file. It works for 24 hours, so import within a day of exporting.
+
 == Changelog ==
 
 = Unreleased =
 * History: select several imports or exports and delete them in one go. Running ones are skipped and the result says which.
+* Confirmations and error messages use MigratePlus's own dialog instead of the browser's. Primary buttons use WordPress's blue; buttons that delete or roll back are red.
+* Find & Replace is now above History in the menu.
+* Dry runs skip items already on the site, as a real run does when you choose to skip them, so their counts match. Before, they counted them as created.
+* Saved mappings: a site keeps up to 50. An option a mapping file leaves out now follows MigratePlus → Settings instead of being turned off.
+* Fixes: a multi-type export no longer stops early when content is added while it runs; Editors' exports no longer fail when menus are on by default; a failed export no longer leaves a broken file; a .json.gz that is too big to import is refused instead of running out of memory.
 * Renamed to MigratePlus. Settings, history, saved mappings, tracking data and the uploads folder of an existing install are moved over once, the first time the renamed plugin loads, and files exported before the rename still import and match what they imported before.
 * JSON only: export writes a JSON file, and import takes an uploaded JSON file. Removed the CSV, "URL or feed", WordPress REST API, Ghost and Drupal sources and the CSV and XML export formats.
 * New Import screen: drop a JSON file to import it. A MigratePlus export imports after a single confirmation; other JSON goes through field mapping.
@@ -148,6 +154,6 @@ Imported posts and menu items carry the meta keys `_migrateplus_job_id`, `_migra
 * The Connections settings are now called Downloads, and say which downloads they limit.
 * Refreshed admin design: step indicator, drag-and-drop uploads, outcome-split progress bars, log filters and search, searchable history.
 * New progress window for uploads, imports, exports and rollbacks, with live counts, time remaining and pause/resume.
-* Compressed exports: "Compress the file (.json.gz)" on the Export page, `--gzip`, or the Export defaults. The import takes .json.gz uploads and `--file`, recognised by their first bytes, and unpacks them a chunk at a time up to the memory limit (`migrateplus_max_json_size`). The Server check lists zlib.
+* Compressed exports: "Compress the file (.json.gz)" on the Export page, `--gzip`, or the Export defaults. The import takes .json.gz uploads and `--file`, recognised by their first bytes, and unpacks them a chunk at a time up to an eighth of the memory limit (`migrateplus_max_json_size`). The Server check lists zlib.
 * Saved mappings for JSON that isn't a MigratePlus export: save the mapping and import options on the mapping screen, apply them to a later file, rename or delete them. A file with the same top-level fields gets its mapping selected, not applied. On the command line: `--mapping=<name>` and `wp migrateplus mapping list|export|import|delete`.
 * With "Navigation menus" on, an export that matches no content still writes the site's menus, and importing that file goes straight to them.
