@@ -11,13 +11,14 @@ class PressPort_Admin {
 
 	const SLUG         = 'pressport';
 	const HISTORY_SLUG = 'pressport-history';
+	const EXPORT_SLUG  = 'pressport-export';
 
 	public static function init() {
 		add_action( 'admin_menu', array( __CLASS__, 'menu' ) );
 		add_action( 'admin_enqueue_scripts', array( __CLASS__, 'assets' ) );
 		add_filter( 'plugin_action_links_' . plugin_basename( PRESSPORT_FILE ), array( __CLASS__, 'action_links' ) );
 
-		foreach ( array( 'preview', 'save', 'run', 'rollback', 'delete', 'jobs', 'job', 'restart' ) as $action ) {
+		foreach ( array( 'preview', 'save', 'run', 'rollback', 'delete', 'jobs', 'job', 'restart', 'export_count', 'export_start', 'export_run', 'export_download' ) as $action ) {
 			add_action( 'wp_ajax_pressport_' . $action, array( __CLASS__, 'ajax_' . $action ) );
 		}
 	}
@@ -41,7 +42,8 @@ class PressPort_Admin {
 			'dashicons-migrate',
 			76
 		);
-		add_submenu_page( self::SLUG, __( 'New Import', 'pressport' ), __( 'New Import', 'pressport' ), self::capability(), self::SLUG, array( __CLASS__, 'render_import' ) );
+		add_submenu_page( self::SLUG, __( 'Import', 'pressport' ), __( 'Import', 'pressport' ), self::capability(), self::SLUG, array( __CLASS__, 'render_import' ) );
+		add_submenu_page( self::SLUG, __( 'Export Content', 'pressport' ), __( 'Export', 'pressport' ), self::capability(), self::EXPORT_SLUG, array( __CLASS__, 'render_export' ) );
 		add_submenu_page( self::SLUG, __( 'Import History', 'pressport' ), __( 'History', 'pressport' ), self::capability(), self::HISTORY_SLUG, array( __CLASS__, 'render_history' ) );
 		add_submenu_page( self::SLUG, __( 'PressPort Settings', 'pressport' ), __( 'Settings', 'pressport' ), 'manage_options', PressPort_Settings::PAGE, array( 'PressPort_Settings', 'render' ) );
 	}
@@ -75,7 +77,7 @@ class PressPort_Admin {
 	 */
 	public static function assets( $hook ) {
 		$page = isset( $_GET['page'] ) ? sanitize_key( wp_unslash( $_GET['page'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification
-		if ( ! in_array( $page, array( self::SLUG, self::HISTORY_SLUG, PressPort_Settings::PAGE ), true ) ) {
+		if ( ! in_array( $page, array( self::SLUG, self::HISTORY_SLUG, self::EXPORT_SLUG, PressPort_Settings::PAGE ), true ) ) {
 			return;
 		}
 		wp_enqueue_style( 'pressport', PRESSPORT_URL . 'assets/admin.css', array(), PRESSPORT_VERSION );
@@ -83,7 +85,7 @@ class PressPort_Admin {
 			return;
 		}
 		wp_enqueue_script( 'pressport', PRESSPORT_URL . 'assets/admin.js', array(), PRESSPORT_VERSION, true );
-		wp_localize_script( 'pressport', 'PRESSPORT_DATA', self::bootstrap_data( self::HISTORY_SLUG === $page ? 'history' : 'new' ) );
+		wp_localize_script( 'pressport', 'PRESSPORT_DATA', self::bootstrap_data( self::HISTORY_SLUG === $page ? 'history' : ( self::EXPORT_SLUG === $page ? 'export' : 'new' ) ) );
 	}
 
 	/**
@@ -155,6 +157,8 @@ class PressPort_Admin {
 			'view'        => $view,
 			'importUrl'   => self::url(),
 			'historyUrl'  => self::url( self::HISTORY_SLUG ),
+			'exportUrl'   => self::url( self::EXPORT_SLUG ),
+			'exportDefaults' => PressPort_Exporter::defaults(),
 			'settingsUrl' => current_user_can( 'manage_options' ) ? self::url( PressPort_Settings::PAGE ) : '',
 			'openJob'     => isset( $_GET['job'] ) ? sanitize_key( wp_unslash( $_GET['job'] ) ) : '', // phpcs:ignore WordPress.Security.NonceVerification
 			'resume'      => ! empty( $_GET['resume'] ), // phpcs:ignore WordPress.Security.NonceVerification
@@ -164,6 +168,9 @@ class PressPort_Admin {
 			'targets'     => $targets,
 			'defaults'    => PressPort_Job::default_options(),
 			'maxUpload'   => size_format( wp_max_upload_size() ),
+			'acf'         => PressPort_ACF::bootstrap( wp_list_pluck( $post_types, 'name' ) ),
+			'woo'         => array( 'active' => PressPort_Woo::active() ),
+			'maxRemote'   => size_format( max( 1, (int) PressPort_Settings::get( 'max_remote_size' ) ) * MB_IN_BYTES ),
 		);
 	}
 
@@ -171,6 +178,13 @@ class PressPort_Admin {
 		self::render_shell(
 			__( 'Import Content', 'pressport' ),
 			__( 'Bring posts and pages in from a CSV file, a JSON feed, or another CMS. Map the fields, try a dry run, then import in batches. Every import can be rolled back.', 'pressport' )
+		);
+	}
+
+	public static function render_export() {
+		self::render_shell(
+			__( 'Export Content', 'pressport' ),
+			__( 'Export posts, pages or custom post types with their terms, featured images, custom fields and ACF fields. Import the file on another site with PressPort and the fields map themselves.', 'pressport' )
 		);
 	}
 
@@ -282,19 +296,19 @@ class PressPort_Admin {
 			$key = $field['key'];
 			if ( 'file' === $field['type'] ) {
 				if ( ! empty( $_FILES[ 'file_' . $key ]['name'] ) ) {
-					$accept = isset( $field['accept'] ) ? $field['accept'] : '';
-					$exts   = array();
-					foreach ( explode( ',', $accept ) as $a ) {
-						if ( 0 === strpos( trim( $a ), '.' ) ) {
-							$exts[] = ltrim( trim( $a ), '.' );
-						}
-					}
-					$exts[] = 'txt';
-					$path   = self::store_upload( $_FILES[ 'file_' . $key ], $exts ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+					$exts = PressPort_Source_Base::accepted_extensions( $field );
+					$path = self::store_upload( $_FILES[ 'file_' . $key ], $exts ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
 					if ( is_wp_error( $path ) ) {
 						self::fail( $path );
 					}
 					$settings[ $key ] = $path;
+				} elseif ( PressPort_Source_Base::allows_remote( $field ) && ! empty( $raw[ $key . '_url' ] ) ) {
+					// Downloaded by the source in prepare().
+					$url = esc_url_raw( trim( (string) $raw[ $key . '_url' ] ), array( 'http', 'https' ) );
+					if ( '' === $url ) {
+						self::fail( new WP_Error( 'pressport_remote_url', __( 'Enter a valid http:// or https:// URL.', 'pressport' ) ) );
+					}
+					$settings[ $key . '_url' ] = $url;
 				}
 				continue;
 			}
@@ -355,6 +369,7 @@ class PressPort_Admin {
 			'fields'     => array(),
 			'meta'       => array(),
 			'taxonomies' => array(),
+			'acf'        => array(),
 		);
 		$targets   = PressPort_Importer::targets();
 		foreach ( isset( $mapping['fields'] ) ? (array) $mapping['fields'] : array() as $target => $source ) {
@@ -376,6 +391,12 @@ class PressPort_Admin {
 					'taxonomy' => sanitize_key( $row['taxonomy'] ),
 					'source'   => sanitize_text_field( $row['source'] ),
 				);
+			}
+		}
+		foreach ( isset( $mapping['acf'] ) && is_array( $mapping['acf'] ) ? $mapping['acf'] : array() as $field => $source ) {
+			$field = sanitize_text_field( (string) $field );
+			if ( '' !== $field && '' !== (string) $source ) {
+				$clean_map['acf'][ $field ] = sanitize_text_field( (string) $source );
 			}
 		}
 		if ( empty( $clean_map['fields']['post_title'] ) && empty( $clean_map['fields']['post_content'] ) ) {
@@ -435,20 +456,22 @@ class PressPort_Admin {
 	 */
 	public static function ajax_restart() {
 		self::guard();
-		$job = self::request_job();
-		if ( 'json' === $job->data['source'] && ! empty( $job->data['settings']['url'] ) ) {
-			// Refresh the cached feed so re-runs pick up new items.
-			$source = $job->source();
-			if ( ! is_wp_error( $source ) ) {
-				$prepared = $source->prepare();
-				if ( ! is_wp_error( $prepared ) ) {
-					$old = isset( $job->data['settings']['cache_file'] ) ? $job->data['settings']['cache_file'] : '';
-					if ( $old && $old !== $prepared['cache_file'] && file_exists( $old ) ) {
-						wp_delete_file( $old );
-					}
-					$job->data['settings'] = $prepared;
-					$job->data['total']    = $prepared['total'];
+		$job    = self::request_job();
+		$source = $job->source();
+		if ( ! is_wp_error( $source ) && $source instanceof PressPort_Source_Base && $source->has_remote_input() ) {
+			// Re-download the remote file / feed so re-runs pick up new items.
+			$prepared = $source->prepare();
+			if ( is_wp_error( $prepared ) ) {
+				/* translators: %s: error message */
+				$job->log( 'warning', sprintf( __( 'Could not refresh the source, re-using the previous copy: %s', 'pressport' ), $prepared->get_error_message() ) );
+			} else {
+				$old = isset( $job->data['settings']['cache_file'] ) ? $job->data['settings']['cache_file'] : '';
+				if ( $old && ( empty( $prepared['cache_file'] ) || $old !== $prepared['cache_file'] ) && file_exists( $old ) ) {
+					wp_delete_file( $old );
 				}
+				$job->data['settings'] = $prepared;
+				$job->data['total']    = isset( $prepared['total'] ) ? $prepared['total'] : null;
+				$job->log( 'info', __( 'Source refreshed from its URL.', 'pressport' ) );
 			}
 		}
 		$job->data['status'] = 'ready';
@@ -512,5 +535,131 @@ class PressPort_Admin {
 	protected static function source_label( $id ) {
 		$all = PressPort_Sources::all();
 		return isset( $all[ $id ] ) && class_exists( $all[ $id ] ) ? call_user_func( array( $all[ $id ], 'label' ) ) : $id;
+	}
+
+	// Export.
+
+	/**
+	 * Export args from the request.
+	 *
+	 * @return array|WP_Error
+	 */
+	protected static function export_args() {
+		// phpcs:disable WordPress.Security.NonceVerification -- verified in guard().
+		$raw = isset( $_POST['args'] ) ? json_decode( wp_unslash( $_POST['args'] ), true ) : array(); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+		// phpcs:enable
+		$args = PressPort_Exporter::sanitize_args( is_array( $raw ) ? $raw : array() );
+		if ( ! is_wp_error( $args ) && ! current_user_can( get_post_type_object( $args['post_type'] )->cap->edit_posts ) ) {
+			return new WP_Error( 'pressport_export_cap', __( 'You are not allowed to export this post type.', 'pressport' ) );
+		}
+		return $args;
+	}
+
+	/**
+	 * How many posts an export would include.
+	 */
+	public static function ajax_export_count() {
+		self::guard();
+		$args = self::export_args();
+		if ( is_wp_error( $args ) ) {
+			self::fail( $args );
+		}
+		wp_send_json_success( array( 'count' => PressPort_Exporter::count( $args ) ) );
+	}
+
+	/**
+	 * Start an export.
+	 */
+	public static function ajax_export_start() {
+		self::guard();
+		$args = self::export_args();
+		if ( is_wp_error( $args ) ) {
+			self::fail( $args );
+		}
+		$state = PressPort_Exporter::start( $args );
+		if ( is_wp_error( $state ) ) {
+			self::fail( $state );
+		}
+		if ( 0 === (int) $state['total'] ) {
+			PressPort_Exporter::delete( $state );
+			self::fail( new WP_Error( 'pressport_export_empty', __( 'Nothing matches these filters. Widen the status or date range.', 'pressport' ) ) );
+		}
+		wp_send_json_success( self::export_public( $state ) );
+	}
+
+	/**
+	 * Export the next batch.
+	 */
+	public static function ajax_export_run() {
+		self::guard();
+		$state = self::request_export();
+		PressPort_Exporter::run_batch( $state, 50 );
+		wp_send_json_success( self::export_public( $state ) );
+	}
+
+	/**
+	 * Download a finished export.
+	 */
+	public static function ajax_export_download() {
+		self::guard();
+		$state = self::request_export();
+		if ( empty( $state['complete'] ) || ! is_readable( $state['file'] ) ) {
+			wp_die( esc_html__( 'This export is not ready or has expired. Run it again.', 'pressport' ), '', array( 'response' => 404 ) );
+		}
+		$types = array(
+			'json' => 'application/json',
+			'csv'  => 'text/csv',
+			'xml'  => 'application/xml',
+		);
+		nocache_headers();
+		header( 'Content-Type: ' . $types[ $state['args']['format'] ] . '; charset=utf-8' );
+		header( 'Content-Disposition: attachment; filename="' . sanitize_file_name( $state['filename'] ) . '"' );
+		header( 'Content-Length: ' . filesize( $state['file'] ) );
+		readfile( $state['file'] ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		exit;
+	}
+
+	/**
+	 * Load the export named in the request (only its owner may use it).
+	 *
+	 * @return array
+	 */
+	protected static function request_export() {
+		$id    = isset( $_REQUEST['export'] ) ? sanitize_key( wp_unslash( $_REQUEST['export'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification
+		$state = $id ? PressPort_Exporter::load_state( $id ) : null;
+		if ( ! $state || ( (int) $state['user'] !== get_current_user_id() && ! current_user_can( 'manage_options' ) ) ) {
+			wp_send_json_error( array( 'message' => __( 'Export not found. It may have expired; run it again.', 'pressport' ) ), 404 );
+		}
+		return $state;
+	}
+
+	/**
+	 * @param array $state State.
+	 * @return array
+	 */
+	protected static function export_public( array $state ) {
+		$out = array(
+			'id'       => $state['id'],
+			'total'    => (int) $state['total'],
+			'done'     => (int) $state['done'],
+			'complete' => ! empty( $state['complete'] ),
+			'format'   => $state['args']['format'],
+			'acf'      => count( $state['acf_names'] ),
+			'meta'     => count( $state['meta_keys'] ),
+			'taxes'    => $state['taxes'],
+		);
+		if ( $out['complete'] ) {
+			$out['filename'] = $state['filename'];
+			$out['size']     = size_format( $state['size'] );
+			$out['url']      = add_query_arg(
+				array(
+					'action' => 'pressport_export_download',
+					'export' => $state['id'],
+					'nonce'  => wp_create_nonce( 'pressport_admin' ),
+				),
+				admin_url( 'admin-ajax.php' )
+			);
+		}
+		return $out;
 	}
 }

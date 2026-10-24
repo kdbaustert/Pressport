@@ -29,9 +29,10 @@ class PressPort_Source_CSV extends PressPort_Source_Base {
 				'key'      => 'file',
 				'label'    => __( 'CSV file', 'pressport' ),
 				'type'     => 'file',
-				'accept'   => '.csv,text/csv',
+				'accept'   => '.csv,.tsv,text/csv',
 				'required' => true,
-				'help'     => __( 'First row must contain column headers. UTF-8 recommended.', 'pressport' ),
+				'remote'   => true,
+				'help'     => __( 'Upload a file or import one from a URL. First row must contain column headers. UTF-8 recommended.', 'pressport' ),
 			),
 			array(
 				'key'     => 'delimiter',

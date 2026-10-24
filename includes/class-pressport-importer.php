@@ -172,13 +172,26 @@ class PressPort_Importer {
 
 		$warnings = array();
 
-		// Custom fields.
+		// Custom fields. Keys that belong to an ACF field are saved through ACF.
+		$acf_map = isset( $mapping['acf'] ) ? (array) $mapping['acf'] : array();
 		foreach ( (array) $mapping['meta'] as $row ) {
-			if ( empty( $row['key'] ) || empty( $row['source'] ) || ! array_key_exists( $row['source'], $record ) ) {
+			if ( empty( $row['key'] ) || empty( $row['source'] ) ) {
 				continue;
 			}
-			update_post_meta( $post_id, sanitize_text_field( $row['key'] ), wp_slash( $record[ $row['source'] ] ) );
+			$key = sanitize_text_field( $row['key'] );
+			if ( PressPort_ACF::active() && ! isset( $acf_map[ $key ] ) && PressPort_ACF::get_field_object( $key, $post_id ) ) {
+				$acf_map[ $key ] = $row['source'];
+				continue;
+			}
+			$value = PressPort_ACF::read( $record, $row['source'] );
+			if ( null === $value ) {
+				continue;
+			}
+			update_post_meta( $post_id, $key, wp_slash( $value ) );
 		}
+
+		// ACF fields.
+		PressPort_ACF::import( $post_id, $record, $acf_map, $job, $opts, $base, $warnings );
 
 		// Taxonomies.
 		$tax_rows = array();
@@ -239,6 +252,11 @@ class PressPort_Importer {
 			foreach ( $errors as $error ) {
 				$warnings[] = __( 'Content image: ', 'pressport' ) . $error;
 			}
+		}
+
+		// WooCommerce product fields (prices, stock, attributes, variations).
+		if ( PressPort_Woo::is_product_type( $type ) ) {
+			PressPort_Woo::import( $post_id, $record, $job, $opts, $base, $warnings );
 		}
 
 		$action = $updating ? 'updated' : 'created';

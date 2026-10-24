@@ -1,7 +1,7 @@
 <?php
 /**
  * Plugin Name:       PressPort
- * Description:       Port your content into WordPress. Import posts, pages and custom post types from CSV files, JSON feeds, or another CMS (WordPress, Drupal, Ghost) with field mapping, dry runs, batched processing, media sideloading and one-click rollback.
+ * Description:       Port your content into WordPress. Import posts, pages and custom post types from CSV files, JSON feeds, RSS/Atom feeds, WordPress export files, any XML/JSON/CSV URL, or another CMS (WordPress, Drupal) with field mapping (including ACF), dry runs, batched processing, media sideloading and one-click rollback. Export content in the same formats to move it between sites.
  * Version:           1.0.0
  * Requires at least: 6.0
  * Requires PHP:      7.4
@@ -25,12 +25,15 @@ require_once PRESSPORT_DIR . 'includes/class-pressport-settings.php';
 require_once PRESSPORT_DIR . 'includes/sources/interface-pressport-source.php';
 require_once PRESSPORT_DIR . 'includes/sources/class-pressport-source-csv.php';
 require_once PRESSPORT_DIR . 'includes/sources/class-pressport-source-json.php';
+require_once PRESSPORT_DIR . 'includes/sources/class-pressport-source-remote.php';
 require_once PRESSPORT_DIR . 'includes/sources/class-pressport-source-wordpress.php';
 require_once PRESSPORT_DIR . 'includes/sources/class-pressport-source-drupal.php';
-require_once PRESSPORT_DIR . 'includes/sources/class-pressport-source-ghost.php';
 require_once PRESSPORT_DIR . 'includes/class-pressport-sources.php';
 require_once PRESSPORT_DIR . 'includes/class-pressport-job.php';
 require_once PRESSPORT_DIR . 'includes/class-pressport-media.php';
+require_once PRESSPORT_DIR . 'includes/class-pressport-acf.php';
+require_once PRESSPORT_DIR . 'includes/class-pressport-woo.php';
+require_once PRESSPORT_DIR . 'includes/class-pressport-exporter.php';
 require_once PRESSPORT_DIR . 'includes/class-pressport-importer.php';
 require_once PRESSPORT_DIR . 'includes/class-pressport-runner.php';
 
@@ -45,6 +48,7 @@ add_filter( 'http_request_host_is_external', array( 'PressPort_Util', 'allow_loc
 add_filter( 'http_allowed_safe_ports', array( 'PressPort_Util', 'allow_local_port' ), 10, 3 );
 
 add_action( 'pressport_cleanup', array( 'PressPort_Settings', 'cleanup' ) );
+add_action( 'pressport_cleanup', array( 'PressPort_Exporter', 'cleanup' ) );
 add_action(
 	'init',
 	static function () {

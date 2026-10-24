@@ -40,6 +40,7 @@ class PressPort_Settings {
 			// Connections.
 			'request_timeout'          => 30,
 			'allow_local_sources'      => 0,
+			'max_remote_size'          => 100, // MB.
 			// Housekeeping.
 			'job_retention_days'       => 0,
 			'remove_meta_on_uninstall' => 0,
@@ -163,6 +164,7 @@ class PressPort_Settings {
 			),
 			'pressport_connections'  => array(
 				'request_timeout'     => array( 'number', __( 'Request timeout', 'pressport' ), array( 5, 300 ), __( 'Seconds to wait for a remote site or feed. Image downloads get at least 60 seconds.', 'pressport' ), __( 'seconds', 'pressport' ) ),
+				'max_remote_size'     => array( 'number', __( 'Remote file size limit', 'pressport' ), array( 1, 2048 ), __( 'Largest file PressPort will download when a CSV is imported from a URL.', 'pressport' ), __( 'MB', 'pressport' ) ),
 				'allow_local_sources' => array( 'checkbox', __( 'Local sources', 'pressport' ), __( 'Allow importing from localhost, private network addresses and non-standard ports', 'pressport' ), __( 'Turn this on to migrate from a local dev site (for example http://oldsite.test:8888). WordPress blocks these addresses by default; this only relaxes the rule for PressPort\'s own requests.', 'pressport' ) ),
 			),
 			'pressport_housekeeping' => array(
@@ -269,6 +271,7 @@ class PressPort_Settings {
 		$ranges = array(
 			'batch_size'         => array( 1, 100 ),
 			'request_timeout'    => array( 5, 300 ),
+			'max_remote_size'    => array( 1, 2048 ),
 			'job_retention_days' => array( 0, 3650 ),
 		);
 		foreach ( $ranges as $key => $range ) {

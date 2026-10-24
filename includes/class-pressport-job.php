@@ -53,6 +53,7 @@ class PressPort_Job {
 					'fields'     => array(),
 					'meta'       => array(),
 					'taxonomies' => array(),
+					'acf'        => array(),
 				),
 				'options'  => self::default_options(),
 				'status'   => 'draft',

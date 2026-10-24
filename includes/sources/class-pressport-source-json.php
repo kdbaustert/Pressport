@@ -37,6 +37,7 @@ class PressPort_Source_JSON extends PressPort_Source_Base {
 				'label'  => __( 'Or upload a JSON file', 'pressport' ),
 				'type'   => 'file',
 				'accept' => '.json,application/json',
+				'remote' => false, // The feed URL field above already covers remote JSON.
 			),
 			array(
 				'key'   => 'records_path',
@@ -115,6 +116,12 @@ class PressPort_Source_JSON extends PressPort_Source_Base {
 			return new WP_Error( 'pressport_json_input', __( 'Provide a feed URL or upload a JSON file.', 'pressport' ) );
 		}
 
+		// A PressPort export: remember its mapping and use its item list.
+		if ( is_array( $doc ) && isset( $doc['pressport']['mapping'], $doc['items'] ) && is_array( $doc['items'] ) ) {
+			$this->settings['pressport_mapping'] = $doc['pressport']['mapping'];
+			$this->settings['pressport_site']    = isset( $doc['pressport']['site'] ) ? (string) $doc['pressport']['site'] : '';
+		}
+
 		$records = self::find_records( $doc, trim( (string) $this->get( 'records_path' ) ) );
 		if ( is_wp_error( $records ) ) {
 			return $records;
@@ -151,6 +158,11 @@ class PressPort_Source_JSON extends PressPort_Source_Base {
 			'next'    => $next < count( $all ) ? $next : null,
 			'total'   => count( $all ),
 		);
+	}
+
+	/** @inheritDoc */
+	public function has_remote_input() {
+		return '' !== trim( (string) $this->get( 'url' ) );
 	}
 
 	/** @inheritDoc */

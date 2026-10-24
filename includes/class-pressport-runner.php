@@ -51,6 +51,13 @@ class PressPort_Runner {
 			$job->data['total'] = $batch['total'];
 		}
 		$job->data['mapping']['fields'] = array_intersect( $source->suggested_mapping(), array_keys( $fields ) );
+
+		// Files exported by PressPort carry their own mapping: apply it.
+		$embedded = isset( $prepared['pressport_mapping'] ) ? $prepared['pressport_mapping'] : ( isset( $prepared['delegate_settings']['pressport_mapping'] ) ? $prepared['delegate_settings']['pressport_mapping'] : null );
+		if ( is_array( $embedded ) ) {
+			$job->data['mapping'] = self::apply_embedded_mapping( $job->data['mapping'], $embedded, array_keys( $fields ) );
+			$job->log( 'info', __( 'This file was exported by PressPort; its field mapping was applied.', 'pressport' ) );
+		}
 		$job->log( 'info', sprintf( /* translators: %s: source label */ __( 'Connected to source: %s', 'pressport' ), call_user_func( array( get_class( $source ), 'label' ) ) ) );
 		$job->save();
 
@@ -60,6 +67,44 @@ class PressPort_Runner {
 			'fields'  => array_keys( $fields ),
 			'mapping' => $job->data['mapping'],
 		);
+	}
+
+	/**
+	 * Merge an embedded export mapping, keeping only entries whose source exists
+	 * (nested sources such as "acf.items" match flattened keys like "acf.items.0.title").
+	 *
+	 * @param array    $mapping  Current mapping.
+	 * @param array    $embedded Embedded mapping.
+	 * @param string[] $fields   Source fields seen in the preview.
+	 * @return array
+	 */
+	protected static function apply_embedded_mapping( array $mapping, array $embedded, array $fields ) {
+		$has = static function ( $source ) use ( $fields ) {
+			foreach ( $fields as $f ) {
+				if ( $f === $source || 0 === strpos( $f, $source . '.' ) ) {
+					return true;
+				}
+			}
+			return false;
+		};
+		foreach ( isset( $embedded['fields'] ) ? (array) $embedded['fields'] : array() as $target => $source ) {
+			if ( $has( $source ) ) {
+				$mapping['fields'][ $target ] = $source;
+			}
+		}
+		foreach ( array( 'meta', 'taxonomies' ) as $list ) {
+			foreach ( isset( $embedded[ $list ] ) ? (array) $embedded[ $list ] : array() as $row ) {
+				if ( isset( $row['source'] ) && $has( $row['source'] ) && ( 'meta' !== $list || ! empty( $row['key'] ) ) && ( 'taxonomies' !== $list || taxonomy_exists( $row['taxonomy'] ) ) ) {
+					$mapping[ $list ][] = $row;
+				}
+			}
+		}
+		foreach ( isset( $embedded['acf'] ) ? (array) $embedded['acf'] : array() as $field => $source ) {
+			if ( $has( $source ) ) {
+				$mapping['acf'][ $field ] = $source;
+			}
+		}
+		return $mapping;
 	}
 
 	/**

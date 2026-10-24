@@ -8,12 +8,15 @@
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Import content from CSV, JSON feeds, WordPress, Drupal or Ghost.
+ * Import content from CSV, JSON, any URL or feed, WordPress or Drupal, and export it again.
  *
  * ## EXAMPLES
  *
  *     # Preview a CSV and see suggested mapping
  *     wp pressport preview csv --file=./posts.csv
+ *
+ *     # Import a CSV straight from a URL (Google Sheets / Dropbox share links work too)
+ *     wp pressport import csv --file=https://example.com/exports/posts.csv
  *
  *     # Import a CSV as pages, skipping rows imported before
  *     wp pressport import csv --file=./pages.csv --post_type=page
@@ -29,6 +32,9 @@ defined( 'ABSPATH' ) || exit;
  *
  *     # Undo an import
  *     wp pressport rollback abc123defg --yes
+ *
+ *     # Export pages with ACF fields, to import on another site
+ *     wp pressport export page --format=json --output=./pages.json
  */
 class PressPort_CLI {
 
@@ -45,10 +51,10 @@ class PressPort_CLI {
 	 * ## OPTIONS
 	 *
 	 * <source>
-	 * : csv, json, wordpress, drupal, ghost (or a custom registered source).
+	 * : csv, json, remote, wordpress, drupal (or a custom registered source).
 	 *
 	 * [--<field>=<value>]
-	 * : Source settings, e.g. --file=posts.csv, --feed=... (JSON feed URL), --site_url=..., --api_key=...
+	 * : Source settings, e.g. --file=posts.csv (or an https:// URL), --feed=... (JSON feed URL), --site_url=..., --api_key=...
 	 *
 	 * @param array $args  Args.
 	 * @param array $assoc Assoc args.
@@ -81,13 +87,13 @@ class PressPort_CLI {
 	 * ## OPTIONS
 	 *
 	 * [<source>]
-	 * : csv, json, wordpress, drupal, ghost. Optional when --config is given.
+	 * : csv, json, remote, wordpress, drupal. Optional when --config is given.
 	 *
 	 * [--config=<file>]
 	 * : JSON file: { "source": "...", "settings": {...}, "mapping": {...}, "options": {...} }
 	 *
 	 * [--map=<file>]
-	 * : JSON mapping file: { "fields": { "post_title": "title", ... }, "meta": [{ "key": "...", "source": "..." }], "taxonomies": [{ "taxonomy": "...", "source": "..." }] }. Defaults to the suggested mapping.
+	 * : JSON mapping file: { "fields": { "post_title": "title", ... }, "meta": [{ "key": "...", "source": "..." }], "taxonomies": [{ "taxonomy": "...", "source": "..." }], "acf": { "field_name_or_key": "source_field" } }. Defaults to the suggested mapping.
 	 *
 	 * [--post_type=<type>]
 	 * : Destination post type. Defaults to the PressPort setting.
@@ -117,7 +123,7 @@ class PressPort_CLI {
 	 * : Show what would happen without saving.
 	 *
 	 * [--<field>=<value>]
-	 * : Source settings, e.g. --file=posts.csv, --feed=... (JSON feed URL), --site_url=..., --bundle=article.
+	 * : Source settings, e.g. --file=posts.csv (or an https:// URL), --feed=... (JSON feed URL), --site_url=..., --bundle=article.
 	 *
 	 * @param array $args  Args.
 	 * @param array $assoc Assoc args.
@@ -129,7 +135,7 @@ class PressPort_CLI {
 		}
 		$source = isset( $args[0] ) ? $args[0] : ( isset( $config['source'] ) ? $config['source'] : '' );
 		if ( '' === $source ) {
-			WP_CLI::error( 'Specify a source (csv, json, wordpress, drupal, ghost) or --config.' );
+			WP_CLI::error( 'Specify a source (csv, json, remote, wordpress, drupal) or --config.' );
 		}
 		$settings = array_merge( isset( $config['settings'] ) ? (array) $config['settings'] : array(), $this->settings_from( $assoc ) );
 
@@ -151,6 +157,7 @@ class PressPort_CLI {
 				'fields'     => array(),
 				'meta'       => array(),
 				'taxonomies' => array(),
+				'acf'        => array(),
 			),
 			(array) $mapping
 		);
@@ -217,6 +224,104 @@ class PressPort_CLI {
 			WP_CLI::error( 'Job not found.' );
 		}
 		$this->run( $job );
+	}
+
+	/**
+	 * Export content to a file that PressPort (on this or another site) can import.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [<post_type>]
+	 * : Post type to export. Default: post.
+	 *
+	 * [--format=<format>]
+	 * : json (recommended: maps itself on import), csv or xml (WordPress export format).
+	 * ---
+	 * default: json
+	 * options:
+	 *   - json
+	 *   - csv
+	 *   - xml
+	 * ---
+	 *
+	 * [--status=<statuses>]
+	 * : Comma separated statuses, or "any". Default: publish.
+	 *
+	 * [--after=<date>]
+	 * : Only content published on or after this date (YYYY-MM-DD).
+	 *
+	 * [--before=<date>]
+	 * : Only content published on or before this date (YYYY-MM-DD).
+	 *
+	 * [--no-acf]
+	 * : Leave out ACF fields.
+	 *
+	 * [--no-meta]
+	 * : Leave out other custom fields.
+	 *
+	 * [--no-terms]
+	 * : Leave out categories, tags and other terms.
+	 *
+	 * [--no-featured-images]
+	 * : Leave out featured image URLs.
+	 *
+	 * [--no-woo]
+	 * : Leave out WooCommerce product data (prices, stock, attributes, variations).
+	 *
+	 * [--output=<file>]
+	 * : Where to write the file. Default: pressport-<post_type>-<date>.<format> in the current directory.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp pressport export post --status=publish,draft --output=posts.json
+	 *     wp pressport export product --format=csv --after=2024-01-01
+	 *
+	 * @param array $args  Args.
+	 * @param array $assoc Assoc args.
+	 */
+	public function export( $args, $assoc ) {
+		$export = PressPort_Exporter::sanitize_args(
+			array(
+				'post_type'     => isset( $args[0] ) ? $args[0] : 'post',
+				'format'        => isset( $assoc['format'] ) ? $assoc['format'] : 'json',
+				'statuses'      => isset( $assoc['status'] ) ? $assoc['status'] : 'publish',
+				'after'         => isset( $assoc['after'] ) ? $assoc['after'] : '',
+				'before'        => isset( $assoc['before'] ) ? $assoc['before'] : '',
+				'include_acf'   => WP_CLI\Utils\get_flag_value( $assoc, 'acf', true ),
+				'include_meta'  => WP_CLI\Utils\get_flag_value( $assoc, 'meta', true ),
+				'include_terms' => WP_CLI\Utils\get_flag_value( $assoc, 'terms', true ),
+				'include_image' => WP_CLI\Utils\get_flag_value( $assoc, 'featured-images', true ),
+				'include_woo'   => WP_CLI\Utils\get_flag_value( $assoc, 'woo', true ),
+			)
+		);
+		if ( is_wp_error( $export ) ) {
+			WP_CLI::error( $export->get_error_message() );
+		}
+		$state = PressPort_Exporter::start( $export );
+		if ( is_wp_error( $state ) ) {
+			WP_CLI::error( $state->get_error_message() );
+		}
+		if ( ! $state['total'] ) {
+			PressPort_Exporter::delete( $state );
+			WP_CLI::error( 'Nothing to export with these filters.' );
+		}
+		$progress = WP_CLI\Utils\make_progress_bar( sprintf( 'Exporting %d %s', $state['total'], $export['post_type'] ), $state['total'] );
+		while ( empty( $state['complete'] ) ) {
+			$before = $state['done'];
+			PressPort_Exporter::run_batch( $state, 100 );
+			$progress->tick( $state['done'] - $before );
+			if ( function_exists( 'wp_cache_flush_runtime' ) ) {
+				wp_cache_flush_runtime();
+			}
+		}
+		$progress->finish();
+
+		$output = isset( $assoc['output'] ) ? $assoc['output'] : $state['filename'];
+		if ( ! copy( $state['file'], $output ) ) {
+			WP_CLI::error( sprintf( 'Could not write %s', $output ) );
+		}
+		PressPort_Exporter::delete( $state );
+		WP_CLI::success( sprintf( 'Exported %d items (%d ACF fields, %d custom fields) to %s', $state['done'], count( $state['acf_names'] ), count( $state['meta_keys'] ), $output ) );
 	}
 
 	/**
@@ -330,6 +435,11 @@ class PressPort_CLI {
 			// --url is taken by WP-CLI itself, so JSON feeds use --feed.
 			if ( 'feed' === $key ) {
 				$key = 'url';
+			}
+			if ( 'file' === $key && preg_match( '#^https?://#i', (string) $value ) ) {
+				// Remote file: downloaded by the source when it is prepared.
+				$settings['file_url'] = $value;
+				continue;
 			}
 			if ( 'file' === $key ) {
 				$path = realpath( $value );

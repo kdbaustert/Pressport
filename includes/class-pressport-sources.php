@@ -26,9 +26,9 @@ class PressPort_Sources {
 		$sources = array(
 			'csv'       => 'PressPort_Source_CSV',
 			'json'      => 'PressPort_Source_JSON',
+			'remote'    => 'PressPort_Source_Remote',
 			'wordpress' => 'PressPort_Source_WordPress',
 			'drupal'    => 'PressPort_Source_Drupal',
-			'ghost'     => 'PressPort_Source_Ghost',
 		);
 		return (array) apply_filters( 'pressport_sources', $sources );
 	}
@@ -70,8 +70,9 @@ class PressPort_Sources {
 			'post_name'      => array( 'slug', 'post_name', 'url_slug', 'path.alias' ),
 			'post_status'    => array( 'status', 'post_status', 'state' ),
 			'post_author'    => array( 'author', 'author_email', 'author_name', 'author.name', 'authors.0.name', 'post_author', 'creator', 'byline' ),
-			'categories'     => array( 'categories', 'category', 'post_category', 'section' ),
-			'tags'           => array( 'tags', 'tag', 'keywords', 'post_tag', 'post_tags' ),
+			'categories'     => array( 'categories', 'category', 'post_category', 'section', 'terms.category' ),
+			'tags'           => array( 'tags', 'tag', 'keywords', 'post_tag', 'post_tags', 'terms.post_tag' ),
+			'featured_image_alt' => array( 'featured_image_alt', 'image_alt', 'alt_text', 'image.alt' ),
 			'featured_image' => array( 'featured_image', 'featured_image_url', 'image', 'image_url', 'thumbnail', 'feature_image', 'cover_image', 'banner_image', 'image.url' ),
 		);
 		$lower = array();
