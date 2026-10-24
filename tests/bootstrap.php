@@ -1,6 +1,7 @@
 <?php
 /**
- * PHPUnit bootstrap: the WordPress test suite from Composer, with MigratePlus loaded.
+ * PHPUnit bootstrap: the WordPress test suite from Composer, with WooCommerce
+ * (when Composer installed it) and MigratePlus loaded.
  *
  * @package MigratePlus
  */
@@ -13,10 +14,29 @@ require_once $root . '/vendor/yoast/phpunit-polyfills/phpunitpolyfills-autoload.
 $tests_dir = getenv( 'WP_PHPUNIT__DIR' ) ? getenv( 'WP_PHPUNIT__DIR' ) : $root . '/vendor/wp-phpunit/wp-phpunit';
 require_once $tests_dir . '/includes/functions.php';
 
+// A dev dependency (wpackagist), so it is never committed or shipped. Without it the WooCommerce tests skip.
+$woo = $root . '/vendor/wpackagist-plugin/woocommerce/woocommerce.php';
+
 tests_add_filter(
 	'muplugins_loaded',
-	static function () use ( $root ) {
+	static function () use ( $root, $woo ) {
+		if ( file_exists( $woo ) ) {
+			require $woo;
+		}
 		require $root . '/migrateplus.php';
+	}
+);
+
+// As WooCommerce's own test bootstrap does: create its tables, options and roles once WordPress is up.
+tests_add_filter(
+	'after_setup_theme',
+	static function () {
+		if ( ! class_exists( 'WC_Install' ) ) {
+			return;
+		}
+		WC_Install::install();
+		$GLOBALS['wp_roles'] = null; // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- reload the roles WooCommerce just added.
+		wp_roles();
 	}
 );
 

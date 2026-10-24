@@ -65,7 +65,8 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: mysqli
+          # gd for the images the WooCommerce tests sideload; WooCommerce itself comes from composer install (wpackagist).
+          extensions: mysqli, gd
           coverage: none
           tools: composer:v2
 
