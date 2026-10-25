@@ -119,7 +119,6 @@ class Test_CLI extends WP_UnitTestCase {
 			'status'        => array( 'post', array( 'status' => 'publish,draft' ), array( 'Hello world', 'Packing list' ) ),
 			'comments'      => array( 'post', array( 'comments' => true ), array( 'Hello world' ) ),
 			'menus'         => array( 'post', array( 'menus' => true ), array( 'Hello world' ) ),
-			'users'         => array( 'users,post', array(), array( 'Hello world' ) ),
 			'gzip'          => array( 'post', array( 'gzip' => true ), array( 'Hello world' ) ),
 		);
 	}
@@ -167,12 +166,6 @@ class Test_CLI extends WP_UnitTestCase {
 		$this->assertSame( $titles, array_column( $doc['items'], 'title' ) );
 		$this->assertSame( isset( $assoc['comments'] ), isset( $doc['items'][0]['comments'][0] ) );
 		$this->assertSame( isset( $assoc['menus'] ), isset( $doc['menus'] ) );
-		// "users" in the type list is the users section, written first, not a post type.
-		$this->assertSame( 0 === strpos( $types, 'users' ), isset( $doc['users'] ) );
-		if ( isset( $doc['users'] ) ) {
-			$this->assertSame( array( 'post' ), $doc['migrateplus']['post_types'] );
-			$this->assertStringContainsString( ' users', $output );
-		}
 	}
 
 	public function test_import_dry_run_counts_duplicates_and_saves_nothing() {
@@ -305,7 +298,8 @@ class Test_CLI extends WP_UnitTestCase {
 			'bad duplicate mode'   => array( array( 'duplicate' => 'merge' ), '--duplicate must be skip, update or create.' ),
 			'bad forced status'    => array( array( 'force-status' => 'trash' ), '--force-status must be publish, draft, pending, private or keep.' ),
 			'bad switch value'     => array( array( 'comments' => 'maybe' ), '--comments takes yes, no, true, false, 1 or 0.' ),
-			'unknown author'       => array( array( 'author' => 'nobody@example.test' ), 'Default author not found.' ),
+			'unknown author'       => array( array( 'author' => 'nobody@example.test' ), 'Author "nobody@example.test" not found.' ),
+			'subscriber author'    => array( array( 'author' => 'reader' ), 'Author "reader" may not write posts.' ),
 			'unknown post type'    => array( array( 'post_type' => 'mp_nope' ), 'Post type "mp_nope" does not exist.' ),
 		);
 	}
@@ -317,6 +311,12 @@ class Test_CLI extends WP_UnitTestCase {
 	 * @param string $error Error the command stops with.
 	 */
 	public function test_import_refuses( array $assoc, $error ) {
+		self::factory()->user->create(
+			array(
+				'role'       => 'subscriber',
+				'user_login' => 'reader',
+			)
+		);
 		self::factory()->post->create( array( 'post_title' => 'Hello world' ) );
 		MigratePlus_Mappings::save( 'Books feed', array( 'fields' => array( 'post_title' => 'name' ) ), array(), array( 'name' ) );
 		$file = $this->export_from_old_site();
@@ -324,6 +324,135 @@ class Test_CLI extends WP_UnitTestCase {
 		$this->assertStringContainsString( $error, $this->wp_error( 'import', array( 'json' ), $assoc + array( 'file' => $file ) ) );
 		// No draft job is left behind for wp migrateplus jobs to list.
 		$this->assertSame( array(), MigratePlus_Job::all() );
+	}
+
+	/**
+	 * @return string A feed of three books.
+	 */
+	protected function three_books() {
+		$books = array();
+		foreach ( array( 'Dune', 'Emma', 'Ulysses' ) as $i => $title ) {
+			$books[] = array(
+				'isbn'  => (string) $i,
+				'title' => $title,
+			);
+		}
+		return $this->json_file( $books );
+	}
+
+	/**
+	 * @param array $options Config file options.
+	 * @return string A config file mapping the three books.
+	 */
+	protected function books_config( array $options ) {
+		$mapping = array(
+			'fields' => array(
+				'source_id'  => 'isbn',
+				'post_title' => 'title',
+			),
+		);
+		return $this->json_file( compact( 'mapping', 'options' ) + array( 'source' => 'json' ) );
+	}
+
+	/**
+	 * @return int[] Title => author of each imported post.
+	 */
+	protected function authors_by_title() {
+		$out = array();
+		foreach ( get_posts( array( 'post_status' => 'any' ) ) as $post ) {
+			$out[ $post->post_title ] = (int) $post->post_author;
+		}
+		ksort( $out );
+		return $out;
+	}
+
+	public function test_import_without_an_author_gives_the_posts_to_the_user_running_it() {
+		$this->wp( 'import', array( 'json' ), array( 'file' => $this->three_books() ) );
+		$me = get_current_user_id();
+		$this->assertSame(
+			array(
+				'Dune'    => $me,
+				'Emma'    => $me,
+				'Ulysses' => $me,
+			),
+			$this->authors_by_title()
+		);
+	}
+
+	public function test_import_config_gives_single_records_their_own_author() {
+		$ada  = self::factory()->user->create(
+			array(
+				'role'       => 'author',
+				'user_login' => 'ada',
+			)
+		);
+		$bo   = self::factory()->user->create(
+			array(
+				'role'       => 'editor',
+				'user_email' => 'bo@example.test',
+			)
+		);
+		$file = $this->three_books();
+		$this->wp(
+			'import',
+			array(),
+			array(
+				'file'   => $file,
+				'author' => (string) $ada,
+				// Position 5 is past the last of the three books: left out.
+				'config' => $this->books_config(
+					array(
+						'authors' => array(
+							'2' => 'bo@example.test',
+							'5' => 'ada',
+						),
+					)
+				),
+			)
+		);
+		$this->assertSame(
+			array(
+				'Dune'    => $ada,
+				'Emma'    => $ada,
+				'Ulysses' => $bo,
+			),
+			$this->authors_by_title()
+		);
+		$this->assertSame( array( 2 => $bo ), MigratePlus_Job::all()[0]->data['options']['authors'] );
+	}
+
+	public function bad_config_authors() {
+		return array(
+			'unknown user' => array( array( '1' => 'nobody' ), 'Author "nobody" not found.' ),
+			'subscriber'   => array( array( '0' => 'reader' ), 'Author "reader" may not write posts.' ),
+			'not an index' => array( array( 'first' => 'reader' ), 'Authors: "first" is not a record position (0 for the first record).' ),
+		);
+	}
+
+	/**
+	 * @dataProvider bad_config_authors
+	 *
+	 * @param array  $authors Config "authors".
+	 * @param string $error   Error the command stops with.
+	 */
+	public function test_import_refuses_a_bad_config_author( array $authors, $error ) {
+		self::factory()->user->create(
+			array(
+				'role'       => 'subscriber',
+				'user_login' => 'reader',
+			)
+		);
+		$message = $this->wp_error(
+			'import',
+			array(),
+			array(
+				'file'   => $this->three_books(),
+				'config' => $this->books_config( array( 'authors' => $authors ) ),
+			)
+		);
+		$this->assertSame( $error, $message );
+		$this->assertSame( array(), MigratePlus_Job::all() );
+		$this->assertSame( array(), get_posts( array( 'post_status' => 'any' ) ) );
 	}
 
 	public function test_jobs_resume_and_rollback() {
@@ -551,5 +680,99 @@ class Test_CLI extends WP_UnitTestCase {
 		$this->assertStringStartsWith( '"mp_hidden" can\'t be exported', $this->wp_error( 'export', array( 'mp_hidden' ), array( 'output' => $this->temp_file() ) ) );
 		unregister_post_type( 'acf-field-group' );
 		unregister_post_type( 'mp_hidden' );
+	}
+
+	/**
+	 * @return string A Migrate Plus export holding only site settings.
+	 */
+	protected function settings_only_file() {
+		return $this->json_file(
+			array(
+				'migrateplus'   => array(
+					'site'    => 'http://old.test',
+					'mapping' => array( 'fields' => array( 'source_id' => 'id' ) ),
+				),
+				'items'         => array(),
+				'site_settings' => array( 'options' => array( 'blogname' => 'From the old site' ) ),
+			)
+		);
+	}
+
+	public function test_import_exits_with_an_error_when_a_side_section_fails() {
+		$fault = static function () {
+			throw new RuntimeException( 'Deadlock found.' );
+		};
+		add_filter( 'pre_update_option_blogname', $fault );
+		$error = $this->wp_error(
+			'import',
+			array( 'json' ),
+			array(
+				'file' => $this->settings_only_file(),
+				'yes'  => true,
+			)
+		);
+		remove_filter( 'pre_update_option_blogname', $fault );
+		$this->assertStringStartsWith( '0 created, 0 updated, 0 skipped, 2 failed. Job id: ', $error );
+	}
+
+	public function test_rollback_of_an_import_of_settings_alone_puts_them_back() {
+		update_option( 'blogname', 'Here' );
+		$this->wp(
+			'import',
+			array( 'json' ),
+			array(
+				'file' => $this->settings_only_file(),
+				'yes'  => true,
+			)
+		);
+		$this->assertSame( 'From the old site', get_option( 'blogname' ) );
+		$job            = MigratePlus_Job::all()[0];
+		WP_CLI::$output = array();
+
+		$this->assertSame( 'Success: Rolled back job ' . $job->data['id'] . ': what it changed was put back.', $this->wp( 'rollback', array( $job->data['id'] ), array( 'yes' => true ) ) );
+		$this->assertSame( 'Here', get_option( 'blogname' ) );
+		$this->assertSame( 'rolled_back', MigratePlus_Job::load( $job->data['id'] )->data['status'] );
+		WP_CLI::$output = array();
+		$this->assertSame( 'Warning: Nothing to roll back: job ' . $job->data['id'] . ' was rolled back already.', $this->wp( 'rollback', array( $job->data['id'] ), array( 'yes' => true ) ) );
+	}
+
+	public function test_export_that_fails_stops_with_its_error_and_writes_no_file() {
+		self::factory()->post->create( array( 'post_title' => 'Broken' ) );
+		$nan    = static function ( $item ) {
+			$item['meta']['ratio'] = NAN;
+			return $item;
+		};
+		$output = $this->temp_file();
+		wp_delete_file( $output );
+		add_filter( 'migrateplus_export_item', $nan );
+		$error = $this->wp_error( 'export', array( 'post' ), array( 'output' => $output ) );
+		remove_filter( 'migrateplus_export_item', $nan );
+		$this->assertStringStartsWith( 'Could not write "Broken"', $error );
+		$this->assertFileDoesNotExist( $output );
+	}
+
+	public function bad_export_filters() {
+		return array(
+			'unknown status'  => array( array( 'status' => 'published' ), '--status takes publish, draft, pending, private, future or any, separated by commas. Unknown: published.' ),
+			'one bad status'  => array( array( 'status' => 'publish,trash' ), '--status takes publish, draft, pending, private, future or any, separated by commas. Unknown: trash.' ),
+			'not a date'      => array( array( 'after' => 'last week' ), '--after must be a date as YYYY-MM-DD.' ),
+			'impossible date' => array( array( 'before' => '2024-13-45' ), '--before must be a date as YYYY-MM-DD.' ),
+		);
+	}
+
+	/**
+	 * @dataProvider bad_export_filters
+	 *
+	 * @param array  $assoc Flags.
+	 * @param string $error Error the command stops with.
+	 */
+	public function test_export_refuses_filters_it_cannot_read( array $assoc, $error ) {
+		$this->assertSame( $error, $this->wp_error( 'export', array( 'post' ), $assoc + array( 'output' => $this->temp_file() ) ) );
+	}
+
+	public function test_preview_of_a_file_with_side_sections_only() {
+		$output = $this->wp( 'preview', array( 'json' ), array( 'file' => $this->settings_only_file() ) );
+		$this->assertStringContainsString( 'No records: the file holds side sections only.', $output );
+		$this->assertSame( array(), MigratePlus_Job::all() );
 	}
 }

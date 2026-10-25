@@ -115,4 +115,54 @@ class Test_Sources extends WP_UnitTestCase {
 			MigratePlus_Sources::guess_mapping( array( 'ID', 'headline', 'body', 'published_at', 'image', 'unrelated' ) )
 		);
 	}
+
+	public function test_json_cache_reads_one_batch_at_a_time() {
+		$records = array();
+		for ( $i = 1; $i <= 5; $i++ ) {
+			$records[] = array(
+				'id'    => $i,
+				'title' => 'Line ' . $i . "\nwith a break",
+			);
+		}
+		$file = wp_tempnam( 'migrateplus-test.json' );
+		file_put_contents( $file, wp_json_encode( $records ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$prepared = ( new MigratePlus_Source_JSON( array( 'file' => $file ) ) )->prepare();
+		wp_delete_file( $file );
+		$source = new MigratePlus_Source_JSON( $prepared );
+
+		$middle = $source->fetch( 2, 2 );
+		$last   = $source->fetch( $middle['next'], 10 );
+		wp_delete_file( $prepared['cache_file'] );
+		$this->assertSame( array( 3, 4 ), array_column( $middle['records'], 'id' ) );
+		$this->assertSame( "Line 3\nwith a break", $middle['records'][0]['title'] );
+		$this->assertSame( 4, $middle['next'] );
+		$this->assertSame( 5, $middle['total'] );
+		$this->assertSame( array( 5 ), array_column( $last['records'], 'id' ) );
+		$this->assertNull( $last['next'] );
+	}
+
+	/**
+	 * A job started before the cache had an index, resumed after the update.
+	 */
+	public function test_json_cache_written_whole_by_an_older_version_still_reads() {
+		$cache = MigratePlus_Util::ensure_storage_dir() . 'json-oldformat.json';
+		file_put_contents( $cache, wp_json_encode( array( array( 'id' => 1 ), array( 'id' => 2 ) ) ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$batch = ( new MigratePlus_Source_JSON( array( 'cache_file' => $cache ) ) )->fetch( 1, 5 );
+		wp_delete_file( $cache );
+		$this->assertSame( array( 2 ), array_column( $batch['records'], 'id' ) );
+		$this->assertNull( $batch['next'] );
+	}
+
+	public function test_plain_json_over_the_size_limit_is_refused() {
+		$file  = wp_tempnam( 'migrateplus-test.json' );
+		$limit = static function () {
+			return 10;
+		};
+		file_put_contents( $file, '[{"title":"More than ten bytes"}]' ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		add_filter( 'migrateplus_max_json_size', $limit );
+		$out = ( new MigratePlus_Source_JSON( array( 'file' => $file ) ) )->prepare();
+		remove_filter( 'migrateplus_max_json_size', $limit );
+		wp_delete_file( $file );
+		$this->assertSame( 'This file holds more than 10 B of JSON, more than this server can import. Use a smaller export, or raise PHP\'s memory limit.', $out->get_error_message() );
+	}
 }

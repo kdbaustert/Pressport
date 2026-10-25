@@ -14,6 +14,22 @@ defined( 'ABSPATH' ) || exit;
 class MigratePlus_Media {
 
 	/**
+	 * Block types whose attachment ids import_content_images() points at the
+	 * copies it downloads; MigratePlus_Blocks leaves those ids alone.
+	 *
+	 * @var string[]
+	 */
+	const BLOCK_TYPES = array( 'image', 'cover', 'media-text', 'video', 'audio', 'file' );
+
+	/**
+	 * Per post, the old attachment ids import_content_images() replaced in its
+	 * block markup, and the ids it put there, until MigratePlus_Blocks takes them.
+	 *
+	 * @var array[] post id => [ old id => new id ]
+	 */
+	protected static $block_ids = array();
+
+	/**
 	 * Load the admin includes needed for sideloading (CLI/AJAX safe).
 	 */
 	public static function load_deps() {
@@ -131,30 +147,23 @@ class MigratePlus_Media {
 			return $tmp;
 		}
 
-		$path = (string) wp_parse_url( $url, PHP_URL_PATH );
-		$name = sanitize_file_name( wp_basename( rawurldecode( $path ) ) );
-		$ext  = strtolower( pathinfo( $name, PATHINFO_EXTENSION ) );
-		$mime = function_exists( 'wp_get_image_mime' ) ? wp_get_image_mime( $tmp ) : false;
-		$map  = array(
-			'image/jpeg'    => 'jpg',
-			'image/png'     => 'png',
-			'image/gif'     => 'gif',
-			'image/webp'    => 'webp',
-			'image/avif'    => 'avif',
-			'image/svg+xml' => 'svg',
-		);
-		if ( $mime && isset( $map[ $mime ] ) && ! in_array( $ext, array( 'jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'svg' ), true ) ) {
-			$name = ( $name ? pathinfo( $name, PATHINFO_FILENAME ) : 'image-' . md5( $url ) ) . '.' . $map[ $mime ];
-		}
-		if ( '' === $name ) {
-			$name = 'image-' . md5( $url ) . '.jpg';
-		}
-
 		$file = array(
-			'name'     => $name,
+			'name'     => self::file_name( $url, $tmp ),
 			'tmp_name' => $tmp,
 		);
-		$id   = media_handle_sideload( $file, $post_id );
+		// Tagged the moment the attachment exists, before its sizes are made: a request that dies
+		// while resizing would otherwise leave an attachment rollback does not know about.
+		$tag = static function ( $attachment_id ) use ( $job_id ) {
+			update_post_meta( $attachment_id, '_migrateplus_job_id', $job_id );
+		};
+		if ( $job_id ) {
+			add_action( 'add_attachment', $tag );
+		}
+		try {
+			$id = media_handle_sideload( $file, $post_id );
+		} finally {
+			remove_action( 'add_attachment', $tag );
+		}
 		if ( is_wp_error( $id ) ) {
 			if ( file_exists( $tmp ) ) {
 				wp_delete_file( $tmp );
@@ -170,6 +179,64 @@ class MigratePlus_Media {
 			update_post_meta( $id, '_wp_attachment_image_alt', wp_slash( sanitize_text_field( $alt ) ) );
 		}
 		return (int) $id;
+	}
+
+	/**
+	 * The name a downloaded file is saved under: the URL's file name, with the
+	 * extension of the type the file turned out to be when the URL has none this
+	 * site knows ("download?id=5", "photo.php").
+	 *
+	 * @param string $url URL it came from.
+	 * @param string $tmp The downloaded file.
+	 * @return string
+	 */
+	protected static function file_name( $url, $tmp ) {
+		$name  = sanitize_file_name( wp_basename( rawurldecode( (string) wp_parse_url( $url, PHP_URL_PATH ) ) ) );
+		$known = '' !== $name && false !== wp_check_filetype( $name )['ext'];
+		$ext   = $known ? '' : self::extension_for( self::detect_mime( $tmp ) );
+		if ( '' !== $ext ) {
+			$name = ( $name ? pathinfo( $name, PATHINFO_FILENAME ) : 'image-' . md5( $url ) ) . '.' . $ext;
+		}
+		return '' === $name ? 'image-' . md5( $url ) . '.jpg' : $name;
+	}
+
+	/**
+	 * A file's type from its content.
+	 *
+	 * @param string $file Path.
+	 * @return string '' when it can't be told.
+	 */
+	protected static function detect_mime( $file ) {
+		$mime = function_exists( 'wp_get_image_mime' ) ? (string) wp_get_image_mime( $file ) : '';
+		if ( '' !== $mime ) {
+			return $mime;
+		}
+		// wp_get_image_mime() reads binary image headers only, and finfo names SVG differently from
+		// one libmagic to the next (image/svg, text/xml, text/plain): look for the tag.
+		$head = (string) file_get_contents( $file, false, null, 0, 1024 ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		if ( preg_match( '/<svg[\s>]/i', $head ) ) {
+			return 'image/svg+xml';
+		}
+		$mime = class_exists( 'finfo' ) ? (string) ( new finfo( FILEINFO_MIME_TYPE ) )->file( $file ) : '';
+		return 'application/octet-stream' === $mime ? '' : $mime;
+	}
+
+	/**
+	 * The usual file extension of a type.
+	 *
+	 * @param string $mime Type.
+	 * @return string '' for an unknown type.
+	 */
+	protected static function extension_for( $mime ) {
+		if ( '' === $mime ) {
+			return '';
+		}
+		foreach ( wp_get_mime_types() as $exts => $type ) {
+			if ( $type === $mime ) {
+				return strtok( $exts, '|' );
+			}
+		}
+		return 'image/svg+xml' === $mime ? 'svg' : ''; // Not in WordPress's list unless a plugin allows SVG.
 	}
 
 	/**
@@ -194,7 +261,7 @@ class MigratePlus_Media {
 		if ( is_wp_error( $tmp ) ) {
 			return $tmp;
 		}
-		$name  = sanitize_file_name( wp_basename( rawurldecode( (string) wp_parse_url( $url, PHP_URL_PATH ) ) ) );
+		$name  = self::file_name( $url, $tmp );
 		$check = wp_check_filetype_and_ext( $tmp, $name );
 		if ( empty( $check['type'] ) ) {
 			wp_delete_file( $tmp );
@@ -298,9 +365,17 @@ class MigratePlus_Media {
 	}
 
 	/**
-	 * Import every external <img> in HTML and rewrite src to the local copy, along
-	 * with links to the old file and the ids and URLs in the image, cover and
-	 * media & text block comments.
+	 * Import the images and files content shows from the old site, and point the
+	 * content at the local copies: every <img> (its src, the link around it, the
+	 * wp-image-N class), and the cover, video, audio and file blocks (a cover
+	 * with only a background image, a video's or audio's src, a file's link),
+	 * with the ids and URLs in the block comments of image, cover, media & text,
+	 * video, audio and file blocks.
+	 *
+	 * Only files on the old site's host(s) or under a /wp-content/uploads/ path
+	 * are downloaded: images hotlinked from elsewhere and tracking pixels are
+	 * left as they are. The hosts can be changed with the
+	 * migrateplus_content_image_hosts filter.
 	 *
 	 * @param string $html     Content.
 	 * @param int    $post_id  Post.
@@ -310,62 +385,90 @@ class MigratePlus_Media {
 	 * @return string
 	 */
 	public static function import_content_images( $html, $post_id, $base, $job_id, &$errors = array() ) {
-		if ( false === stripos( (string) $html, '<img' ) ) {
+		$html = (string) $html;
+		if ( false === stripos( $html, '<img' ) && ! preg_match( '/<!--\s+wp:(?:cover|video|audio|file)\s/', $html ) ) {
 			return $html;
 		}
-		$home = untrailingslashit( preg_replace( '#^https?:#i', '', home_url() ) );
-		$ids  = array(); // Old attachment id => new, for the block comments.
-		$urls = array(); // Old file URL => new, for links to the image and the cover block's url.
-		$job  = $job_id ? MigratePlus_Job::load( $job_id ) : null;
+		$job    = $job_id ? MigratePlus_Job::load( $job_id ) : null;
+		$ctx    = array(
+			'post_id' => $post_id,
+			'base'    => $base,
+			'job_id'  => $job_id,
+			'job'     => $job,
+			'home'    => untrailingslashit( preg_replace( '#^https?:#i', '', home_url() ) ),
+			'hosts'   => self::content_image_hosts( $base, $job, $post_id ),
+			'ids'     => array(), // Old attachment id => new, for the block comments.
+			'urls'    => array(), // Old file URL => new, for links to the file and the URLs in block comments.
+			'errors'  => array(),
+		);
+		$blocks = has_blocks( $html );
 
 		$html = preg_replace_callback(
 			'/<img\b[^>]*>/i',
-			static function ( $m ) use ( $post_id, $base, $job_id, $home, $job, &$errors, &$ids, &$urls ) {
+			static function ( $m ) use ( &$ctx ) {
 				$tag = $m[0];
 				if ( ! preg_match( '/\ssrc\s*=\s*(["\'])(.*?)\1/i', $tag, $src ) ) {
 					return $tag;
 				}
-				$url = self::absolutize( $src[2], $base );
-				// Skip images already hosted on this site.
-				if ( ! $url || 0 === stripos( preg_replace( '#^https?:#i', '', $url ), $home . '/' ) ) {
-					return $tag;
-				}
 				$old_id = preg_match( '/\bwp-image-(\d+)\b/', $tag, $class ) ? $class[1] : '';
-				$id     = self::find_imported( $url, $old_id, $job );
+				$alt    = preg_match( '/\salt\s*=\s*(["\'])(.*?)\1/i', $tag, $a ) ? html_entity_decode( $a[2], ENT_QUOTES, 'UTF-8' ) : '';
+				$url    = self::absolutize( $src[2], $ctx['base'] );
+				$id     = self::import_content_file( $url, $old_id, $alt, $ctx );
 				if ( ! $id ) {
-					$alt = preg_match( '/\salt\s*=\s*(["\'])(.*?)\1/i', $tag, $a ) ? html_entity_decode( $a[2], ENT_QUOTES, 'UTF-8' ) : '';
-					$id  = self::sideload( $url, $post_id, $alt, $base, $job_id );
-				}
-				if ( is_wp_error( $id ) ) {
-					$errors[] = $url . ': ' . $id->get_error_message();
 					return $tag;
 				}
-				$full = wp_get_attachment_url( $id );
-				$new  = $full;
-				// A size variant matched to its original: show the same size of the local copy.
-				if ( get_post_meta( $id, '_migrateplus_source_url', true ) !== $url && preg_match( '/-(\d+)x(\d+)\.[a-z0-9]+$/i', $url, $size ) ) {
-					$sized = wp_get_attachment_image_url( $id, array( (int) $size[1], (int) $size[2] ) );
-					$new   = $sized ? $sized : $full;
-				}
-				foreach ( self::full_size_urls( $url ) as $old ) {
-					$urls[ $old ] = $full;
-				}
-				$urls[ $url ] = $new;
-				$tag          = str_replace( $src[0], ' src=' . $src[1] . esc_url( $new ) . $src[1], $tag );
+				$new = $ctx['urls'][ $url ];
+				$tag = str_replace( $src[0], ' src=' . $src[1] . esc_url( $new ) . $src[1], $tag );
 				// Old responsive sources would still point at the old site.
 				$tag = preg_replace( '/\s(srcset|sizes)\s*=\s*(["\']).*?\2/i', '', $tag );
 				// Update block image class (wp-image-123) so the editor links it.
-				if ( '' !== $old_id ) {
-					$ids[ $old_id ] = $id;
-				}
-				$tag = preg_replace( '/\bwp-image-\d+\b/', 'wp-image-' . $id, $tag );
-				return $tag;
+				return preg_replace( '/\bwp-image-\d+\b/', 'wp-image-' . $id, $tag );
 			},
 			$html
 		);
-		if ( ! $urls ) {
+
+		// Files the blocks name outside an <img>: a cover's background and a file's link (in the
+		// block comment), a video's or audio's src (in its HTML; neither block has inner blocks).
+		$named = array();
+		preg_match_all( '/<!--\s+wp:(cover|file)\s+(\{.*?\})\s+\/?-->/s', $html, $found, PREG_SET_ORDER );
+		foreach ( $found as $block ) {
+			$attrs   = json_decode( $block[2], true );
+			$key     = 'cover' === $block[1] ? 'url' : 'href';
+			$named[] = is_array( $attrs ) && isset( $attrs[ $key ] ) && is_string( $attrs[ $key ] ) ? array( $attrs[ $key ], $attrs ) : null;
+		}
+		preg_match_all( '/<!--\s+wp:(video|audio)(?:\s+(\{.*?\}))?\s+-->(.*?)<!--\s+\/wp:\1\s+-->/s', $html, $found, PREG_SET_ORDER );
+		foreach ( $found as $block ) {
+			$attrs   = '' !== $block[2] ? json_decode( $block[2], true ) : array();
+			$named[] = preg_match( '/<(?:video|audio)\b[^>]*?\ssrc\s*=\s*(["\'])(.*?)\1/i', $block[3], $src ) ? array( html_entity_decode( $src[2], ENT_QUOTES, 'UTF-8' ), is_array( $attrs ) ? $attrs : array() ) : null;
+		}
+		foreach ( array_filter( $named ) as $one ) {
+			list( $file, $attrs ) = $one;
+			$url                  = self::absolutize( $file, $ctx['base'] );
+			$old_id               = isset( $attrs['id'] ) && is_numeric( $attrs['id'] ) ? (string) (int) $attrs['id'] : '';
+			if ( '' === $url ) {
+				continue;
+			}
+			if ( ! isset( $ctx['urls'][ $url ] ) ) {
+				self::import_content_file( $url, $old_id, '', $ctx );
+			} elseif ( '' !== $old_id && ! isset( $ctx['ids'][ $old_id ] ) ) {
+				$id = self::find_existing( $url ); // The same file shown twice: the copy made for the first.
+				if ( $id ) {
+					$ctx['ids'][ $old_id ] = $id;
+				}
+			}
+		}
+		foreach ( $ctx['errors'] as $error ) {
+			$errors[] = $error;
+		}
+		if ( $blocks && $post_id && $ctx['ids'] ) {
+			self::$block_ids[ (int) $post_id ] = array_map( 'intval', $ctx['ids'] );
+		}
+		if ( ! $ctx['urls'] ) {
 			return $html;
 		}
+		$urls = $ctx['urls'];
+		$ids  = $ctx['ids'];
+		$base = $ctx['base'];
 		// A link around the image (to the file, or "Link to: Media file") would still open the old site's copy.
 		$html = preg_replace_callback(
 			'/(<a\b[^>]*?\shref\s*=\s*)(["\'])(.*?)\2/i',
@@ -375,10 +478,27 @@ class MigratePlus_Media {
 			},
 			$html
 		);
-		// The block comments carry the id and URL too ({"id":123}, a cover's "url", media & text's
-		// "mediaId" and "mediaLink"); the editor marks a block invalid when they no longer match its HTML.
+		// A video's, audio's or source's src, and a cover's background image.
+		$html = preg_replace_callback(
+			'/(<(?:video|audio|source)\b[^>]*?\ssrc\s*=\s*)(["\'])(.*?)\2/i',
+			static function ( $m ) use ( $base, $urls ) {
+				$src = self::absolutize( $m[3], $base );
+				return isset( $urls[ $src ] ) ? $m[1] . $m[2] . esc_url( $urls[ $src ] ) . $m[2] : $m[0];
+			},
+			$html
+		);
+		$html = preg_replace_callback(
+			'/(background-image\s*:\s*url\(\s*)(["\']?)([^"\')]+)\2(\s*\))/i',
+			static function ( $m ) use ( $base, $urls ) {
+				$src = self::absolutize( $m[3], $base );
+				return isset( $urls[ $src ] ) ? $m[1] . $m[2] . esc_url( $urls[ $src ] ) . $m[2] . $m[4] : $m[0];
+			},
+			$html
+		);
+		// The block comments carry the id and URL too ({"id":123}, a cover's "url", a file's "href",
+		// media & text's "mediaId" and "mediaLink"); the editor marks a block invalid when they no longer match its HTML.
 		return preg_replace_callback(
-			'/<!--\s+wp:(?:image|cover|media-text)\s+(\{.*?\})\s+\/?-->/s',
+			'/<!--\s+wp:(?:' . implode( '|', array_map( 'preg_quote', self::BLOCK_TYPES ) ) . ')\s+(\{.*?\})\s+\/?-->/s',
 			static function ( $m ) use ( $base, $ids, $urls ) {
 				$attrs = preg_replace_callback(
 					'/"(id|mediaId)":(\d+)\b/',
@@ -389,10 +509,10 @@ class MigratePlus_Media {
 				);
 				$media = preg_match( '/"mediaId":(\d+)\b/', $m[1], $mid ) && isset( $ids[ $mid[1] ] ) ? $ids[ $mid[1] ] : 0;
 				$attrs = preg_replace_callback(
-					'/"(url|mediaLink)":"((?:[^"\\\\]|\\\\.)*)"/',
+					'/"(url|href|textLinkHref|mediaLink)":"((?:[^"\\\\]|\\\\.)*)"/',
 					static function ( $a ) use ( $base, $urls, $media ) {
 						$new = '';
-						if ( 'url' === $a[1] ) {
+						if ( 'mediaLink' !== $a[1] ) {
 							$old = self::absolutize( (string) json_decode( '"' . $a[2] . '"' ), $base );
 							$new = isset( $urls[ $old ] ) ? $urls[ $old ] : '';
 						} elseif ( $media ) {
@@ -406,5 +526,110 @@ class MigratePlus_Media {
 			},
 			$html
 		);
+	}
+
+	/**
+	 * Import one file content shows, unless it is already here or not to be
+	 * downloaded, and remember where the content's old URL and id now point.
+	 *
+	 * @param string $url    Absolute URL on the old site.
+	 * @param string $old_id Old attachment id, or ''.
+	 * @param string $alt    Alt text.
+	 * @param array  $ctx    import_content_images() context (by reference: ids, urls and errors are added to).
+	 * @return int The attachment, 0 when the content keeps the old URL.
+	 */
+	protected static function import_content_file( $url, $old_id, $alt, array &$ctx ) {
+		// Skip files already hosted on this site, and hosts the import does not download from.
+		if ( ! $url || 0 === stripos( preg_replace( '#^https?:#i', '', $url ), $ctx['home'] . '/' ) || ! self::may_download( $url, $ctx['hosts'] ) ) {
+			return 0;
+		}
+		$id = self::find_imported( $url, $old_id, $ctx['job'] );
+		if ( ! $id ) {
+			$id = self::sideload( $url, $ctx['post_id'], $alt, $ctx['base'], $ctx['job_id'] );
+		}
+		if ( is_wp_error( $id ) ) {
+			$ctx['errors'][] = $url . ': ' . $id->get_error_message();
+			return 0;
+		}
+		$full = wp_get_attachment_url( $id );
+		$new  = $full;
+		// A size variant matched to its original: show the same size of the local copy.
+		if ( get_post_meta( $id, '_migrateplus_source_url', true ) !== $url && preg_match( '/-(\d+)x(\d+)\.[a-z0-9]+$/i', $url, $size ) ) {
+			$sized = wp_get_attachment_image_url( $id, array( (int) $size[1], (int) $size[2] ) );
+			$new   = $sized ? $sized : $full;
+		}
+		foreach ( self::full_size_urls( $url ) as $old ) {
+			$ctx['urls'][ $old ] = $full;
+		}
+		$ctx['urls'][ $url ] = $new;
+		if ( '' !== $old_id ) {
+			$ctx['ids'][ $old_id ] = (int) $id;
+		}
+		return (int) $id;
+	}
+
+	/**
+	 * The hosts content files are downloaded from: the old site's.
+	 *
+	 * @param string               $base    Base URL of the records.
+	 * @param MigratePlus_Job|null $job     The import.
+	 * @param int                  $post_id Post.
+	 * @return string[] Lowercase host names.
+	 */
+	protected static function content_image_hosts( $base, $job, $post_id ) {
+		$sites = array( $base );
+		foreach ( array( 'migrateplus_site', 'site_url', 'url' ) as $key ) {
+			if ( $job && ! empty( $job->data['settings'][ $key ] ) && is_string( $job->data['settings'][ $key ] ) ) {
+				$sites[] = $job->data['settings'][ $key ];
+			}
+		}
+		$hosts = array();
+		foreach ( $sites as $site ) {
+			$host = strtolower( (string) wp_parse_url( (string) $site, PHP_URL_HOST ) );
+			if ( '' !== $host ) {
+				$hosts[] = $host;
+			}
+		}
+		/**
+		 * The hosts whose images and files in post content are downloaded. Files
+		 * under /wp-content/uploads/ are downloaded from any host.
+		 *
+		 * @param string[]             $hosts   Host names, the old site's by default.
+		 * @param int                  $post_id The post being imported.
+		 * @param MigratePlus_Job|null $job     The import.
+		 */
+		return array_values( array_unique( array_map( 'strtolower', array_filter( (array) apply_filters( 'migrateplus_content_image_hosts', $hosts, $post_id, $job ), 'is_string' ) ) ) );
+	}
+
+	/**
+	 * Whether a content file is one to download: on one of the hosts (with or
+	 * without www.), or in a WordPress uploads folder.
+	 *
+	 * @param string   $url   URL.
+	 * @param string[] $hosts From content_image_hosts().
+	 * @return bool
+	 */
+	protected static function may_download( $url, array $hosts ) {
+		if ( false !== strpos( (string) wp_parse_url( $url, PHP_URL_PATH ), '/wp-content/uploads/' ) ) {
+			return true;
+		}
+		$bare = static function ( $host ) {
+			return preg_replace( '/^www\./', '', strtolower( (string) $host ) );
+		};
+		return in_array( $bare( wp_parse_url( $url, PHP_URL_HOST ) ), array_map( $bare, $hosts ), true );
+	}
+
+	/**
+	 * The old attachment ids import_content_images() replaced in a post's block
+	 * markup, mapped to the ids it put there, handed over once: MigratePlus_Blocks
+	 * takes them when it relinks the post, so it does not map those ids again.
+	 *
+	 * @param int $post_id Post.
+	 * @return int[] old id => new id.
+	 */
+	public static function take_block_ids( $post_id ) {
+		$ids = isset( self::$block_ids[ (int) $post_id ] ) ? self::$block_ids[ (int) $post_id ] : array();
+		unset( self::$block_ids[ (int) $post_id ] );
+		return $ids;
 	}
 }

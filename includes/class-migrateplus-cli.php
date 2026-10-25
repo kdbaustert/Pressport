@@ -43,7 +43,7 @@ class MigratePlus_CLI {
 	 *
 	 * @var string[]
 	 */
-	protected $reserved = array( 'config', 'map', 'mapping', 'post_type', 'status', 'author', 'duplicate', 'duplicates', 'batch_size', 'featured-images', 'content-images', 'create-authors', 'create-terms', 'rewrite-links', 'force-status', 'comments', 'menus', 'term-data', 'users', 'acf-definitions', 'acf-options', 'site-settings', 'orders', 'redirects', 'dry-run', 'yes' );
+	protected $reserved = array( 'config', 'map', 'mapping', 'post_type', 'status', 'author', 'duplicate', 'duplicates', 'batch_size', 'featured-images', 'content-images', 'create-terms', 'rewrite-links', 'force-status', 'comments', 'menus', 'term-data', 'acf-definitions', 'acf-options', 'site-settings', 'orders', 'redirects', 'dry-run', 'yes' );
 
 	/**
 	 * Import switches and the option each sets.
@@ -53,13 +53,11 @@ class MigratePlus_CLI {
 	protected $switches = array(
 		'featured-images' => 'import_featured_image',
 		'content-images'  => 'import_content_images',
-		'create-authors'  => 'create_authors',
 		'create-terms'    => 'create_terms',
 		'rewrite-links'   => 'rewrite_links',
 		'comments'        => 'import_comments',
 		'menus'           => 'import_menus',
 		'term-data'       => 'import_term_data',
-		'users'           => 'import_users',
 		'acf-definitions' => 'import_acf_definitions',
 		'acf-options'     => 'import_acf_options',
 		'site-settings'   => 'import_site_settings',
@@ -92,12 +90,20 @@ class MigratePlus_CLI {
 		WP_CLI::log( 'Fields: ' . implode( ', ', $preview['fields'] ) );
 		WP_CLI::log( "\nSuggested mapping (save as a --map file and edit):" );
 		WP_CLI::log( wp_json_encode( $preview['mapping'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) );
+		// An export of side sections alone (menus, settings...) has no records to show.
+		if ( empty( $preview['records'] ) ) {
+			WP_CLI::log( "\nNo records: the file holds side sections only." );
+			$job->delete();
+			return;
+		}
 		WP_CLI::log( "\nFirst record:" );
 		$rows = array();
 		foreach ( $preview['records'][0] as $k => $v ) {
+			$value  = MigratePlus_Util::stringify( $v );
 			$rows[] = array(
 				'field' => $k,
-				'value' => mb_strimwidth( MigratePlus_Util::stringify( $v ), 0, 90, '…' ),
+				// mbstring is optional in PHP.
+				'value' => function_exists( 'mb_strimwidth' ) ? mb_strimwidth( $value, 0, 90, '…' ) : ( strlen( $value ) > 90 ? substr( $value, 0, 87 ) . '...' : $value ),
 			);
 		}
 		WP_CLI\Utils\format_items( 'table', $rows, array( 'field', 'value' ) );
@@ -113,7 +119,7 @@ class MigratePlus_CLI {
 	 * : json (or a custom registered source). Optional when --config is given.
 	 *
 	 * [--config=<file>]
-	 * : JSON file: { "source": "...", "settings": {...}, "mapping": {...}, "options": {...} }
+	 * : JSON file: { "source": "...", "settings": {...}, "mapping": {...}, "options": {...} }. Its options may give "authors", an author for single records: { "0": "id|login|email", ... }, by the record's position in the file (0 for the first). Those records get it instead of --author.
 	 *
 	 * [--map=<file>]
 	 * : JSON mapping file: { "fields": { "post_title": "title", ... }, "meta": [{ "key": "...", "source": "..." }], "taxonomies": [{ "taxonomy": "...", "source": "..." }], "acf": { "field_name_or_key": "source_field" } }. Defaults to the suggested mapping.
@@ -131,7 +137,7 @@ class MigratePlus_CLI {
 	 * : Give every imported post this status (publish, draft, pending or private), also posts it updates. Pass "keep" to use each record's own status. Defaults to the Migrate Plus setting.
 	 *
 	 * [--author=<id|login|email>]
-	 * : Default author.
+	 * : The author of the imported posts (a record given its own in a --config file's "authors" gets that one). Without it, the posts go to the --user running the command, or to WordPress's default author without --user. User accounts differ from site to site, so the file's authors are only kept with the posts as a note.
 	 *
 	 * [--duplicate=<mode>]
 	 * : skip, update or create. Defaults to the Migrate Plus setting.
@@ -151,9 +157,6 @@ class MigratePlus_CLI {
 	 * [--content-images]
 	 * : Download images found inside content.
 	 *
-	 * [--create-authors]
-	 * : Create users for unknown authors.
-	 *
 	 * [--[no-]create-terms]
 	 * : Create missing categories and terms. Defaults to the Migrate Plus setting.
 	 *
@@ -168,9 +171,6 @@ class MigratePlus_CLI {
 	 *
 	 * [--[no-]term-data]
 	 * : Import the terms a Migrate Plus export carries, with their data, before its posts. Defaults to the Migrate Plus setting.
-	 *
-	 * [--[no-]users]
-	 * : Import the users a Migrate Plus export carries, before its posts. Defaults to the Migrate Plus setting.
 	 *
 	 * [--[no-]acf-definitions]
 	 * : Import the ACF field groups, post types, taxonomies and options pages a Migrate Plus export carries, before its posts. Defaults to the Migrate Plus setting.
@@ -286,23 +286,20 @@ class MigratePlus_CLI {
 
 		// The previewed job's options: the defaults, plus the post type a MigratePlus export came from.
 		$options = array_merge( $job->data['options'], $given );
-		if ( isset( $assoc['author'] ) ) {
-			$user = is_numeric( $assoc['author'] ) ? get_userdata( (int) $assoc['author'] ) : ( get_user_by( 'login', $assoc['author'] ) ? get_user_by( 'login', $assoc['author'] ) : get_user_by( 'email', $assoc['author'] ) );
-			if ( ! $user ) {
-				$this->abandon( $job, 'Default author not found.' );
+		// Posts get the author picked here, or the one a --config file gives their record, or whoever
+		// runs the command: accounts differ from site to site, so the file's authors are only kept
+		// with the posts as a note. A --config file may name the author for all too.
+		$pick              = isset( $assoc['author'] ) ? (string) $assoc['author'] : ( isset( $given['author'] ) && is_scalar( $given['author'] ) ? (string) $given['author'] : '' );
+		$options['author'] = '' !== $pick ? $this->author_id( $job, $pick ) : 0;
+		$authors           = array();
+		foreach ( isset( $given['authors'] ) && is_array( $given['authors'] ) ? $given['authors'] : array() as $index => $one ) {
+			if ( ! is_int( $index ) || $index < 0 ) {
+				$this->abandon( $job, sprintf( 'Authors: "%s" is not a record position (0 for the first record).', $index ) );
 			}
-			$options['default_author'] = $user->ID;
+			$authors[ $index ] = $this->author_id( $job, is_scalar( $one ) ? (string) $one : '' );
 		}
-		if ( empty( $options['default_author'] ) ) {
-			$admins                    = get_users(
-				array(
-					'role'   => 'administrator',
-					'number' => 1,
-					'fields' => 'ID',
-				)
-			);
-			$options['default_author'] = $admins ? (int) $admins[0] : 0;
-		}
+		// Positions past the file's records are dropped.
+		$options['authors'] = MigratePlus_Mappings::clean_authors( $authors, $job->data['total'] );
 		// The flags are already in $options, from $given.
 		foreach ( $this->switches as $key ) {
 			$options[ $key ] = empty( $options[ $key ] ) ? 0 : 1;
@@ -403,7 +400,7 @@ class MigratePlus_CLI {
 	 * ## OPTIONS
 	 *
 	 * [<post_type>]
-	 * : Content type to export, or several separated by commas (e.g. attachment,page,post). "users", "orders" and "site-settings" are content types too: a file can hold them alone or with posts. Users are always written first and media next, so content lands with its authors and the import downloads each file once. Default: post.
+	 * : Content type to export, or several separated by commas (e.g. attachment,page,post). "orders" and "site-settings" are content types too: a file can hold them alone or with posts. Media is always written first, so the import downloads each file once. Default: post.
 	 *
 	 * [--status=<statuses>]
 	 * : Comma separated statuses, or "any". Default: the export defaults in Settings (Published).
@@ -444,9 +441,6 @@ class MigratePlus_CLI {
 	 * [--[no-]yoast]
 	 * : Include Yoast SEO fields of posts and terms, when Yoast SEO is active. Defaults to the export defaults in Settings (on).
 	 *
-	 * [--[no-]users]
-	 * : Include every user with their profile, roles, custom fields and (from the shell, or as a user who may edit users) password hash. Defaults to the export defaults in Settings (off).
-	 *
 	 * [--[no-]acf-definitions]
 	 * : Include the ACF field groups, post types, taxonomies and options pages. Defaults to the export defaults in Settings (on).
 	 *
@@ -473,7 +467,7 @@ class MigratePlus_CLI {
 	 *     wp migrateplus export post --status=publish,draft --output=posts.json
 	 *     wp migrateplus export product --after=2024-01-01
 	 *     wp migrateplus export attachment,page,post --menus
-	 *     wp migrateplus export users,product,orders
+	 *     wp migrateplus export product,orders
 	 *     wp migrateplus export site-settings --output=settings.json
 	 *     wp migrateplus export product --gzip
 	 *
@@ -482,33 +476,45 @@ class MigratePlus_CLI {
 	 */
 	public function export( $args, $assoc ) {
 		$defaults = MigratePlus_Exporter::defaults();
-		// "users", "orders" and "site-settings" in the type list are the sections of their own, not post types.
-		$kinds    = array_filter( array_map( 'trim', explode( ',', isset( $args[0] ) ? (string) $args[0] : 'post' ) ) );
-		$kinds    = str_replace( 'site_settings', 'site-settings', $kinds );
-		$records  = array_intersect( $kinds, array( 'users', 'orders', 'site-settings' ) );
-		$export   = MigratePlus_Exporter::sanitize_args(
+		// "orders" and "site-settings" in the type list are the sections of their own, not post types.
+		$kinds   = array_filter( array_map( 'trim', explode( ',', isset( $args[0] ) ? (string) $args[0] : 'post' ) ) );
+		$kinds   = str_replace( 'site_settings', 'site-settings', $kinds );
+		$records = array_intersect( $kinds, array( 'orders', 'site-settings' ) );
+		// Checked here too, for messages that name the flag.
+		if ( isset( $assoc['status'] ) ) {
+			$bad = array_diff( array_map( 'trim', explode( ',', (string) $assoc['status'] ) ), array_merge( array_keys( MigratePlus_Settings::export_statuses() ), array( 'any' ) ) );
+			if ( $bad ) {
+				WP_CLI::error( sprintf( '--status takes %s or any, separated by commas. Unknown: %s.', implode( ', ', array_keys( MigratePlus_Settings::export_statuses() ) ), implode( ', ', $bad ) ) );
+			}
+		}
+		foreach ( array( 'after', 'before' ) as $flag ) {
+			$date = isset( $assoc[ $flag ] ) ? DateTime::createFromFormat( '!Y-m-d', (string) $assoc[ $flag ] ) : null;
+			if ( isset( $assoc[ $flag ] ) && ( ! $date || $date->format( 'Y-m-d' ) !== $assoc[ $flag ] ) ) {
+				WP_CLI::error( sprintf( '--%s must be a date as YYYY-MM-DD.', $flag ) );
+			}
+		}
+		$export = MigratePlus_Exporter::sanitize_args(
 			array(
-				'post_type'        => implode( ',', array_diff( $kinds, $records ) ),
-				'statuses'         => isset( $assoc['status'] ) ? $assoc['status'] : $defaults['statuses'],
-				'after'            => isset( $assoc['after'] ) ? $assoc['after'] : '',
-				'before'           => isset( $assoc['before'] ) ? $assoc['before'] : '',
-				'include_acf'      => WP_CLI\Utils\get_flag_value( $assoc, 'acf', ! empty( $defaults['include_acf'] ) ),
-				'include_meta'     => WP_CLI\Utils\get_flag_value( $assoc, 'meta', ! empty( $defaults['include_meta'] ) ),
-				'include_terms'    => WP_CLI\Utils\get_flag_value( $assoc, 'terms', ! empty( $defaults['include_terms'] ) ),
-				'include_term_data' => WP_CLI\Utils\get_flag_value( $assoc, 'term-data', ! empty( $defaults['include_term_data'] ) ),
-				'include_image'    => WP_CLI\Utils\get_flag_value( $assoc, 'featured-images', ! empty( $defaults['include_image'] ) ),
-				'include_woo'      => WP_CLI\Utils\get_flag_value( $assoc, 'woo', ! empty( $defaults['include_woo'] ) ),
-				'include_comments' => WP_CLI\Utils\get_flag_value( $assoc, 'comments', ! empty( $defaults['include_comments'] ) ),
-				'include_menus'    => WP_CLI\Utils\get_flag_value( $assoc, 'menus', ! empty( $defaults['include_menus'] ) ),
-				'include_yoast'    => WP_CLI\Utils\get_flag_value( $assoc, 'yoast', ! empty( $defaults['include_yoast'] ) ),
-				'include_users'    => in_array( 'users', $records, true ) || WP_CLI\Utils\get_flag_value( $assoc, 'users', ! empty( $defaults['include_users'] ) ),
+				'post_type'               => implode( ',', array_diff( $kinds, $records ) ),
+				'statuses'                => isset( $assoc['status'] ) ? $assoc['status'] : $defaults['statuses'],
+				'after'                   => isset( $assoc['after'] ) ? $assoc['after'] : '',
+				'before'                  => isset( $assoc['before'] ) ? $assoc['before'] : '',
+				'include_acf'             => WP_CLI\Utils\get_flag_value( $assoc, 'acf', ! empty( $defaults['include_acf'] ) ),
+				'include_meta'            => WP_CLI\Utils\get_flag_value( $assoc, 'meta', ! empty( $defaults['include_meta'] ) ),
+				'include_terms'           => WP_CLI\Utils\get_flag_value( $assoc, 'terms', ! empty( $defaults['include_terms'] ) ),
+				'include_term_data'       => WP_CLI\Utils\get_flag_value( $assoc, 'term-data', ! empty( $defaults['include_term_data'] ) ),
+				'include_image'           => WP_CLI\Utils\get_flag_value( $assoc, 'featured-images', ! empty( $defaults['include_image'] ) ),
+				'include_woo'             => WP_CLI\Utils\get_flag_value( $assoc, 'woo', ! empty( $defaults['include_woo'] ) ),
+				'include_comments'        => WP_CLI\Utils\get_flag_value( $assoc, 'comments', ! empty( $defaults['include_comments'] ) ),
+				'include_menus'           => WP_CLI\Utils\get_flag_value( $assoc, 'menus', ! empty( $defaults['include_menus'] ) ),
+				'include_yoast'           => WP_CLI\Utils\get_flag_value( $assoc, 'yoast', ! empty( $defaults['include_yoast'] ) ),
 				'include_acf_definitions' => WP_CLI\Utils\get_flag_value( $assoc, 'acf-definitions', ! empty( $defaults['include_acf_definitions'] ) ),
-				'include_acf_options' => WP_CLI\Utils\get_flag_value( $assoc, 'acf-options', ! empty( $defaults['include_acf_options'] ) ),
-				'include_site_settings' => in_array( 'site-settings', $records, true ) || WP_CLI\Utils\get_flag_value( $assoc, 'site-settings', ! empty( $defaults['include_site_settings'] ) ),
-				'site_sections'    => isset( $assoc['site-sections'] ) ? $assoc['site-sections'] : $defaults['site_sections'],
-				'include_orders'   => in_array( 'orders', $records, true ) || WP_CLI\Utils\get_flag_value( $assoc, 'orders', ! empty( $defaults['include_orders'] ) ),
-				'exclude_meta'     => isset( $assoc['exclude-meta'] ) ? $assoc['exclude-meta'] : $defaults['exclude_meta'],
-				'gzip'             => WP_CLI\Utils\get_flag_value( $assoc, 'gzip', ! empty( $defaults['gzip'] ) ),
+				'include_acf_options'     => WP_CLI\Utils\get_flag_value( $assoc, 'acf-options', ! empty( $defaults['include_acf_options'] ) ),
+				'include_site_settings'   => in_array( 'site-settings', $records, true ) || WP_CLI\Utils\get_flag_value( $assoc, 'site-settings', ! empty( $defaults['include_site_settings'] ) ),
+				'site_sections'           => isset( $assoc['site-sections'] ) ? $assoc['site-sections'] : $defaults['site_sections'],
+				'include_orders'          => in_array( 'orders', $records, true ) || WP_CLI\Utils\get_flag_value( $assoc, 'orders', ! empty( $defaults['include_orders'] ) ),
+				'exclude_meta'            => isset( $assoc['exclude-meta'] ) ? $assoc['exclude-meta'] : $defaults['exclude_meta'],
+				'gzip'                    => WP_CLI\Utils\get_flag_value( $assoc, 'gzip', ! empty( $defaults['gzip'] ) ),
 			)
 		);
 		if ( is_wp_error( $export ) ) {
@@ -539,6 +545,10 @@ class MigratePlus_CLI {
 			}
 		}
 		$progress->finish();
+		if ( ! empty( $state['error'] ) ) {
+			MigratePlus_Exporter::delete( $state );
+			WP_CLI::error( $state['error'] );
+		}
 
 		$output = isset( $assoc['output'] ) ? $assoc['output'] : $state['filename'];
 		if ( ! copy( $state['file'], $output ) ) {
@@ -636,7 +646,11 @@ class MigratePlus_CLI {
 			return;
 		}
 		if ( 'delete' === $action ) {
-			if ( ! MigratePlus_Mappings::delete( $target ) ) {
+			$deleted = MigratePlus_Mappings::delete( $target );
+			if ( is_wp_error( $deleted ) ) {
+				WP_CLI::error( $deleted->get_error_message() );
+			}
+			if ( ! $deleted ) {
 				WP_CLI::error( sprintf( 'No saved mapping called "%s".', $target ) );
 			}
 			WP_CLI::success( sprintf( 'Deleted mapping "%s".', $target ) );
@@ -665,12 +679,20 @@ class MigratePlus_CLI {
 			WP_CLI::error( 'Job not found.' );
 		}
 		$count = $job->imported_count();
-		// rollback_batch() would mark the job rolled back without deleting anything.
-		if ( ! empty( $job->data['options']['dry_run'] ) || ! $count ) {
-			WP_CLI::warning( sprintf( 'Nothing to roll back: job %s %s.', $job->data['id'], empty( $job->data['options']['dry_run'] ) ? 'created nothing that is still on this site' : 'was a dry run' ) );
+		// Settings and values it replaced, and redirects it added, are undone too: a job that only
+		// imported site settings created nothing, and still has something to roll back.
+		$undo = ! empty( $job->data['side_prev'] ) || MigratePlus_Redirects::count_for_job( $job->data['id'] );
+		if ( ! empty( $job->data['options']['dry_run'] ) || 'rolled_back' === $job->data['status'] || ( ! $count && ! $undo ) ) {
+			$why = 'created nothing that is still on this site';
+			if ( ! empty( $job->data['options']['dry_run'] ) ) {
+				$why = 'was a dry run';
+			} elseif ( 'rolled_back' === $job->data['status'] ) {
+				$why = 'was rolled back already';
+			}
+			WP_CLI::warning( sprintf( 'Nothing to roll back: job %s %s.', $job->data['id'], $why ) );
 			return;
 		}
-		WP_CLI::confirm( sprintf( 'Permanently delete %d items created by job %s?', $count, $job->data['id'] ), $assoc );
+		WP_CLI::confirm( $count ? sprintf( 'Permanently delete %d items created by job %s, and put back what it changed?', $count, $job->data['id'] ) : sprintf( 'Put back the settings job %s changed?', $job->data['id'] ), $assoc );
 		$deleted = 0;
 		do {
 			$result   = MigratePlus_Runner::rollback_batch( $job, 100 );
@@ -679,11 +701,13 @@ class MigratePlus_CLI {
 				WP_CLI::error( sprintf( '%s (%d items deleted before it stopped.)', $result['error'], $deleted ) );
 			}
 		} while ( ! $result['done'] );
-		WP_CLI::success( sprintf( 'Deleted %d items.', $deleted ) );
+		WP_CLI::success( $count ? sprintf( 'Deleted %d items.', $deleted ) : sprintf( 'Rolled back job %s: what it changed was put back.', $job->data['id'] ) );
 	}
 
 	/**
 	 * List import jobs.
+	 *
+	 * ## OPTIONS
 	 *
 	 * [--format=<format>]
 	 * : table, json, csv. Default: table.
@@ -733,7 +757,7 @@ class MigratePlus_CLI {
 				} elseif ( ! $progress || ! empty( $r['section'] ) ) {
 					WP_CLI::log( $r['message'] );
 				}
-				// Side sections (terms, users, menus...) come apart from the records the bar counts.
+				// Side sections (terms, menus...) come apart from the records the bar counts.
 				if ( $progress && empty( $r['section'] ) ) {
 					$progress->tick();
 				}
@@ -753,6 +777,26 @@ class MigratePlus_CLI {
 			WP_CLI::error( $summary );
 		}
 		WP_CLI::success( $summary );
+	}
+
+	/**
+	 * The user an --author (or a --config file's author) names, or stop: the admin's test,
+	 * someone its picker would list.
+	 *
+	 * @param MigratePlus_Job $job  Job, deleted when stopping.
+	 * @param string          $pick Id, login or email.
+	 * @return int User id.
+	 */
+	protected function author_id( MigratePlus_Job $job, $pick ) {
+		$user = is_numeric( $pick ) ? get_userdata( (int) $pick ) : get_user_by( 'login', $pick );
+		$user = $user ? $user : get_user_by( 'email', $pick );
+		if ( ! $user ) {
+			$this->abandon( $job, sprintf( 'Author "%s" not found.', $pick ) );
+		}
+		if ( ! user_can( $user, 'edit_posts' ) ) {
+			$this->abandon( $job, sprintf( 'Author "%s" may not write posts.', $pick ) );
+		}
+		return (int) $user->ID;
 	}
 
 	/**

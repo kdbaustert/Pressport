@@ -16,6 +16,7 @@ class Test_Redirects extends WP_UnitTestCase {
 	public function set_up() {
 		parent::set_up();
 		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		MigratePlus_Redirects::flush(); // What imports in earlier tests left unwritten.
 		delete_option( MigratePlus_Redirects::OPTION );
 		add_filter( 'wp_redirect', array( $this, 'catch_redirect' ), 10, 2 );
 	}
@@ -143,5 +144,65 @@ class Test_Redirects extends WP_UnitTestCase {
 		wp_delete_file( $file );
 		$this->assertSame( array(), MigratePlus_Redirects::all() );
 		$job->delete();
+	}
+	public function test_redirects_fire_when_wordpress_lives_in_a_subdirectory() {
+		update_option( 'home', 'http://example.org/blog' );
+		$this->set_permalink_structure( '/%postname%/' );
+		$post = self::factory()->post->create( array( 'post_name' => 'hello-2' ) );
+		update_option( MigratePlus_Redirects::OPTION, array( '2024/hello' => array( $post, 'abc' ) ) );
+
+		$this->go_to( home_url( '/2024/hello/' ) );
+		$this->assertTrue( is_404() );
+		MigratePlus_Redirects::maybe_redirect();
+		$this->assertSame( '301 http://example.org/blog/hello-2/', $this->redirected );
+	}
+
+	public function test_an_old_query_string_address_redirects() {
+		$this->set_permalink_structure( '/%postname%/' );
+		$file = $this->json_file( $this->doc( 'moved', 'http://old.test/blog/?p=987654' ) );
+		$job  = $this->import_file( $file );
+		wp_delete_file( $file );
+		$post = get_posts(
+			array(
+				'title'      => 'Moved',
+				'meta_key'   => '_migrateplus_job_id', // phpcs:ignore WordPress.DB.SlowDBQuery
+				'meta_value' => $job->data['id'], // phpcs:ignore WordPress.DB.SlowDBQuery
+			)
+		)[0];
+		$this->assertSame( array( '?p=987654' => array( $post->ID, $job->data['id'] ) ), MigratePlus_Redirects::all() );
+
+		$this->go_to( home_url( '/?p=987654' ) );
+		$this->assertTrue( is_404() );
+		MigratePlus_Redirects::maybe_redirect();
+		$this->assertSame( '301 ' . get_permalink( $post ), $this->redirected );
+		$job->delete();
+	}
+
+	public function test_redirects_are_written_once_at_the_end_of_the_request() {
+		$job  = MigratePlus_Job::create( 'json', array( 'migrateplus_site' => 'http://old.test' ) );
+		$post = self::factory()->post->create( array( 'post_name' => 'new-name' ) );
+		MigratePlus_Redirects::record( $post, 'http://old.test/old-name/', $job );
+		$this->assertFalse( get_option( MigratePlus_Redirects::OPTION ) );
+		$this->assertSame( array( 'old-name' => array( $post, $job->data['id'] ) ), MigratePlus_Redirects::all() );
+
+		MigratePlus_Redirects::flush();
+		$this->assertSame( array( 'old-name' => array( $post, $job->data['id'] ) ), get_option( MigratePlus_Redirects::OPTION ) );
+		$job->delete();
+	}
+
+	public function test_rolling_back_a_later_import_of_the_same_path_keeps_the_earlier_redirect() {
+		$first  = MigratePlus_Job::create( 'json', array( 'migrateplus_site' => 'http://old.test' ) );
+		$second = MigratePlus_Job::create( 'json', array( 'migrateplus_site' => 'http://old.test' ) );
+		$one    = self::factory()->post->create( array( 'post_name' => 'one' ) );
+		$two    = self::factory()->post->create( array( 'post_name' => 'two' ) );
+		MigratePlus_Redirects::record( $one, 'http://old.test/shared/', $first );
+		MigratePlus_Redirects::record( $two, 'http://old.test/shared/', $second );
+		$this->assertSame( 1, MigratePlus_Redirects::count_for_job( $second->data['id'] ) );
+		$this->assertSame( 0, MigratePlus_Redirects::count_for_job( $first->data['id'] ) );
+
+		$this->assertSame( 1, MigratePlus_Redirects::forget_job( $second->data['id'] ) );
+		$this->assertSame( array( 'shared' => array( $one, $first->data['id'] ) ), MigratePlus_Redirects::all() );
+		$first->delete();
+		$second->delete();
 	}
 }

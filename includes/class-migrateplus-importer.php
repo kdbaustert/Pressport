@@ -19,8 +19,13 @@ class MigratePlus_Importer {
 
 	// Comment meta: the comment's id on the old site, scoped to the source like _migrateplus_source_uid.
 	const COMMENT_SOURCE_META = '_migrateplus_source_comment_uid';
-
-	protected static $authors = array();
+	// Post meta on a post import() created and has not finished: its terms, fields and images
+	// come after it is saved, so a request that dies in between leaves it half done.
+	const INCOMPLETE_META = '_migrateplus_incomplete';
+	// Post meta: the author on the old site, kept as a note. User ids and accounts differ from site
+	// to site, so imported posts get the author picked here instead (see author_for()).
+	const SOURCE_AUTHOR_META      = '_migrateplus_source_author';
+	const SOURCE_AUTHOR_NAME_META = '_migrateplus_source_author_name';
 
 	/**
 	 * Mappable WordPress fields.
@@ -37,9 +42,9 @@ class MigratePlus_Importer {
 			'post_date'          => array( __( 'Publish date', 'migrateplus' ), __( 'Any format strtotime() understands, or a Unix timestamp.', 'migrateplus' ) ),
 			'post_name'          => array( __( 'Slug', 'migrateplus' ), __( 'Paths like /blog/my-post use the last segment.', 'migrateplus' ) ),
 			'post_status'        => array( __( 'Status', 'migrateplus' ), __( 'publish/draft/pending/private, or true/false, 1/0.', 'migrateplus' ) ),
-			'post_author'        => array( __( 'Author', 'migrateplus' ), __( 'Matched by email, login, slug, then display name.', 'migrateplus' ) ),
-			'post_author_login'  => array( __( 'Author login', 'migrateplus' ), __( 'Tried when no user has the author\'s email: the same person often has a different email on each site.', 'migrateplus' ) ),
-			'post_author_name'   => array( __( 'Author display name', 'migrateplus' ), __( 'Tried after email and login, and used as the name of an author Migrate Plus creates.', 'migrateplus' ) ),
+			'post_author'        => array( __( 'Author', 'migrateplus' ), __( 'The author on the old site, kept with the post as a note. Every post gets the author you pick.', 'migrateplus' ) ),
+			'post_author_login'  => array( __( 'Author login', 'migrateplus' ), __( 'The author\'s login on the old site, kept with the post as a note.', 'migrateplus' ) ),
+			'post_author_name'   => array( __( 'Author display name', 'migrateplus' ), __( 'The author\'s name on the old site, kept with the post as a note.', 'migrateplus' ) ),
 			'menu_order'         => array( __( 'Menu order', 'migrateplus' ), '' ),
 			'comment_status'     => array( __( 'Comment status', 'migrateplus' ), __( 'open or closed', 'migrateplus' ) ),
 			'comments'           => array( __( 'Comments', 'migrateplus' ), __( 'The list of comments in a Migrate Plus export. Added to the post when "Import comments" is on.', 'migrateplus' ) ),
@@ -79,9 +84,11 @@ class MigratePlus_Importer {
 	 *
 	 * @param array           $record Flat record.
 	 * @param MigratePlus_Job $job    Job.
+	 * @param int|null        $index  The record's position in the file (0 for the first), for the
+	 *                                author picked for it; null when unknown.
 	 * @return array { action: created|updated|skipped|failed, post_id: int, message: string }
 	 */
-	public static function import( array $record, MigratePlus_Job $job ) {
+	public static function import( array $record, MigratePlus_Job $job, $index = null ) {
 		$record = apply_filters( 'migrateplus_record', $record, $job );
 		if ( false === $record ) {
 			return self::result( 'skipped', 0, __( 'Skipped by migrateplus_record filter.', 'migrateplus' ) );
@@ -109,32 +116,47 @@ class MigratePlus_Importer {
 		$source_id = MigratePlus_Util::stringify( self::value( $record, $mapping, 'source_id' ) );
 		$uid       = self::uid( $job, $source_id );
 		$existing  = $uid ? self::find_by_uid( $uid, $type ) : 0;
+		// Left half done by a request that died: finished now, whatever the duplicate mode, rather
+		// than skipped as imported before (the batch resumes from the record it was on).
+		$resume = $existing && get_post_meta( $existing, self::INCOMPLETE_META, true );
+		if ( $resume ) {
+			$opts['duplicate'] = 'update';
+		}
 
 		// Posts whose changes the user reviewed and approved are updated, whatever the duplicate mode.
 		$replace  = array_map( 'intval', isset( $opts['replace_ids'] ) ? (array) $opts['replace_ids'] : array() );
 		$approved = array_merge( array_map( 'intval', isset( $opts['update_ids'] ) ? (array) $opts['update_ids'] : array() ), $replace );
 		// "Keep both": a new item beside the one already here.
-		$copy      = array_map( 'intval', isset( $opts['copy_ids'] ) ? (array) $opts['copy_ids'] : array() );
+		$copy = array_map( 'intval', isset( $opts['copy_ids'] ) ? (array) $opts['copy_ids'] : array() );
+		// Duplicates the user chose to skip one by one, and what becomes of those not named in any of
+		// the lists ('' for the duplicate option and skip_existing to decide, as before these existed).
+		$skips     = array_map( 'intval', isset( $opts['skip_ids'] ) ? (array) $opts['skip_ids'] : array() );
+		$rest      = isset( $opts['duplicate_rest'] ) ? (string) $opts['duplicate_rest'] : '';
 		$force_new = false;
-		if ( $existing && in_array( $existing, $copy, true ) ) {
+		if ( $existing && ! $resume && in_array( $existing, $copy, true ) ) {
 			$existing  = 0;
 			$force_new = true;
 		}
-		if ( $existing && in_array( $existing, $approved, true ) ) {
+		if ( $existing && ! $resume && in_array( $existing, $skips, true ) ) {
+			$opts['duplicate'] = 'skip';
+		} elseif ( $existing && in_array( $existing, $approved, true ) ) {
 			$opts['duplicate'] = 'update';
+		} elseif ( $existing && ! $resume && '' !== $rest ) {
+			$opts['duplicate'] = 'copy' === $rest ? 'create' : $rest;
 		}
 		if ( $existing && 'skip' === $opts['duplicate'] ) {
 			/* translators: 1: title, 2: post id */
 			return self::result( 'skipped', $existing, sprintf( __( 'Already imported: "%1$s" (#%2$d).', 'migrateplus' ), $label, $existing ) );
 		}
-		if ( ! $existing && ! $force_new && ( ! empty( $opts['skip_existing'] ) || $approved ) ) {
+		if ( ! $existing && ! $force_new && ( ! empty( $opts['skip_existing'] ) || $approved || $skips || '' !== $rest ) ) {
 			$match = self::match_existing( $record, $mapping, $type );
-			if ( $match && in_array( $match['post_id'], $copy, true ) ) {
+			$skip  = '' === $rest ? ! empty( $opts['skip_existing'] ) : 'skip' === $rest;
+			if ( $match && ( in_array( $match['post_id'], $copy, true ) || ( 'copy' === $rest && ! in_array( $match['post_id'], array_merge( $approved, $skips ), true ) ) ) ) {
 				$force_new = true;
-			} elseif ( $match && in_array( $match['post_id'], $approved, true ) ) {
+			} elseif ( $match && ( in_array( $match['post_id'], $approved, true ) || ( 'update' === $rest && ! in_array( $match['post_id'], $skips, true ) ) ) ) {
 				$existing          = $match['post_id'];
 				$opts['duplicate'] = 'update';
-			} elseif ( $match && ! empty( $opts['skip_existing'] ) ) {
+			} elseif ( $match && ( $skip || in_array( $match['post_id'], $skips, true ) ) ) {
 				/* translators: 1: title, 2: post id, 3: what matched (slug, SKU, file name) */
 				return self::result( 'skipped', $match['post_id'], sprintf( __( 'Already on this site: "%1$s" (#%2$d) has the same %3$s.', 'migrateplus' ), $label, $match['post_id'], $match['label'] ) );
 			}
@@ -148,16 +170,11 @@ class MigratePlus_Importer {
 		}
 		$updating = $existing && 'update' === $opts['duplicate'];
 
-		// A dry run must not create the authors it would assign.
-		$postarr = self::post_fields( $record, $job, $type, ! $dry && ! empty( $opts['create_authors'] ) );
-		$author  = isset( $postarr['post_author'] ) ? '' : self::author_label( $record, $mapping );
+		$postarr = self::post_fields( $record, $job, $type, $index );
 		if ( $updating ) {
 			$postarr['ID'] = $existing;
 		} else {
-			$postarr += array(
-				'post_status' => $opts['default_status'],
-				'post_author' => (int) $opts['default_author'],
-			);
+			$postarr += array( 'post_status' => $opts['default_status'] );
 			// A new post gets an empty title or content when the record has none. Media get theirs in
 			// save_media(), which only finds out there whether the file is already in the Media Library.
 			if ( 'attachment' !== $type ) {
@@ -230,6 +247,8 @@ class MigratePlus_Importer {
 
 		if ( ! $updating ) {
 			update_post_meta( $post_id, '_migrateplus_job_id', $job->data['id'] );
+			// Before the uid, so a post that can be found as imported before is never unmarked half done.
+			update_post_meta( $post_id, self::INCOMPLETE_META, 1 );
 		}
 		if ( $uid ) {
 			update_post_meta( $post_id, '_migrateplus_source_uid', $uid );
@@ -274,16 +293,7 @@ class MigratePlus_Importer {
 			set_post_format( $post_id, $format );
 		}
 
-		if ( '' !== $author ) {
-			$warnings[] = sprintf(
-				$updating
-					/* translators: %s: author email, login or name */
-					? __( 'Author "%s" was not found on this site, so the post keeps its author.', 'migrateplus' )
-					/* translators: %s: author email, login or name */
-					: __( 'Author "%s" was not found on this site, so the default author was used.', 'migrateplus' ),
-				$author
-			);
-		}
+		self::keep_source_author( $post_id, $record, $mapping );
 
 		// Taxonomies, before the custom fields: ACF groups can be shown by category or term.
 		$tax_rows = array();
@@ -417,11 +427,15 @@ class MigratePlus_Importer {
 			MigratePlus_Redirects::record( $post_id, $source_url, $job );
 		}
 
-		$action = $updating ? 'updated' : 'created';
+		if ( ! $updating || $resume ) {
+			delete_post_meta( $post_id, self::INCOMPLETE_META );
+		}
+		// A post this job began creating counts as created when the run that finishes it is this job's.
+		$action = $updating && ! ( $resume && get_post_meta( $post_id, '_migrateplus_job_id', true ) === $job->data['id'] ) ? 'updated' : 'created';
 		do_action( 'migrateplus_after_import_record', $post_id, $record, $job, $action );
 
 		/* translators: 1: Created/Updated, 2: title, 3: post id */
-		$message = sprintf( __( '%1$s "%2$s" (#%3$d).', 'migrateplus' ), $updating ? __( 'Updated', 'migrateplus' ) : __( 'Created', 'migrateplus' ), $label, $post_id );
+		$message = sprintf( __( '%1$s "%2$s" (#%3$d).', 'migrateplus' ), 'updated' === $action ? __( 'Updated', 'migrateplus' ) : __( 'Created', 'migrateplus' ), $label, $post_id );
 		if ( $added ) {
 			/* translators: %d: number of comments */
 			$message .= ' ' . sprintf( _n( 'Added %d comment.', 'Added %d comments.', $added, 'migrateplus' ), $added );
@@ -435,20 +449,26 @@ class MigratePlus_Importer {
 	}
 
 	/**
-	 * The author a record names, for a warning when none of it matched a user.
+	 * Keep who wrote a post on the old site with it, so nothing is lost now that the
+	 * post gets the author the person importing picked: the login (Migrate Plus exports
+	 * carry it under author_login, and in "author" since they stopped carrying emails),
+	 * and the display name. An email in an older file is left out.
 	 *
+	 * @param int   $post_id Post.
 	 * @param array $record  Flat record.
 	 * @param array $mapping Mapping.
-	 * @return string '' when the record names no author.
 	 */
-	protected static function author_label( array $record, array $mapping ) {
-		foreach ( array( 'post_author_name', 'post_author', 'post_author_login' ) as $target ) {
-			$value = trim( MigratePlus_Util::stringify( self::value( $record, $mapping, $target ) ) );
-			if ( '' !== $value ) {
-				return $value;
-			}
+	protected static function keep_source_author( $post_id, array $record, array $mapping ) {
+		$login = trim( MigratePlus_Util::stringify( self::value( $record, $mapping, 'post_author_login' ) ) );
+		$other = trim( MigratePlus_Util::stringify( self::value( $record, $mapping, 'post_author' ) ) );
+		$login = '' !== $login || is_email( $other ) ? $login : $other;
+		$name  = trim( MigratePlus_Util::stringify( self::value( $record, $mapping, 'post_author_name' ) ) );
+		if ( '' !== $login ) {
+			update_post_meta( $post_id, self::SOURCE_AUTHOR_META, wp_slash( sanitize_user( $login ) ) );
 		}
-		return '';
+		if ( '' !== $name ) {
+			update_post_meta( $post_id, self::SOURCE_AUTHOR_NAME_META, wp_slash( sanitize_text_field( $name ) ) );
+		}
 	}
 
 	/**
@@ -755,21 +775,25 @@ class MigratePlus_Importer {
 	 *
 	 * @param array           $record Flat record.
 	 * @param MigratePlus_Job $job    Job (mapping and options as they will run).
+	 * @param int|null        $index  The record's position in the file, as for import().
 	 * @return array|null { kind: before|existing, post_id: int, label: string }
 	 */
-	public static function find_duplicate( array $record, MigratePlus_Job $job ) {
+	public static function find_duplicate( array $record, MigratePlus_Job $job, $index = null ) {
 		$mapping   = $job->data['mapping'];
 		$opts      = array_merge( MigratePlus_Job::default_options(), (array) $job->data['options'] );
 		$type      = self::type_for( $record, $job );
 		$source_id = MigratePlus_Util::stringify( self::value( $record, $mapping, 'source_id' ) );
 		$existing  = '' !== $source_id ? self::find_by_uid( self::uid( $job, $source_id ), $type ) : 0;
+		if ( $existing && get_post_meta( $existing, self::INCOMPLETE_META, true ) ) {
+			return null; // Left half done by a run that stopped: the import finishes it whatever the user picks.
+		}
 		if ( $existing ) {
 			// Updating records imported before is what the import was asked to do, so those are not duplicates.
 			return 'update' === $opts['duplicate'] ? null : array(
 				'kind'    => 'before',
 				'post_id' => $existing,
 				'label'   => '',
-				'changes' => self::changes_for( $record, $job, $existing, $type ),
+				'changes' => self::changes_for( $record, $job, $existing, $type, $index ),
 				'image'   => 'attachment' === $type ? self::media_review( $record, $mapping, $existing, self::base_url( $job ) ) : null,
 			);
 		}
@@ -778,7 +802,7 @@ class MigratePlus_Importer {
 			$match,
 			array(
 				'kind'    => 'existing',
-				'changes' => self::changes_for( $record, $job, $match['post_id'], $type ),
+				'changes' => self::changes_for( $record, $job, $match['post_id'], $type, $index ),
 				'image'   => 'attachment' === $type ? self::media_review( $record, $mapping, $match['post_id'], self::base_url( $job ) ) : null,
 			)
 		) : null;
@@ -837,14 +861,15 @@ class MigratePlus_Importer {
 	 * @param MigratePlus_Job $job     Job.
 	 * @param int             $post_id Existing post.
 	 * @param string          $type    Post type the record imports as.
+	 * @param int|null        $index   The record's position in the file, as for import().
 	 * @return array field => { label, old, new }; empty when nothing differs.
 	 */
-	public static function changes_for( array $record, MigratePlus_Job $job, $post_id, $type ) {
+	public static function changes_for( array $record, MigratePlus_Job $job, $post_id, $type, $index = null ) {
 		$post = get_post( $post_id );
 		if ( ! $post || 'attachment' === $type || MigratePlus_Woo::is_product_type( $type ) ) {
 			return array();
 		}
-		$postarr = apply_filters( 'migrateplus_post_data', array( 'ID' => (int) $post_id ) + self::post_fields( $record, $job, $type, false ), $record, $job );
+		$postarr = apply_filters( 'migrateplus_post_data', array( 'ID' => (int) $post_id ) + self::post_fields( $record, $job, $type, $index ), $record, $job );
 		// Each field is set only when the record has it, as an update writes it.
 		$new    = static function ( $key ) use ( $postarr ) {
 			return isset( $postarr[ $key ] ) ? (string) $postarr[ $key ] : null;
@@ -886,13 +911,13 @@ class MigratePlus_Importer {
 	 * The post fields a record sets, worked out the same way for import() and
 	 * changes_for(): everything but the ID, the defaults for a new post and the parent.
 	 *
-	 * @param array           $record         Flat record.
-	 * @param MigratePlus_Job $job            Job.
-	 * @param string          $type           Post type the record imports as.
-	 * @param bool            $create_authors Create an author that is not on this site.
+	 * @param array           $record Flat record.
+	 * @param MigratePlus_Job $job    Job.
+	 * @param string          $type   Post type the record imports as.
+	 * @param int|null        $index  The record's position in the file, as for import().
 	 * @return array wp_insert_post() args.
 	 */
-	protected static function post_fields( array $record, MigratePlus_Job $job, $type, $create_authors ) {
+	protected static function post_fields( array $record, MigratePlus_Job $job, $type, $index = null ) {
 		$mapping = $job->data['mapping'];
 		$opts    = array_merge( MigratePlus_Job::default_options(), (array) $job->data['options'] );
 
@@ -942,13 +967,11 @@ class MigratePlus_Importer {
 			$postarr['post_name'] = $slug;
 		}
 
-		$author = MigratePlus_Util::stringify( self::value( $record, $mapping, 'post_author' ) );
-		$login  = MigratePlus_Util::stringify( self::value( $record, $mapping, 'post_author_login' ) );
-		$name   = MigratePlus_Util::stringify( self::value( $record, $mapping, 'post_author_name' ) );
-		// Exports from before login and name were mapped keep matching on the one value, as they always did.
-		$author_id = '' !== $login || '' !== $name ? self::resolve_exported_author( $author, $login, $name, $create_authors ) : ( '' !== $author ? self::resolve_author( $author, $create_authors ) : 0 );
-		if ( $author_id ) {
-			$postarr['post_author'] = $author_id;
+		// User ids and accounts differ from site to site, so the old site's author is only kept as
+		// a note (keep_source_author()): the post gets the author picked here.
+		$author = self::author_for( $opts, $index );
+		if ( $author ) {
+			$postarr['post_author'] = $author;
 		}
 
 		$order = self::value( $record, $mapping, 'menu_order' );
@@ -964,6 +987,29 @@ class MigratePlus_Importer {
 			$postarr['post_password'] = MigratePlus_Util::stringify( $password );
 		}
 		return $postarr;
+	}
+
+	/**
+	 * The author a record gets: the one picked for it by its position in the file, else the
+	 * one picked for all, else whoever runs the import. Each pick counts only while it is
+	 * someone who may write posts (an account can be removed while a job waits).
+	 *
+	 * @param array    $opts  Job options.
+	 * @param int|null $index The record's position in the file, or null when unknown.
+	 * @return int User id; 0 under WP-CLI without --user, which leaves the author to WordPress.
+	 */
+	public static function author_for( array $opts, $index ) {
+		$authors = isset( $opts['authors'] ) && is_array( $opts['authors'] ) ? $opts['authors'] : array();
+		$picks   = array(
+			null !== $index && isset( $authors[ $index ] ) ? (int) $authors[ $index ] : 0,
+			isset( $opts['author'] ) ? (int) $opts['author'] : 0,
+		);
+		foreach ( $picks as $pick ) {
+			if ( MigratePlus_Mappings::may_write_posts( $pick ) ) {
+				return $pick;
+			}
+		}
+		return get_current_user_id();
 	}
 
 	/**
@@ -1221,128 +1267,37 @@ class MigratePlus_Importer {
 	}
 
 	/**
-	 * Resolve an author string to a user id.
+	 * The term with exactly this name. term_exists() also matches by slug, and "C", "C#" and
+	 * "C++" all have the slug "c": each only takes a term whose name is the same.
 	 *
-	 * @param string $value  Email, login, slug or display name.
-	 * @param bool   $create Create missing users (role: author).
-	 * @return int
+	 * @param string   $name     Name, decoded.
+	 * @param string   $taxonomy Taxonomy.
+	 * @param int|null $parent   Parent, for a hierarchical taxonomy.
+	 * @return array|null { term_id }
 	 */
-	public static function resolve_author( $value, $create = false ) {
-		$value = trim( $value );
-		// A cached miss is only final when nothing would be created.
-		if ( isset( self::$authors[ $value ] ) && ( self::$authors[ $value ] || ! $create ) ) {
-			return self::$authors[ $value ];
+	protected static function find_term( $name, $taxonomy, $parent ) {
+		$same = static function ( $term_name ) use ( $name ) {
+			return html_entity_decode( (string) $term_name, ENT_QUOTES, 'UTF-8' ) === $name;
+		};
+		$hit  = term_exists( $name, $taxonomy, $parent );
+		$id   = is_array( $hit ) ? (int) $hit['term_id'] : (int) $hit;
+		$term = $id ? get_term( $id, $taxonomy ) : null;
+		if ( $term instanceof WP_Term && $same( $term->name ) ) {
+			return array( 'term_id' => $id );
 		}
-		$user = null;
-		if ( is_email( $value ) ) {
-			$user = get_user_by( 'email', $value );
-		}
-		if ( ! $user ) {
-			$user = get_user_by( 'login', $value );
-		}
-		if ( ! $user ) {
-			$user = get_user_by( 'slug', sanitize_title( $value ) );
-		}
-		if ( ! $user ) {
-			$found = get_users(
-				array(
-					'search'         => $value,
-					'search_columns' => array( 'display_name' ),
-					'number'         => 1,
-				)
-			);
-			$user  = $found ? $found[0] : null;
-			if ( ! $user ) {
-				$by_name = get_users(
-					array(
-						'meta_query' => array( // phpcs:ignore WordPress.DB.SlowDBQuery
-							array(
-								'key'   => 'nickname',
-								'value' => $value,
-							),
-						),
-						'number'     => 1,
-					)
-				);
-				$user    = $by_name ? $by_name[0] : null;
+		$terms = get_terms(
+			array(
+				'taxonomy'   => $taxonomy,
+				'name'       => $name,
+				'hide_empty' => false,
+			) + ( null !== $parent ? array( 'parent' => $parent ) : array() )
+		);
+		foreach ( is_array( $terms ) ? $terms : array() as $term ) {
+			if ( $same( $term->name ) ) {
+				return array( 'term_id' => (int) $term->term_id );
 			}
 		}
-		$id = $user ? (int) $user->ID : 0;
-		if ( ! $id && $create && ! is_numeric( $value ) ) {
-			$id = self::create_author( is_email( $value ) ? strstr( $value, '@', true ) : sanitize_title( $value ), is_email( $value ) ? $value : '', is_email( $value ) ? '' : $value );
-		}
-
-		self::$authors[ $value ] = $id;
-		return $id;
-	}
-
-	/**
-	 * Resolve the author of a MigratePlus export, which names them by email, login
-	 * and display name: email first, then login (the same person often has a
-	 * different email on each site), then the display name and the other ways
-	 * resolve_author() looks. A user created for a missing author gets all three.
-	 *
-	 * @param string $email  Email.
-	 * @param string $login  Login.
-	 * @param string $name   Display name.
-	 * @param bool   $create Create missing users (role: author).
-	 * @return int
-	 */
-	public static function resolve_exported_author( $email, $login, $name, $create = false ) {
-		$email = trim( (string) $email );
-		$login = trim( (string) $login );
-		$name  = trim( (string) $name );
-		$cache = "\0" . $email . "\0" . $login . "\0" . $name; // Can't collide with a plain value cached by resolve_author().
-		if ( isset( self::$authors[ $cache ] ) && ( self::$authors[ $cache ] || ! $create ) ) {
-			return self::$authors[ $cache ];
-		}
-		$user = is_email( $email ) ? get_user_by( 'email', $email ) : false;
-		if ( ! $user && '' !== $login ) {
-			$user = get_user_by( 'login', $login );
-		}
-		$id = $user ? (int) $user->ID : 0;
-		if ( ! $id ) {
-			$id = self::resolve_author( '' !== $name ? $name : ( '' !== $email ? $email : $login ), false );
-		}
-		if ( ! $id && $create ) {
-			$id = self::create_author( '' !== $login ? $login : ( is_email( $email ) ? strstr( $email, '@', true ) : sanitize_title( $name ) ), is_email( $email ) ? $email : '', $name );
-		}
-		self::$authors[ $cache ] = $id;
-		return $id;
-	}
-
-	/**
-	 * Create a user for an author that is not on this site, when the current user may.
-	 *
-	 * @param string $login Login to start from (a number is added when it is taken).
-	 * @param string $email Email, or ''.
-	 * @param string $name  Display name, or '' to use the login.
-	 * @return int 0 when not allowed or the user could not be created.
-	 */
-	protected static function create_author( $login, $email, $name ) {
-		// WP-CLI without --user has no user to check, and runs with the shell account's access.
-		$may_create = ( defined( 'WP_CLI' ) && WP_CLI && ! get_current_user_id() ) || current_user_can( 'create_users' );
-		if ( ! $may_create ) {
-			return 0;
-		}
-		$login = sanitize_user( (string) $login, true );
-		$login = $login ? $login : 'author';
-		$base  = $login;
-		$i     = 2;
-		while ( username_exists( $login ) ) {
-			$login = $base . ( $i++ );
-		}
-		$new = wp_insert_user(
-			array(
-				'user_login'   => $login,
-				'user_pass'    => wp_generate_password( 24 ),
-				'user_email'   => $email,
-				'display_name' => '' !== $name ? $name : $login,
-				'nickname'     => '' !== $name ? $name : $login,
-				'role'         => 'author',
-			)
-		);
-		return is_wp_error( $new ) ? 0 : (int) $new;
+		return null;
 	}
 
 	/**
@@ -1364,11 +1319,7 @@ class MigratePlus_Importer {
 			$term   = null;
 			foreach ( array_filter( $path, 'strlen' ) as $part ) {
 				$part = html_entity_decode( $part, ENT_QUOTES, 'UTF-8' );
-				$term = term_exists( $part, $taxonomy, $hierarchical ? $parent : null );
-				if ( ! $term ) {
-					$by_slug = get_term_by( 'slug', sanitize_title( $part ), $taxonomy );
-					$term    = $by_slug && ( ! $hierarchical || (int) $by_slug->parent === (int) $parent ) ? array( 'term_id' => $by_slug->term_id ) : null;
-				}
+				$term = self::find_term( $part, $taxonomy, $hierarchical ? $parent : null );
 				if ( ! $term && $create ) {
 					$term = wp_insert_term( $part, $taxonomy, $hierarchical ? array( 'parent' => $parent ) : array() );
 					if ( is_wp_error( $term ) ) {

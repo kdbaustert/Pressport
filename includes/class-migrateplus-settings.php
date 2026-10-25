@@ -28,54 +28,50 @@ class MigratePlus_Settings {
 	public static function defaults() {
 		return array(
 			// Import defaults.
-			'post_type'                => 'post',
-			'default_status'           => 'publish',
-			'force_status'             => '', // '' = keep each record's status.
-			'default_author'           => 0, // 0 = whoever runs the import.
-			'duplicate'                => 'skip',
-			'batch_size'               => 10,
-			'import_featured_image'    => 1,
-			'import_content_images'    => 0,
-			'create_terms'             => 1,
-			'create_authors'           => 0,
-			'rewrite_links'            => 1,
-			'import_comments'          => 1,
-			'import_menus'             => 1,
-			'import_term_data'         => 1,
-			'import_users'             => 1,
-			'import_acf_definitions'   => 1,
-			'import_acf_options'       => 1,
-			'import_site_settings'     => 1,
-			'import_orders'            => 1,
-			'import_redirects'         => 1,
+			'post_type'                      => 'post',
+			'default_status'                 => 'publish',
+			'force_status'                   => '', // '' = keep each record's status.
+			'duplicate'                      => 'skip',
+			'batch_size'                     => 10,
+			'import_featured_image'          => 1,
+			'import_content_images'          => 0,
+			'create_terms'                   => 1,
+			'rewrite_links'                  => 1,
+			'import_comments'                => 1,
+			'import_menus'                   => 1,
+			'import_term_data'               => 1,
+			'import_acf_definitions'         => 1,
+			'import_acf_options'             => 1,
+			'import_site_settings'           => 1,
+			'import_orders'                  => 1,
+			'import_redirects'               => 1,
 			// Export defaults.
-			'export_statuses'          => array( 'publish' ),
-			'export_include_terms'     => 1,
-			'export_include_term_data' => 1,
-			'export_include_image'     => 1,
-			'export_include_meta'      => 1,
-			'export_include_acf'       => 1,
-			'export_include_woo'       => 1,
-			'export_include_comments'  => 0,
-			'export_include_menus'     => 0,
-			'export_include_users'     => 0,
+			'export_statuses'                => array( 'publish' ),
+			'export_include_terms'           => 1,
+			'export_include_term_data'       => 1,
+			'export_include_image'           => 1,
+			'export_include_meta'            => 1,
+			'export_include_acf'             => 1,
+			'export_include_woo'             => 1,
+			'export_include_comments'        => 0,
+			'export_include_menus'           => 0,
 			'export_include_acf_definitions' => 1,
-			'export_include_acf_options' => 1,
-			'export_include_site_settings' => 0,
-			'export_include_orders'    => 0,
-			'export_include_yoast'     => 1,
-			'export_gzip'              => 0,
-			'export_exclude_meta'      => '',
+			'export_include_acf_options'     => 1,
+			'export_include_site_settings'   => 0,
+			'export_include_orders'          => 0,
+			'export_include_yoast'           => 1,
+			'export_gzip'                    => 0,
+			'export_exclude_meta'            => '',
 			// Access.
-			'capability'               => 'manage_options',
+			'capability'                     => 'manage_options',
 			// Downloads.
-			'request_timeout'          => 30,
-			'allow_local_sources'      => 0,
-			'max_remote_size'          => 100, // MB.
-			'max_media_size'           => 0, // MB, 0 = no limit.
+			'request_timeout'                => 60,
+			'allow_local_sources'            => 0,
+			'max_remote_size'                => 100, // MB.
+			'max_media_size'                 => 100, // MB, 0 = no limit.
 			// Housekeeping.
-			'job_retention_days'       => 0,
-			'remove_meta_on_uninstall' => 0,
+			'job_retention_days'             => 0,
+			'remove_meta_on_uninstall'       => 0,
 		);
 	}
 
@@ -150,21 +146,10 @@ class MigratePlus_Settings {
 			}
 		}
 
-		$authors = array( 0 => __( 'The person running the import', 'migrateplus' ) );
-		foreach ( get_users(
-			array(
-				'capability' => array( 'edit_posts' ),
-				'number'     => 200,
-				'fields'     => array( 'ID', 'display_name' ),
-			)
-		) as $user ) {
-			$authors[ $user->ID ] = $user->display_name;
-		}
-
 		$fields = array(
 			'migrateplus_defaults'     => array(
-				'post_type'             => array( 'select', __( 'Import as', 'migrateplus' ), $post_types ),
-				'default_status'        => array(
+				'post_type'              => array( 'select', __( 'Import as', 'migrateplus' ), $post_types ),
+				'default_status'         => array(
 					'select',
 					__( 'Default status', 'migrateplus' ),
 					array(
@@ -175,7 +160,7 @@ class MigratePlus_Settings {
 					),
 					__( 'Used when a record has no status, or one Migrate Plus does not recognise.', 'migrateplus' ),
 				),
-				'force_status'          => array(
+				'force_status'           => array(
 					'select',
 					__( 'Status for every item', 'migrateplus' ),
 					array(
@@ -187,8 +172,7 @@ class MigratePlus_Settings {
 					),
 					__( 'Overrides the status in the file, also for posts an import updates. Draft is useful for reviewing an import on staging. Published posts with a future date are scheduled for that date.', 'migrateplus' ),
 				),
-				'default_author'        => array( 'select', __( 'Default author', 'migrateplus' ), $authors ),
-				'duplicate'             => array(
+				'duplicate'              => array(
 					'select',
 					__( 'Records imported before', 'migrateplus' ),
 					array(
@@ -198,46 +182,43 @@ class MigratePlus_Settings {
 					),
 					__( 'Matched by the Source ID field.', 'migrateplus' ),
 				),
-				'batch_size'            => array( 'number', __( 'Batch size', 'migrateplus' ), array( 1, 100 ), __( 'Records per request. Lower this if imports with lots of images time out.', 'migrateplus' ) ),
-				'import_featured_image' => array( 'checkbox', __( 'Featured images', 'migrateplus' ), __( 'Download featured images into the Media Library', 'migrateplus' ) ),
-				'import_content_images' => array( 'checkbox', __( 'Images in content', 'migrateplus' ), __( 'Download images found inside post content and rewrite their URLs', 'migrateplus' ) ),
-				'create_terms'          => array( 'checkbox', __( 'Terms', 'migrateplus' ), __( 'Create categories, tags and terms that don\'t exist yet', 'migrateplus' ) ),
-				'create_authors'        => array( 'checkbox', __( 'Authors', 'migrateplus' ), __( 'Create users for authors that don\'t exist yet (Author role, random password)', 'migrateplus' ) ),
-				'rewrite_links'         => array( 'checkbox', __( 'Links', 'migrateplus' ), __( 'Point links to the old site at this one', 'migrateplus' ), __( 'Migrate Plus exports only. Changes links in post content; images and files in wp-content still point at the old site unless "Images in content" copies them.', 'migrateplus' ) ),
-				'import_comments'       => array( 'checkbox', __( 'Comments', 'migrateplus' ), __( 'Add the comments a Migrate Plus export carries to the imported posts', 'migrateplus' ), __( 'Importing the same file again updates the comments it added before instead of adding them twice.', 'migrateplus' ) ),
-				'import_menus'          => array( 'checkbox', __( 'Menus', 'migrateplus' ), __( 'Import the navigation menus a Migrate Plus export carries', 'migrateplus' ), __( 'After all posts. A menu with the same slug is filled rather than copied, and theme locations are only set when this theme has them.', 'migrateplus' ) ),
-				'import_term_data'      => array( 'checkbox', __( 'Term data', 'migrateplus' ), __( 'Import the terms a Migrate Plus export carries, with their data', 'migrateplus' ), __( 'Before the posts: descriptions, slugs, hierarchy, custom fields, ACF fields and category images, including terms no post uses. Terms already here are updated, never deleted.', 'migrateplus' ) ),
-				'import_users'          => array( 'checkbox', __( 'Users', 'migrateplus' ), __( 'Import the users a Migrate Plus export carries', 'migrateplus' ), __( 'Before the posts, so authors and customers match. A user with the same email or login is updated but keeps their roles and password; new users get the roles you may give.', 'migrateplus' ) ),
+				'batch_size'             => array( 'number', __( 'Batch size', 'migrateplus' ), array( 1, 100 ), __( 'Records per request. Lower this if imports with lots of images time out.', 'migrateplus' ) ),
+				'import_featured_image'  => array( 'checkbox', __( 'Featured images', 'migrateplus' ), __( 'Download featured images into the Media Library', 'migrateplus' ) ),
+				'import_content_images'  => array( 'checkbox', __( 'Images in content', 'migrateplus' ), __( 'Download images found inside post content and rewrite their URLs', 'migrateplus' ) ),
+				'create_terms'           => array( 'checkbox', __( 'Terms', 'migrateplus' ), __( 'Create categories, tags and terms that don\'t exist yet', 'migrateplus' ) ),
+				'rewrite_links'          => array( 'checkbox', __( 'Links', 'migrateplus' ), __( 'Point links to the old site at this one', 'migrateplus' ), __( 'Migrate Plus exports only. Changes links in post content; images and files in wp-content still point at the old site unless "Images in content" copies them.', 'migrateplus' ) ),
+				'import_comments'        => array( 'checkbox', __( 'Comments', 'migrateplus' ), __( 'Add the comments a Migrate Plus export carries to the imported posts', 'migrateplus' ), __( 'Importing the same file again updates the comments it added before instead of adding them twice.', 'migrateplus' ) ),
+				'import_menus'           => array( 'checkbox', __( 'Menus', 'migrateplus' ), __( 'Import the navigation menus a Migrate Plus export carries', 'migrateplus' ), __( 'After all posts. A menu with the same slug is filled rather than copied, and theme locations are only set when this theme has them.', 'migrateplus' ) ),
+				'import_term_data'       => array( 'checkbox', __( 'Term data', 'migrateplus' ), __( 'Import the terms a Migrate Plus export carries, with their data', 'migrateplus' ), __( 'Before the posts: descriptions, slugs, hierarchy, custom fields, ACF fields and category images, including terms no post uses. Terms already here are updated, never deleted.', 'migrateplus' ) ),
 				'import_acf_definitions' => array( 'checkbox', __( 'ACF definitions', 'migrateplus' ), __( 'Import the ACF field groups, post types, taxonomies and options pages a Migrate Plus export carries', 'migrateplus' ), __( 'Before the posts. Matched by key; definitions this site has in code or acf-json are left alone.', 'migrateplus' ) ),
-				'import_acf_options'    => array( 'checkbox', __( 'ACF options pages', 'migrateplus' ), __( 'Import the values of the ACF options pages a Migrate Plus export carries', 'migrateplus' ), __( 'After the posts. Rollback puts the previous values back.', 'migrateplus' ) ),
-				'import_site_settings'  => array( 'checkbox', __( 'Site settings', 'migrateplus' ), __( 'Import the site settings a Migrate Plus export carries', 'migrateplus' ), __( 'After the posts: General, Reading, Discussion, Media and Permalinks settings, widgets, Customizer settings of the same theme, Additional CSS, global styles and Yoast SEO settings. Rollback puts the previous values back.', 'migrateplus' ) ),
-				'import_orders'         => array( 'checkbox', __( 'Orders', 'migrateplus' ), __( 'Import the WooCommerce orders a Migrate Plus export carries', 'migrateplus' ), __( 'After the products and customers they name. No emails are sent and no stock is moved.', 'migrateplus' ) ),
-				'import_redirects'      => array( 'checkbox', __( 'Redirects', 'migrateplus' ), __( 'Redirect old addresses to posts that moved', 'migrateplus' ), __( 'Migrate Plus exports only. When a post lands at another address than it had on the old site, the old one sends visitors to the new one once the domain points here.', 'migrateplus' ) ),
+				'import_acf_options'     => array( 'checkbox', __( 'ACF options pages', 'migrateplus' ), __( 'Import the values of the ACF options pages a Migrate Plus export carries', 'migrateplus' ), __( 'After the posts. Rollback puts the previous values back.', 'migrateplus' ) ),
+				'import_site_settings'   => array( 'checkbox', __( 'Site settings', 'migrateplus' ), __( 'Import the site settings a Migrate Plus export carries', 'migrateplus' ), __( 'After the posts: General, Reading, Discussion, Media and Permalinks settings, widgets, Customizer settings of the same theme, Additional CSS, global styles and Yoast SEO settings. Rollback puts the previous values back.', 'migrateplus' ) ),
+				'import_orders'          => array( 'checkbox', __( 'Orders', 'migrateplus' ), __( 'Import the WooCommerce orders a Migrate Plus export carries', 'migrateplus' ), __( 'After the products and customers they name. No emails are sent and no stock is moved.', 'migrateplus' ) ),
+				'import_redirects'       => array( 'checkbox', __( 'Redirects', 'migrateplus' ), __( 'Redirect old addresses to posts that moved', 'migrateplus' ), __( 'Migrate Plus exports only. When a post lands at another address than it had on the old site, the old one sends visitors to the new one once the domain points here.', 'migrateplus' ) ),
 			),
 			'migrateplus_export'       => array(
-				'export_statuses'         => array( 'checkboxes', __( 'Status', 'migrateplus' ), self::export_statuses() ),
-				'export_include_terms'    => array( 'checkbox', __( 'Terms', 'migrateplus' ), __( 'Categories, tags and terms', 'migrateplus' ) ),
-				'export_include_term_data' => array( 'checkbox', __( 'Term data', 'migrateplus' ), __( 'Term descriptions, custom fields, ACF fields and empty terms', 'migrateplus' ), __( 'The terms of the exported content types as their own section, so the importing site gets their data, not just their names.', 'migrateplus' ) ),
-				'export_include_image'    => array( 'checkbox', __( 'Featured images', 'migrateplus' ), __( 'Featured image URLs', 'migrateplus' ) ),
-				'export_include_meta'     => array( 'checkbox', __( 'Custom fields', 'migrateplus' ), __( 'Public post meta', 'migrateplus' ) ),
-				'export_include_acf'      => array( 'checkbox', __( 'ACF fields', 'migrateplus' ), __( 'Advanced Custom Fields values', 'migrateplus' ) ),
-				'export_include_woo'      => array( 'checkbox', __( 'WooCommerce', 'migrateplus' ), __( 'Product data (prices, stock, attributes, variations)', 'migrateplus' ) ),
-				'export_include_comments' => array( 'checkbox', __( 'Comments', 'migrateplus' ), __( 'Approved comments and replies', 'migrateplus' ), __( 'Pending, spam and trashed comments are left out.', 'migrateplus' ) ),
-				'export_include_menus'    => array( 'checkbox', __( 'Menus', 'migrateplus' ), __( 'Navigation menus, their items and theme locations', 'migrateplus' ), __( 'Menu items point at posts and terms, so export the content they link to in the same file.', 'migrateplus' ) ),
-				'export_include_yoast'    => array( 'checkbox', __( 'Yoast SEO', 'migrateplus' ), __( 'Yoast SEO titles, descriptions, keyphrases, social images and primary categories of posts and terms', 'migrateplus' ), __( 'Only when Yoast SEO is active.', 'migrateplus' ) ),
-				'export_include_users'    => array( 'checkbox', __( 'Users', 'migrateplus' ), __( 'Every user with their profile, roles and custom fields', 'migrateplus' ), __( 'Password hashes travel too when you may edit users, so people keep their passwords. Treat the file as confidential.', 'migrateplus' ) ),
+				'export_statuses'                => array( 'checkboxes', __( 'Status', 'migrateplus' ), self::export_statuses() ),
+				'export_include_terms'           => array( 'checkbox', __( 'Terms', 'migrateplus' ), __( 'Categories, tags and terms', 'migrateplus' ) ),
+				'export_include_term_data'       => array( 'checkbox', __( 'Term data', 'migrateplus' ), __( 'Term descriptions, custom fields, ACF fields and empty terms', 'migrateplus' ), __( 'The terms of the exported content types as their own section, so the importing site gets their data, not just their names.', 'migrateplus' ) ),
+				'export_include_image'           => array( 'checkbox', __( 'Featured images', 'migrateplus' ), __( 'Featured image URLs', 'migrateplus' ) ),
+				'export_include_meta'            => array( 'checkbox', __( 'Custom fields', 'migrateplus' ), __( 'Public post meta', 'migrateplus' ) ),
+				'export_include_acf'             => array( 'checkbox', __( 'ACF fields', 'migrateplus' ), __( 'Advanced Custom Fields values', 'migrateplus' ) ),
+				'export_include_woo'             => array( 'checkbox', __( 'WooCommerce', 'migrateplus' ), __( 'Product data (prices, stock, attributes, variations)', 'migrateplus' ) ),
+				'export_include_comments'        => array( 'checkbox', __( 'Comments', 'migrateplus' ), __( 'Approved comments and replies', 'migrateplus' ), __( 'Pending, spam and trashed comments are left out.', 'migrateplus' ) ),
+				'export_include_menus'           => array( 'checkbox', __( 'Menus', 'migrateplus' ), __( 'Navigation menus, their items and theme locations', 'migrateplus' ), __( 'Menu items point at posts and terms, so export the content they link to in the same file.', 'migrateplus' ) ),
+				'export_include_yoast'           => array( 'checkbox', __( 'Yoast SEO', 'migrateplus' ), __( 'Yoast SEO titles, descriptions, keyphrases, social images and primary categories of posts and terms', 'migrateplus' ), __( 'Only when Yoast SEO is active.', 'migrateplus' ) ),
 				'export_include_acf_definitions' => array( 'checkbox', __( 'ACF definitions', 'migrateplus' ), __( 'ACF field groups, post types, taxonomies and options pages', 'migrateplus' ), __( 'As ACF\'s own export writes them, so the importing site has the fields the content uses.', 'migrateplus' ) ),
-				'export_include_acf_options' => array( 'checkbox', __( 'ACF options pages', 'migrateplus' ), __( 'The values of ACF options pages', 'migrateplus' ) ),
-				'export_include_site_settings' => array( 'checkbox', __( 'Site settings', 'migrateplus' ), __( 'General, Reading, Discussion, Media and Permalinks settings, widgets, Customizer settings, Additional CSS, global styles and Yoast SEO settings', 'migrateplus' ), __( 'A chosen list: addresses, keys and plugins\' own data stay behind.', 'migrateplus' ) ),
-				'export_include_orders'   => array( 'checkbox', __( 'Orders', 'migrateplus' ), __( 'WooCommerce orders with their items, refunds and notes', 'migrateplus' ), __( 'Orders hold customers\' names and addresses. Treat the file as confidential.', 'migrateplus' ) ),
-				'export_gzip'             => array( 'checkbox', __( 'Compression', 'migrateplus' ), __( 'Compress the file (.json.gz)', 'migrateplus' ), __( 'Much smaller, for a site whose upload limit is lower than the export. Migrate Plus imports it as it is.', 'migrateplus' ) ),
-				'export_exclude_meta'     => array( 'textarea', __( 'Leave out these custom fields', 'migrateplus' ), null, __( 'One meta key per line. End a line with * to leave out every key that starts with it, e.g. rank_math_*. Keys starting with "_" are always left out.', 'migrateplus' ) ),
+				'export_include_acf_options'     => array( 'checkbox', __( 'ACF options pages', 'migrateplus' ), __( 'The values of ACF options pages', 'migrateplus' ) ),
+				'export_include_site_settings'   => array( 'checkbox', __( 'Site settings', 'migrateplus' ), __( 'General, Reading, Discussion, Media and Permalinks settings, widgets, Customizer settings, Additional CSS, global styles and Yoast SEO settings', 'migrateplus' ), __( 'A chosen list: addresses, keys and plugins\' own data stay behind.', 'migrateplus' ) ),
+				'export_include_orders'          => array( 'checkbox', __( 'Orders', 'migrateplus' ), __( 'WooCommerce orders with their items, refunds and notes', 'migrateplus' ), __( 'Orders hold customers\' names and addresses. Treat the file as confidential.', 'migrateplus' ) ),
+				'export_gzip'                    => array( 'checkbox', __( 'Compression', 'migrateplus' ), __( 'Compress the file (.json.gz)', 'migrateplus' ), __( 'Much smaller, for a site whose upload limit is lower than the export. Migrate Plus imports it as it is.', 'migrateplus' ) ),
+				'export_exclude_meta'            => array( 'textarea', __( 'Leave out these custom fields', 'migrateplus' ), null, __( 'One meta key per line. End a line with * to leave out every key that starts with it, e.g. rank_math_*. Keys starting with "_" are always left out.', 'migrateplus' ) ),
 			),
 			'migrateplus_access'       => array(
 				'capability' => array( 'select', __( 'Who can run imports', 'migrateplus' ), self::access_levels(), __( 'Only administrators can change these settings.', 'migrateplus' ) ),
 			),
 			'migrateplus_connections'  => array(
-				'request_timeout'     => array( 'number', __( 'Download timeout', 'migrateplus' ), array( 5, 300 ), __( 'Seconds to wait for each file Migrate Plus downloads. Values under 60 count as 60.', 'migrateplus' ), __( 'seconds', 'migrateplus' ) ),
+				'request_timeout'     => array( 'number', __( 'Download timeout', 'migrateplus' ), array( 60, 300 ), __( 'Seconds to wait for each file Migrate Plus downloads.', 'migrateplus' ), __( 'seconds', 'migrateplus' ) ),
 				'max_remote_size'     => array( 'number', __( 'Remote file size limit', 'migrateplus' ), array( 1, 2048 ), __( 'Only for custom sources added with the migrateplus_sources filter that read their file from a URL: the largest file they may download. Uploaded JSON files are limited by the server\'s upload size instead.', 'migrateplus' ), __( 'MB', 'migrateplus' ) ),
 				'max_media_size'      => array( 'number', __( 'Image and media size limit', 'migrateplus' ), array( 0, 2048 ), __( 'Skip images and media files larger than this when importing. 0 means no limit.', 'migrateplus' ), __( 'MB', 'migrateplus' ) ),
 				'allow_local_sources' => array( 'checkbox', __( 'Local sources', 'migrateplus' ), __( 'Allow downloads from localhost, private network addresses and non-standard ports', 'migrateplus' ), __( 'Turn this on to migrate from a local dev site (for example http://oldsite.test:8888). WordPress blocks these addresses by default; this only relaxes the rule for Migrate Plus\'s own requests.', 'migrateplus' ) ),
@@ -249,6 +230,9 @@ class MigratePlus_Settings {
 		);
 		if ( ! MigratePlus_Util::zlib_available() ) {
 			unset( $fields['migrateplus_export']['export_gzip'] ); // Nothing to choose: compressed exports need zlib.
+		}
+		if ( ! self::may_allow_local_sources() ) {
+			unset( $fields['migrateplus_connections']['allow_local_sources'] );
 		}
 
 		foreach ( $fields as $section => $items ) {
@@ -402,14 +386,13 @@ class MigratePlus_Settings {
 		$out['default_status'] = isset( $input['default_status'] ) && in_array( $input['default_status'], array( 'publish', 'draft', 'pending', 'private' ), true ) ? $input['default_status'] : $defaults['default_status'];
 		$out['force_status']   = isset( $input['force_status'] ) && in_array( $input['force_status'], array( 'publish', 'draft', 'pending', 'private' ), true ) ? $input['force_status'] : '';
 		$out['duplicate']      = isset( $input['duplicate'] ) && in_array( $input['duplicate'], array( 'skip', 'update', 'create' ), true ) ? $input['duplicate'] : $defaults['duplicate'];
-		$out['capability']     = isset( $input['capability'] ) && array_key_exists( $input['capability'], self::access_levels() ) ? $input['capability'] : $defaults['capability'];
-
-		$author                = isset( $input['default_author'] ) ? absint( $input['default_author'] ) : 0;
-		$out['default_author'] = $author && get_userdata( $author ) ? $author : 0;
+		// A field posted as an array would make array_key_exists() throw.
+		$capability        = isset( $input['capability'] ) && is_scalar( $input['capability'] ) ? (string) $input['capability'] : '';
+		$out['capability'] = array_key_exists( $capability, self::access_levels() ) ? $capability : $defaults['capability'];
 
 		$ranges = array(
 			'batch_size'         => array( 1, 100 ),
-			'request_timeout'    => array( 5, 300 ),
+			'request_timeout'    => array( 60, 300 ),
 			'max_remote_size'    => array( 1, 2048 ),
 			'max_media_size'     => array( 0, 2048 ),
 			'job_retention_days' => array( 0, 3650 ),
@@ -419,8 +402,13 @@ class MigratePlus_Settings {
 			$out[ $key ] = max( $range[0], min( $range[1], $value ) );
 		}
 
-		foreach ( array( 'import_featured_image', 'import_content_images', 'create_terms', 'create_authors', 'rewrite_links', 'import_comments', 'import_menus', 'import_term_data', 'import_users', 'import_acf_definitions', 'import_acf_options', 'import_site_settings', 'import_orders', 'import_redirects', 'export_include_terms', 'export_include_term_data', 'export_include_image', 'export_include_meta', 'export_include_acf', 'export_include_woo', 'export_include_comments', 'export_include_menus', 'export_include_yoast', 'export_include_users', 'export_include_acf_definitions', 'export_include_acf_options', 'export_include_site_settings', 'export_include_orders', 'export_gzip', 'allow_local_sources', 'remove_meta_on_uninstall' ) as $key ) {
+		foreach ( array( 'import_featured_image', 'import_content_images', 'create_terms', 'rewrite_links', 'import_comments', 'import_menus', 'import_term_data', 'import_acf_definitions', 'import_acf_options', 'import_site_settings', 'import_orders', 'import_redirects', 'export_include_terms', 'export_include_term_data', 'export_include_image', 'export_include_meta', 'export_include_acf', 'export_include_woo', 'export_include_comments', 'export_include_menus', 'export_include_yoast', 'export_include_acf_definitions', 'export_include_acf_options', 'export_include_site_settings', 'export_include_orders', 'export_gzip', 'allow_local_sources', 'remove_meta_on_uninstall' ) as $key ) {
 			$out[ $key ] = empty( $input[ $key ] ) ? 0 : 1;
+		}
+		if ( ! self::may_allow_local_sources() ) {
+			// Kept as it was: see may_allow_local_sources().
+			$saved                      = (array) get_option( self::OPTION, array() );
+			$out['allow_local_sources'] = empty( $saved['allow_local_sources'] ) ? 0 : 1;
 		}
 
 		$statuses               = isset( $input['export_statuses'] ) ? array_map( 'sanitize_key', (array) $input['export_statuses'] ) : array();
@@ -431,6 +419,17 @@ class MigratePlus_Settings {
 
 		self::flush_cache();
 		return $out;
+	}
+
+	/**
+	 * Whether the current user may change "Local sources". On a network only a super
+	 * admin may: it lets imports reach the private network the server is on, through
+	 * media downloads, which a subsite's administrator must not be able to open up.
+	 *
+	 * @return bool
+	 */
+	protected static function may_allow_local_sources() {
+		return ! is_multisite() || is_super_admin();
 	}
 
 	/**
@@ -605,16 +604,23 @@ class MigratePlus_Settings {
 	}
 
 	/**
-	 * Daily cleanup of old history entries.
+	 * Daily cleanup: imports never started, then history entries older than the retention.
 	 */
 	public static function cleanup() {
+		foreach ( MigratePlus_Job::all() as $job ) {
+			// A preview nobody went on with: its upload and caches copy the whole file.
+			if ( 'draft' === $job->data['status'] && (int) $job->data['updated'] < time() - DAY_IN_SECONDS ) {
+				$job->delete();
+			}
+		}
 		$days = (int) self::get( 'job_retention_days' );
 		if ( $days < 1 ) {
 			return;
 		}
 		$cutoff = time() - $days * DAY_IN_SECONDS;
 		foreach ( MigratePlus_Job::all() as $job ) {
-			if ( 'running' !== $job->data['status'] && (int) $job->data['updated'] < $cutoff ) {
+			// Not one still running, unless its requests died (see MigratePlus_Job::is_stalled()).
+			if ( ( 'running' !== $job->data['status'] || $job->is_stalled() ) && (int) $job->data['updated'] < $cutoff ) {
 				$job->delete();
 			}
 		}

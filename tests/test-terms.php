@@ -133,7 +133,7 @@ class Test_Terms extends WP_UnitTestCase {
 			)
 		);
 		self::factory()->post->create( array( 'post_category' => array( $term ) ) );
-		$doc = $this->export_doc( array( 'include_term_data' => 1 ) );
+		$doc                        = $this->export_doc( array( 'include_term_data' => 1 ) );
 		$doc['migrateplus']['site'] = 'http://old.test';
 		$file                       = $this->json_file( $doc );
 
@@ -258,9 +258,9 @@ class Test_Terms extends WP_UnitTestCase {
 			)
 		);
 
-		$preview              = MigratePlus_Runner::preview( 'json', array( 'file' => $file ), 5 );
-		$job                  = $preview['job'];
-		$job->data['mapping'] = array(
+		$preview                              = MigratePlus_Runner::preview( 'json', array( 'file' => $file ), 5 );
+		$job                                  = $preview['job'];
+		$job->data['mapping']                 = array(
 			'fields'     => array(
 				'source_id'  => 'id',
 				'post_title' => 'title',
@@ -291,5 +291,124 @@ class Test_Terms extends WP_UnitTestCase {
 		$this->assertSame( '', $rolled['error'] );
 		$this->assertFalse( get_term_by( 'name', 'Fresh Cat', 'category' ) );
 		$job->delete();
+	}
+	public function test_tags_whose_names_sanitize_alike_stay_separate_terms() {
+		$c = self::factory()->tag->create( array( 'name' => 'C' ) );
+		self::factory()->tag->create( array( 'name' => 'C#' ) );
+		self::factory()->tag->create( array( 'name' => 'C++' ) );
+		$doc                        = $this->export_doc( array( 'include_term_data' => 1 ) );
+		$doc['migrateplus']['site'] = 'http://old.test';
+		$file                       = $this->json_file( $doc );
+		foreach ( array( 'C#', 'C++' ) as $name ) {
+			wp_delete_term( get_term_by( 'name', $name, 'post_tag' )->term_id, 'post_tag' );
+		}
+
+		$job = $this->import_file( $file );
+		wp_delete_file( $file );
+		$this->assertSame( 'C', get_term( $c, 'post_tag' )->name );
+		$names = get_terms(
+			array(
+				'taxonomy'   => 'post_tag',
+				'hide_empty' => false,
+				'fields'     => 'names',
+				'orderby'    => 'term_id',
+			)
+		);
+		$this->assertSame( array( 'C', 'C#', 'C++' ), $names );
+		$job->delete();
+	}
+
+	public function test_an_update_whose_parent_is_missing_keeps_the_parent_it_has() {
+		$gear  = self::factory()->category->create( array( 'name' => 'Gear' ) );
+		$tents = self::factory()->category->create(
+			array(
+				'name'   => 'Tents',
+				'parent' => $gear,
+			)
+		);
+		$doc   = $this->export_doc( array( 'include_term_data' => 1 ) );
+		foreach ( $doc['terms'] as $i => $record ) {
+			if ( 'Tents' === $record['name'] ) {
+				$doc['terms'][ $i ]['parent'] = 999; // Not in the file, nor on this site.
+				$doc['terms'][ $i ]['path']   = 'Elsewhere > Tents';
+			}
+		}
+		$doc['migrateplus']['site'] = 'http://old.test';
+		$file                       = $this->json_file( $doc );
+
+		$job = $this->import_file( $file );
+		wp_delete_file( $file );
+		$this->assertSame( $gear, get_term( $tents, 'category' )->parent );
+		$this->assertStringContainsString( '"Tents" keeps the parent it has here until that parent is imported', implode( "\n", wp_list_pluck( $job->data['log'], 'm' ) ) );
+		$job->delete();
+	}
+
+	public function test_a_child_listed_before_its_parent_moves_under_it_when_the_parent_arrives() {
+		$gear  = self::factory()->category->create( array( 'name' => 'Gear' ) );
+		$tents = self::factory()->category->create(
+			array(
+				'name'   => 'Tents',
+				'parent' => $gear,
+			)
+		);
+		$doc   = $this->export_doc( array( 'include_term_data' => 1 ) );
+		$terms = array_column( $doc['terms'], null, 'name' );
+		// Children first, as a file written a page at a time can have them.
+		$doc['terms']               = array( $terms['Tents'], $terms['Gear'] );
+		$doc['migrateplus']['site'] = 'http://old.test';
+		$file                       = $this->json_file( $doc );
+		wp_delete_term( $tents, 'category' );
+		wp_delete_term( $gear, 'category' );
+
+		$job = $this->import_file( $file );
+		wp_delete_file( $file );
+		$new_tents = get_term_by( 'name', 'Tents', 'category' );
+		$new_gear  = get_term_by( 'name', 'Gear', 'category' );
+		$this->assertSame( $new_gear->term_id, $new_tents->parent );
+		$this->assertSame( '', get_term_meta( $new_tents->term_id, MigratePlus_Terms::PARENT_META, true ) );
+		$job->delete();
+	}
+
+	public function test_export_batch_pages_through_every_term_export_returns() {
+		$gear = self::factory()->category->create( array( 'name' => 'Gear' ) );
+		self::factory()->category->create(
+			array(
+				'name'   => 'Tents',
+				'parent' => $gear,
+			)
+		);
+		self::factory()->category->create( array( 'name' => 'Stoves' ) );
+		self::factory()->tag->create( array( 'name' => 'Light' ) );
+		self::factory()->tag->create( array( 'name' => 'Heavy' ) );
+		$args = MigratePlus_Exporter::sanitize_args(
+			array(
+				'post_types'        => array( 'post' ),
+				'include_term_data' => 1,
+			)
+		);
+
+		$paged  = array();
+		$cursor = null;
+		$pages  = 0;
+		do {
+			$page   = MigratePlus_Terms::export_batch( $args, $cursor, 2 );
+			$paged  = array_merge( $paged, $page['items'] );
+			$cursor = $page['next'];
+			++$pages;
+		} while ( null !== $cursor && $pages < 20 );
+
+		$expected = MigratePlus_Terms::export( $args );
+		$sort     = static function ( array $records ) {
+			$keys = array_map(
+				static function ( $record ) {
+					return $record['taxonomy'] . ':' . $record['path'];
+				},
+				$records
+			);
+			sort( $keys );
+			return $keys;
+		};
+		$this->assertSame( $sort( $expected ), $sort( $paged ) );
+		$this->assertGreaterThan( 2, $pages );
 	}
 }

@@ -109,7 +109,7 @@ class Test_Blocks extends WP_UnitTestCase {
 		$this->assertSame( '<!-- wp:block {"ref":' . $new_pattern->ID . '} /-->', $new_home->post_content );
 		$this->assertStringContainsString( '"id":' . $new_about->ID . ',', $new_nav->post_content );
 		$this->assertStringContainsString( '"url":"' . get_permalink( $new_about ) . '"', $new_nav->post_content );
-		$this->assertSame( array(), get_post_meta( $new_home->ID, MigratePlus_Blocks::PENDING_META ) );
+		$this->assertSame( array(), get_post_meta( $new_home->ID, MigratePlus_Blocks::PENDING_META, false ) );
 		$job->delete();
 	}
 
@@ -139,6 +139,104 @@ class Test_Blocks extends WP_UnitTestCase {
 		$this->assertStringContainsString( 'class="wp-image-' . $new . '"', $content );
 		$this->assertStringContainsString( '{"ids":[' . $new . ',13]}', $content );
 		$this->assertSame( array( '13' ), $pending );
+		$job->delete();
+	}
+
+	public function test_image_classes_are_mapped_in_one_pass() {
+		$job    = MigratePlus_Job::create( 'json', array( 'migrateplus_site' => 'http://old.test' ) );
+		$first  = self::factory()->attachment->create_object(
+			array(
+				'file'           => 'first.jpg',
+				'post_mime_type' => 'image/jpeg',
+			)
+		);
+		$second = self::factory()->attachment->create_object(
+			array(
+				'file'           => 'second.jpg',
+				'post_mime_type' => 'image/jpeg',
+			)
+		);
+		// Old #12 is $first here, and the old site's attachment numbered like $first is $second here.
+		update_post_meta( $first, '_migrateplus_source_uid', MigratePlus_Importer::uid( $job, '12' ) );
+		update_post_meta( $second, '_migrateplus_source_uid', MigratePlus_Importer::uid( $job, (string) $first ) );
+		$pending = array();
+		$content = MigratePlus_Blocks::relink_content( '<!-- wp:image {"id":12} --><img class="wp-image-12"/><!-- /wp:image --><!-- wp:image {"id":' . $first . '} --><img class="wp-image-' . $first . '"/><!-- /wp:image -->', $job, $pending );
+		$this->assertSame( '<!-- wp:image {"id":' . $first . '} --><img class="wp-image-' . $first . '"/><!-- /wp:image --><!-- wp:image {"id":' . $second . '} --><img class="wp-image-' . $second . '"/><!-- /wp:image -->', $content );
+		$job->delete();
+	}
+
+	public function test_a_waiting_reference_only_links_to_a_post_from_the_same_source() {
+		$mine   = MigratePlus_Job::create( 'json', array( 'migrateplus_site' => 'http://old.test' ) );
+		$theirs = MigratePlus_Job::create( 'json', array( 'migrateplus_site' => 'http://other.test' ) );
+		$page   = self::factory()->post->create(
+			array(
+				'post_type'    => 'page',
+				'post_content' => '<!-- wp:block {"ref":99} /-->',
+			)
+		);
+		$this->assertSame( 1, MigratePlus_Blocks::relink( $page, $mine ) );
+		$this->assertSame( array( MigratePlus_Importer::uid( $mine, '99' ) ), get_post_meta( $page, MigratePlus_Blocks::PENDING_META, false ) );
+
+		// Pattern #99 of another site is not the one this page waits for.
+		$other = self::factory()->post->create( array( 'post_type' => 'wp_block' ) );
+		update_post_meta( $other, '_migrateplus_source_uid', MigratePlus_Importer::uid( $theirs, '99' ) );
+		MigratePlus_Blocks::link_pending( $other, '99', $theirs );
+		$this->assertSame( '<!-- wp:block {"ref":99} /-->', get_post( $page )->post_content );
+
+		$pattern = self::factory()->post->create( array( 'post_type' => 'wp_block' ) );
+		update_post_meta( $pattern, '_migrateplus_source_uid', MigratePlus_Importer::uid( $mine, '99' ) );
+		MigratePlus_Blocks::link_pending( $pattern, '99', $mine );
+		$this->assertSame( '<!-- wp:block {"ref":' . $pattern . '} /-->', get_post( $page )->post_content );
+		$mine->delete();
+		$theirs->delete();
+	}
+
+	public function test_query_latest_posts_page_list_and_product_blocks_follow_the_imported_content() {
+		$job  = MigratePlus_Job::create( 'json', array( 'migrateplus_site' => 'http://old.test' ) );
+		$news = self::factory()->category->create( array( 'name' => 'News' ) );
+		$page = self::factory()->post->create( array( 'post_type' => 'page' ) );
+		add_term_meta(
+			$news,
+			'_migrateplus_source_uid',
+			MigratePlus_Terms::uid(
+				$job,
+				array(
+					'taxonomy' => 'category',
+					'id'       => 7,
+				)
+			)
+		);
+		update_post_meta( $page, '_migrateplus_source_uid', MigratePlus_Importer::uid( $job, '40' ) );
+		$pending = array();
+
+		$content = MigratePlus_Blocks::relink_content(
+			'<!-- wp:query {"queryId":1,"query":{"perPage":3,"exclude":[40],"taxQuery":{"category":[7]}}} --><!-- /wp:query -->'
+				. '<!-- wp:latest-posts {"categories":[{"id":7,"value":"News"}]} /-->'
+				. '<!-- wp:page-list {"parentPageID":40} /-->'
+				. '<!-- wp:woocommerce/single-product {"productId":40} /-->'
+				. '<!-- wp:template-part {"slug":"header","theme":"old-theme"} /-->',
+			$job,
+			$pending
+		);
+		$this->assertSame(
+			'<!-- wp:query {"queryId":1,"query":{"perPage":3,"exclude":[' . $page . '],"taxQuery":{"category":[' . $news . ']}}} --><!-- /wp:query -->'
+				. '<!-- wp:latest-posts {"categories":[{"id":' . $news . ',"value":"News"}]} /-->'
+				. '<!-- wp:page-list {"parentPageID":' . $page . '} /-->'
+				. '<!-- wp:woocommerce/single-product {"productId":' . $page . '} /-->'
+				. '<!-- wp:template-part {"slug":"header","theme":"old-theme"} /-->',
+			$content
+		);
+		$this->assertSame( array(), $pending );
+		$job->delete();
+	}
+
+	public function test_empty_objects_in_block_attributes_stay_objects() {
+		$job     = MigratePlus_Job::create( 'json', array( 'migrateplus_site' => 'http://old.test' ) );
+		$pattern = self::factory()->post->create( array( 'post_type' => 'wp_block' ) );
+		update_post_meta( $pattern, '_migrateplus_source_uid', MigratePlus_Importer::uid( $job, '99' ) );
+		$pending = array();
+		$content = MigratePlus_Blocks::relink_content( '<!-- wp:block {"ref":99,"content":{},"metadata":{"bindings":{}}} /-->', $job, $pending );
+		$this->assertSame( '<!-- wp:block {"ref":' . $pattern . ',"content":{},"metadata":{"bindings":{}}} /-->', $content );
 		$job->delete();
 	}
 

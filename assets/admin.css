@@ -332,18 +332,20 @@
 .migrateplus-actionbar-status.is-warn { color: var(--pp-hull); }
 .migrateplus-actionbar-buttons { display: flex; gap: 8px; }
 
-/* Review changes: duplicates that differ from the post on this site */
-.migrateplus-review-head h2 { margin: 0 0 6px; font-size: 18px; }
-.migrateplus-review-head p { margin: 0 0 8px; max-width: 72ch; }
-.migrateplus-review-tools { display: flex; gap: 8px; margin-top: 12px; }
-.migrateplus-review { list-style: none; margin: 0 0 16px; padding: 0; }
-.migrateplus-review-item.migrateplus-panel { margin: 0 0 12px; padding: 16px 20px; }
-.migrateplus-review-row { display: flex; align-items: flex-start; gap: 12px; }
-.migrateplus-review-row input[type="checkbox"] { margin: 3px 0 0; flex: none; }
-.migrateplus-review-row label { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; cursor: pointer; }
-.migrateplus-review-row label strong { font-size: 15px; overflow-wrap: anywhere; }
-.migrateplus-review-title { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
-.migrateplus-review-title strong { font-size: 15px; overflow-wrap: anywhere; }
+/* Duplicates: records already on this site, and what to do with each */
+.migrateplus-dups-head h2 { margin: 0 0 6px; font-size: 18px; }
+.migrateplus-dups-head p { margin: 0 0 8px; max-width: 72ch; }
+.migrateplus-dups-chips { grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); }
+.migrateplus-legend li.is-copied { border-top-color: var(--pp-tide); }
+.migrateplus-legend li.is-replaced { border-top-color: var(--pp-hull); }
+.migrateplus-dups-plan { font-weight: 600; }
+.migrateplus-dups-tools, .migrateplus-dups-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 12px; }
+.migrateplus-dups-tools input[type="search"] { min-width: 220px; }
+.migrateplus-dups-title { overflow-wrap: anywhere; font-weight: 500; }
+.migrateplus-dups-table .migrateplus-badge { margin-right: 8px; }
+.migrateplus-badge-differs { background: var(--pp-tide-wash); color: var(--pp-tide-dark); }
+.migrateplus-dups-changes > td { background: var(--pp-deck); }
+.migrateplus-dups-rest { margin-top: 16px; }
 .migrateplus-media-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
 .migrateplus-media-pick { margin: 0; }
 .migrateplus-media-pick a { display: block; }
@@ -353,8 +355,6 @@
 }
 .migrateplus-media-file { display: grid; place-items: center; padding: 8px; font: 12px var(--pp-mono); color: var(--pp-muted); overflow-wrap: anywhere; text-align: center; }
 .migrateplus-media-pick figcaption { margin-top: 6px; font-size: 12px; font-weight: 600; color: var(--pp-muted); text-transform: uppercase; letter-spacing: .04em; }
-.migrateplus-review-body { margin: 10px 0 0 28px; }
-.migrateplus-review-body summary { cursor: pointer; color: var(--pp-tide-dark); font-weight: 500; }
 .migrateplus-review-field h3 { margin: 14px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--pp-muted); }
 .migrateplus-review-swap { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; }
 .migrateplus-review-swap dt { color: var(--pp-muted); }
@@ -370,11 +370,6 @@
 .migrateplus-diff-sign { flex: none; width: 1ch; font-weight: 700; }
 .migrateplus-diff li.is-old .migrateplus-diff-sign { color: var(--pp-hull); }
 .migrateplus-diff li.is-new .migrateplus-diff-sign { color: var(--pp-tide-dark); }
-@media (max-width: 600px) {
-	.migrateplus-review-item.migrateplus-panel { padding: 14px 16px; }
-	.migrateplus-review-row { flex-wrap: wrap; }
-	.migrateplus-review-body { margin-left: 0; }
-}
 
 /* Outcome bar: created / updated / skipped / failed */
 .migrateplus-obar { position: relative; display: flex; height: 10px; overflow: hidden; background: var(--pp-line-2); border-radius: 999px; }
@@ -528,13 +523,6 @@
 .migrateplus-check-chip input:checked + span { background: var(--pp-tide-wash); border-color: var(--pp-tide); color: var(--pp-tide-dark); }
 .migrateplus-check-chip input:checked + span::before { content: ""; width: 8px; height: 4px; margin-top: -2px; border-left: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); }
 .migrateplus-check-chip input:focus-visible + span { box-shadow: var(--pp-focus); }
-/* A button in the chip row, drawn by the same .migrateplus-check-chip span rules as the checkbox chips. */
-.migrateplus-chip-btn { padding: 0; border: 0; background: none; font: inherit; cursor: pointer; }
-.migrateplus-chip-btn:focus-visible { outline: none; }
-.migrateplus-chip-btn:focus-visible span { box-shadow: var(--pp-focus); }
-.migrateplus-chip-btn.is-active span { background: var(--pp-tide-wash); border-color: var(--pp-tide); color: var(--pp-tide-dark); }
-.migrateplus-chip-btn.is-active span::before { content: ""; width: 8px; height: 4px; margin-top: -2px; border-left: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); }
-.migrateplus-cpt-list { margin-top: 8px; max-height: 240px; }
 /* Room under the content type chips before the notes and the next field. */
 .migrateplus-export .migrateplus-chips { padding-bottom: 8px; }
 .migrateplus-export .migrateplus-chips + .migrateplus-help { margin-top: 2px; }
@@ -626,13 +614,37 @@ body.migrateplus-modal-open { overflow: hidden; }
 .migrateplus-modal .migrateplus-modal-stats span { font-size: 12px; }
 .migrateplus-modal .migrateplus-modal-stats li.is-zero { opacity: .65; }
 
-/* The latest log line: one quiet line, full text on errors. */
+/* A note under the bar. The run's latest log line keeps to one quiet line; any other note, such as
+   the skipped entries of a bulk delete, wraps so it can be read in full. */
 .migrateplus-modal-note {
 	margin: 14px 0 0; padding: 9px 12px; border-radius: 10px; background: #f6f8fa;
 	font: 12px/1.5 var(--pp-mono); color: var(--pp-ink-2);
-	white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+	overflow-wrap: anywhere;
 }
+.migrateplus-modal-note.is-log { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .migrateplus-modal-note.is-error { white-space: normal; background: var(--pp-hull-wash); color: #8a2a20; font-family: inherit; font-size: 13px; }
+/* The rename dialog's text field, and the author picker of the import confirmation. */
+.migrateplus-modal .migrateplus-modal-input,
+.migrateplus-modal .migrateplus-author select,
+.migrateplus-modal .migrateplus-author input {
+	display: block; width: 100%; max-width: none; min-height: 36px; margin: 0; padding: 6px 10px;
+	border: 1px solid var(--pp-line); border-radius: var(--pp-r-sm); color: var(--pp-ink); background-color: var(--pp-paper); box-shadow: none;
+}
+.migrateplus-modal .migrateplus-modal-input:focus,
+.migrateplus-modal .migrateplus-author select:focus,
+.migrateplus-modal .migrateplus-author input:focus { border-color: var(--pp-tide); box-shadow: 0 0 0 1px var(--pp-tide); outline: none; }
+.migrateplus-modal .migrateplus-author { margin: 0; }
+.migrateplus-author-search { width: 100%; }
+/* The author for each post or page, under the author for all. */
+.migrateplus-authors-each { gap: 6px; }
+.migrateplus-authors-toggle { justify-self: start; font-weight: 600; text-align: left; }
+.migrateplus-authors-tools, .migrateplus-authors-paging { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0; }
+.migrateplus-authors-tools input[type="search"] { flex: 1 1 140px; }
+.migrateplus-authors-paging { justify-content: space-between; }
+.migrateplus-authors-table td { padding: 6px; }
+.migrateplus-authors-table td:last-child { width: 45%; }
+.migrateplus-authors-table select { width: 100%; }
+.migrateplus-modal .migrateplus-author + .migrateplus-help { margin-top: 6px; }
 
 .migrateplus-modal-actions {
 	display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;

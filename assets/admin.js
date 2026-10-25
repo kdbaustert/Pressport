@@ -10,6 +10,15 @@
 	}
 	const { createElement, createPortal, Fragment, useLayoutEffect, useRef, useState } = wpElement;
 
+	// Strings go through wp.i18n (text domain 'migrateplus'). Without it, as before WordPress 5.0, they stay in English.
+	const i18n = window.wp.i18n;
+	const __ = i18n ? i18n.__ : ( text ) => text;
+	const _n = i18n ? i18n._n : ( single, plural, n ) => ( 1 === n ? single : plural );
+	const sprintf = i18n ? i18n.sprintf : ( format, ...args ) => {
+		let next = 0;
+		return String( format ).replace( /%(?:(\d+)\$)?[sd]/g, ( m, pos ) => String( args[ pos ? pos - 1 : next++ ] ) );
+	};
+
 	// Handlers read the DOM straight after render(), so it has to commit before it returns. A
 	// createRoot root only does that inside flushSync. WordPress before 6.3 is missing one of
 	// them, and its legacy render() is synchronous anyway.
@@ -27,19 +36,19 @@
 		fields: [],
 		mapping: { fields: {}, meta: [], taxonomies: [], acf: {} },
 		options: Object.assign( {}, D.defaults ),
-		suggested: {},
+		suggested: {}, // Post types the mapping step has filled in suggestions for, in this job.
 		running: false,
 		paused: false,
-		results: [],
+		resumedAt: 0, // When Resume was last pressed, so a double click doesn't pause straight away.
+		lockWait: false, // Another tab or request holds the batch lock; the run is waiting for it.
 		error: '',
 		sourceError: '', // A failed preview, shown above the source form as it was typed.
 		busy: false,
 		fileMode: {}, // 'source:fieldKey' => 'upload' | 'url'
-		modalHidden: false, // user chose to watch the import in the page instead of the modal
 		runClock: null, // { t, processed } when the current run started, for the ETA
 		logFilter: 'all',
 		logQuery: '',
-		review: null,
+		dups: null, // The duplicates screen: its job, the check's answer and the choices made there.
 		historyQuery: '',
 		historyJobs: null, // null while loading.
 		historyError: '',
@@ -55,7 +64,7 @@
 			statuses: ( D.exportDefaults.statuses || [ 'publish' ] ).slice(),
 			post_types: ( D.exportDefaults.post_types || [ 'post' ] ).slice(),
 		} ),
-		exportCount: { text: 'Counting…', warn: false, empty: false },
+		exportCount: { text: __( 'Counting…', 'migrateplus' ), warn: false, empty: false },
 		lastExport: null,
 		replace: {
 			search: '',
@@ -108,10 +117,11 @@
 		} catch ( e ) {}
 		// admin-ajax answers a bare "0" when the request never reached MigratePlus, e.g. a post larger than post_max_size.
 		if ( ! json || 'object' !== typeof json ) {
-			throw new Error( 'Unexpected server response (HTTP ' + status + '). ' + String( text ).replace( /<[^>]+>/g, ' ' ).trim().slice( 0, 300 ) );
+			/* translators: 1: HTTP status code, 2: the start of the server's answer */
+			throw new Error( sprintf( __( 'Unexpected server response (HTTP %1$s). %2$s', 'migrateplus' ), status, String( text ).replace( /<[^>]+>/g, ' ' ).trim().slice( 0, 300 ) ) );
 		}
 		if ( ! json.success ) {
-			const err = new Error( ( json.data && json.data.message ) || 'Request failed.' );
+			const err = new Error( ( json.data && json.data.message ) || __( 'Request failed.', 'migrateplus' ) );
 			// The message is translated; the WP_Error code is what to match on.
 			err.code = ( json.data && json.data.code ) || '';
 			throw err;
@@ -131,22 +141,36 @@
 		const timer = setTimeout( () => controller.abort(), API_TIMEOUT );
 		return fetch( D.ajaxUrl, { method: 'POST', body: apiBody( action, data ), credentials: 'same-origin', signal: controller.signal } )
 			.then( ( r ) => r.text().then( ( t ) => parseResponse( r.status, t ) ), ( e ) => {
-				const err = new Error( e && 'AbortError' === e.name ? 'The server took too long to respond.' : 'Network error. Check your connection and try again.' );
+				const err = new Error( e && 'AbortError' === e.name ? __( 'The server took too long to respond.', 'migrateplus' ) : __( 'Network error. Check your connection and try again.', 'migrateplus' ) );
 				err.network = true;
 				throw err;
 			} )
 			.finally( () => clearTimeout( timer ) );
 	}
 
+	/** api(), retried after 2, 4 and 8 seconds when the request never got an answer, as an import batch is. */
+	function apiWithRetry( action, data ) {
+		let retries = 0;
+		const attempt = () => api( action, data ).catch( ( err ) => {
+			if ( ! err.network || retries >= 3 ) {
+				throw err;
+			}
+			return new Promise( ( resolve ) => setTimeout( resolve, 2000 * Math.pow( 2, retries++ ) ) ).then( attempt );
+		} );
+		return attempt();
+	}
+
 	/**
 	 * Same as api(), but uses XHR so upload progress can be reported.
 	 * onUpload( loaded, total ) fires while the request body is sent; onSent() once it is fully uploaded.
+	 * The promise has abort(), which rejects it with err.aborted set.
 	 */
 	function apiWithProgress( action, data, onUpload, onSent ) {
-		return new Promise( ( resolve, reject ) => {
-			const xhr = new XMLHttpRequest();
+		const xhr = new XMLHttpRequest();
+		const request = new Promise( ( resolve, reject ) => {
 			xhr.open( 'POST', D.ajaxUrl );
 			xhr.withCredentials = true;
+			xhr.timeout = API_TIMEOUT;
 			xhr.upload.addEventListener( 'progress', ( e ) => {
 				if ( e.lengthComputable && onUpload ) {
 					onUpload( e.loaded, e.total );
@@ -160,10 +184,17 @@
 					reject( err );
 				}
 			} );
-			xhr.addEventListener( 'error', () => reject( new Error( 'Network error. Check your connection and try again.' ) ) );
-			xhr.addEventListener( 'timeout', () => reject( new Error( 'The server took too long to respond.' ) ) );
+			xhr.addEventListener( 'error', () => reject( new Error( __( 'Network error. Check your connection and try again.', 'migrateplus' ) ) ) );
+			xhr.addEventListener( 'timeout', () => reject( new Error( __( 'The server took too long to respond.', 'migrateplus' ) ) ) );
+			xhr.addEventListener( 'abort', () => {
+				const err = new Error( __( 'The upload was cancelled.', 'migrateplus' ) );
+				err.aborted = true;
+				reject( err );
+			} );
 			xhr.send( apiBody( action, data ) );
 		} );
+		request.abort = () => xhr.abort();
+		return request;
 	}
 
 	function formatBytes( n ) {
@@ -178,13 +209,16 @@
 	function formatDuration( seconds ) {
 		seconds = Math.max( 0, Math.round( seconds ) );
 		if ( seconds < 60 ) {
-			return seconds + 's';
+			/* translators: %s: seconds */
+			return sprintf( __( '%ss', 'migrateplus' ), seconds );
 		}
 		const m = Math.floor( seconds / 60 );
 		if ( m < 60 ) {
-			return m + 'm ' + String( seconds % 60 ).padStart( 2, '0' ) + 's';
+			/* translators: 1: minutes, 2: seconds */
+			return sprintf( __( '%1$sm %2$ss', 'migrateplus' ), m, String( seconds % 60 ).padStart( 2, '0' ) );
 		}
-		return Math.floor( m / 60 ) + 'h ' + String( m % 60 ).padStart( 2, '0' ) + 'm';
+		/* translators: 1: hours, 2: minutes */
+		return sprintf( __( '%1$sh %2$sm', 'migrateplus' ), Math.floor( m / 60 ), String( m % 60 ).padStart( 2, '0' ) );
 	}
 
 	function hostOf( url ) {
@@ -200,7 +234,7 @@
 	/**
 	 * A single reusable modal with a progress bar, drawn by <Modal> into document.body.
 	 *
-	 * modal.open( { title, message, percent, detail, stats, actions, tone, icon, dismissible } )
+	 * modal.open( { title, message, percent, detail, stats, actions, tone, icon, dismissible, input, content } )
 	 * modal.update( { ...same keys } )   percent: number 0-100, or null for indeterminate.
 	 * modal.close()
 	 *
@@ -270,7 +304,7 @@
 	}() );
 
 	// Disabled and hidden controls can't take focus; focusing one drops it to the page behind.
-	const FOCUSABLE = 'button:not(:disabled):not([hidden]), a[href]:not([hidden])';
+	const FOCUSABLE = 'input:not(:disabled):not([hidden]), select:not(:disabled):not([hidden]), button:not(:disabled):not([hidden]), a[href]:not([hidden])';
 
 	const ICONS = { success: 'dashicons-yes', error: 'dashicons-warning', paused: 'dashicons-controls-pause', file: 'dashicons-database-import', danger: 'dashicons-trash', question: 'dashicons-editor-help', working: '' };
 
@@ -286,8 +320,23 @@
 		const actions = ( o.actions || [] ).filter( ( a ) => ! a.primary ).concat( ( o.actions || [] ).filter( ( a ) => a.primary ) );
 		const sig = JSON.stringify( actions.map( ( a ) => [ a.label, a.primary, a.danger, a.href, a.disabled ] ) );
 
-		// Focus the default button when the dialog opens and when its buttons change, not on every tick.
+		// Focus the first field, or the default button, when the dialog opens and when its buttons change, not on every tick.
+		const shownOpen = useRef( 0 );
 		useLayoutEffect( () => {
+			const reopened = shownOpen.current !== modal.opened();
+			shownOpen.current = modal.opened();
+			const active = document.activeElement;
+			if ( ! reopened && dialog.current.contains( active ) && active.matches( 'input, select' ) ) {
+				return; // Choosing in a field enabled a button: focus stays where the user is.
+			}
+			const field = dialog.current.querySelector( '.migrateplus-modal-input, .migrateplus-author select' );
+			if ( field && ! field.disabled ) {
+				field.focus( { preventScroll: true } );
+				if ( field.select ) {
+					field.select();
+				}
+				return;
+			}
 			const target = buttons.current.querySelector( '.button-primary:not(:disabled)' ) || buttons.current.querySelector( FOCUSABLE ) || dialog.current;
 			target.focus( { preventScroll: true } );
 		}, [ sig, modal.opened() ] );
@@ -306,15 +355,20 @@
 				e.preventDefault();
 				dismiss();
 			} else if ( e.key === 'Tab' ) {
-				// Keep focus inside the dialog.
+				// Keep focus inside the dialog, and bring it back when a click on the overlay dropped it to the page.
 				const focusables = dialog.current.querySelectorAll( FOCUSABLE );
 				if ( ! focusables.length ) {
 					e.preventDefault();
+					dialog.current.focus();
 					return;
 				}
 				const first = focusables[ 0 ];
 				const last = focusables[ focusables.length - 1 ];
-				if ( e.shiftKey && document.activeElement === first ) {
+				const inside = dialog.current.contains( document.activeElement ) && document.activeElement !== dialog.current;
+				if ( ! inside ) {
+					e.preventDefault();
+					( e.shiftKey ? last : first ).focus();
+				} else if ( e.shiftKey && document.activeElement === first ) {
 					e.preventDefault();
 					last.focus();
 				} else if ( ! e.shiftKey && document.activeElement === last ) {
@@ -323,6 +377,14 @@
 				}
 			}
 		};
+		// On the document, not the overlay: focus can be outside the dialog, e.g. on the body after a click on the overlay.
+		const keyHandler = useRef( null );
+		keyHandler.current = onKeyDown;
+		useLayoutEffect( () => {
+			const listener = ( e ) => keyHandler.current( e );
+			document.addEventListener( 'keydown', listener );
+			return () => document.removeEventListener( 'keydown', listener );
+		}, [] );
 
 		const barClass = 'migrateplus-progress migrateplus-modal-bar' +
 			( indeterminate ? ' is-indeterminate' : '' ) +
@@ -331,7 +393,7 @@
 			( 'success' === o.tone ? ' is-success' : '' ) +
 			( running ? ' is-running' : '' );
 
-		return createPortal( createElement( 'div', { className: 'migrateplus-modal-overlay', onKeyDown },
+		return createPortal( createElement( 'div', { className: 'migrateplus-modal-overlay' },
 			createElement( 'div', { ref: dialog, className: 'migrateplus-modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'migrateplus-modal-title', 'aria-describedby': 'migrateplus-modal-message', 'data-status': status, tabIndex: -1 },
 				createElement( 'header', { className: 'migrateplus-modal-head' },
 					createElement( 'span', { className: 'migrateplus-modal-icon', 'aria-hidden': 'true' }, createElement( 'span', { className: 'dashicons ' + ( ICONS[ status ] || '' ) } ) ),
@@ -340,7 +402,7 @@
 						createElement( 'h2', { className: 'migrateplus-modal-title', id: 'migrateplus-modal-title', 'aria-live': 'polite' }, o.title || '' ),
 						createElement( 'p', { className: 'migrateplus-modal-message', id: 'migrateplus-modal-message', hidden: ! o.message }, o.message || '' )
 					),
-					createElement( 'button', { type: 'button', className: 'migrateplus-modal-close', 'aria-label': 'Close', title: 'Close', hidden: ! o.dismissible, onClick: dismiss },
+					createElement( 'button', { type: 'button', className: 'migrateplus-modal-close', 'aria-label': __( 'Close', 'migrateplus' ), title: __( 'Close', 'migrateplus' ), hidden: ! o.dismissible, onClick: dismiss },
 						createElement( 'span', { className: 'dashicons dashicons-no-alt', 'aria-hidden': 'true' } ) )
 				),
 				// bar: false hides the progress bar and its numbers (e.g. for a confirmation).
@@ -359,7 +421,26 @@
 						createElement( 'strong', null, ( Number( s.value ) || 0 ).toLocaleString() ),
 						createElement( 'span', null, s.label ) )
 				) ),
-				createElement( 'p', { className: 'migrateplus-modal-note' + ( 'error' === o.tone ? ' is-error' : '' ), 'aria-live': 'polite', hidden: ! o.note }, o.note || '' ),
+				o.content || null,
+				// A text field, as the rename dialog asks for a name. Keyed by the open, so each dialog starts from its own value.
+				o.input ? createElement( 'input', {
+					key: modal.opened(),
+					type: 'text',
+					id: 'migrateplus-modal-input',
+					className: 'migrateplus-modal-input',
+					defaultValue: o.input.value,
+					'aria-label': o.input.label,
+					maxLength: 100,
+					onKeyDown: ( e ) => {
+						const primary = buttons.current.querySelector( '.button-primary:not(:disabled)' );
+						if ( 'Enter' === e.key && primary ) {
+							e.preventDefault();
+							primary.click();
+						}
+					},
+				} ) : null,
+				// The run's latest log line stays on one line; any other note is read in full.
+				createElement( 'p', { className: 'migrateplus-modal-note' + ( 'error' === o.tone ? ' is-error' : '' ) + ( 'run' === o.kind && 'error' !== o.tone ? ' is-log' : '' ), 'aria-live': 'polite', hidden: ! o.note }, o.note || '' ),
 				createElement( 'div', { ref: buttons, className: 'migrateplus-modal-actions', hidden: ! actions.length }, actions.map( ( a, i ) => {
 					const className = 'button' + ( a.primary ? ' button-primary' : '' ) + ( a.danger ? ' migrateplus-danger' : '' );
 					return a.href
@@ -408,8 +489,12 @@
 		return parents;
 	}
 
+	// Custom field rows the user added or edited on the mapping step. Suggestions never remove them.
+	const userMetaRows = new WeakSet();
+
 	/**
-	 * Suggest ACF and taxonomy mappings for the current post type, once per post type.
+	 * Suggest ACF and taxonomy mappings for the current post type, once per post type, and
+	 * custom fields once per job: a row the user deleted is not added back when "Import as" changes.
 	 * Matches acf.<name>, meta.<name>, <name> and the field label (case-insensitive).
 	 */
 	function suggestExtras() {
@@ -417,6 +502,7 @@
 		if ( state.suggested[ pt ] ) {
 			return;
 		}
+		const firstForJob = ! Object.keys( state.suggested ).length;
 		state.suggested[ pt ] = true;
 		const m = state.mapping;
 		const lower = {};
@@ -434,13 +520,13 @@
 			if ( hit ) {
 				m.acf[ f.key ] = hit;
 				used.add( hit );
-				// Don't also write it as a plain custom field.
-				m.meta = m.meta.filter( ( row ) => row.source !== hit );
+				// Don't also write it as a plain custom field, unless the user put that row there.
+				m.meta = m.meta.filter( ( row ) => row.source !== hit || userMetaRows.has( row ) );
 			}
 		} );
 		// Custom fields from MigratePlus / WordPress exports ("meta.<key>"), skipping private keys.
 		const acfNames = new Set( acfFields( pt ).map( ( f ) => f.name ) );
-		state.fields.forEach( ( f ) => {
+		( firstForJob ? state.fields : [] ).forEach( ( f ) => {
 			const key = f.startsWith( 'meta.' ) ? f.slice( 5 ) : '';
 			if ( ! key || key.startsWith( '_' ) || key.includes( '.' ) || acfNames.has( key ) || used.has( f ) || m.meta.some( ( row ) => row.key === key ) ) {
 				return;
@@ -478,7 +564,11 @@
 			if ( keys.length ) {
 				const rows = new Set( keys.map( ( k ) => k.slice( field.length + 1 ).split( '.' )[ 0 ] ) );
 				const isList = [ ...rows ].every( ( x ) => /^\d+$/.test( x ) );
-				return isList ? rows.size + ' item' + ( rows.size === 1 ? '' : 's' ) + ': ' + r[ keys[ 0 ] ] : keys.length + ' values: ' + r[ keys[ 0 ] ];
+				return isList
+					/* translators: 1: number of items in a list, 2: the first value */
+					? sprintf( _n( '%1$s item: %2$s', '%1$s items: %2$s', rows.size, 'migrateplus' ), rows.size, r[ keys[ 0 ] ] )
+					/* translators: 1: number of values in an object, 2: the first value */
+					: sprintf( _n( '%1$s value: %2$s', '%1$s values: %2$s', keys.length, 'migrateplus' ), keys.length, r[ keys[ 0 ] ] );
 			}
 		}
 		return '';
@@ -504,17 +594,19 @@
 		const known = !! value && ( isParent || state.fields.includes( value ) );
 		return createElement( 'select', {
 			className: 'migrateplus-field-select',
-			'aria-label': label || 'Source field',
+			'aria-label': label || __( 'Source field', 'migrateplus' ),
 			value: value || '',
 			onChange: ( e ) => onChange( e.target.value ),
 			onFocus: filled ? null : () => setFilled( true ),
 		},
-			createElement( 'option', { value: '' }, '(not mapped)' ),
+			createElement( 'option', { value: '' }, __( '(not mapped)', 'migrateplus' ) ),
 			filled ? state.fields.map( ( f ) => createElement( 'option', { key: f, value: f }, f ) ) : null,
-			filled && parents.length ? createElement( 'optgroup', { label: 'Nested data (lists and objects)' }, parents.map( ( f ) => createElement( 'option', { key: f, value: f }, f + ' (all)' ) ) ) : null,
+			/* translators: %s: a source field that holds a list or object */
+			filled && parents.length ? createElement( 'optgroup', { label: __( 'Nested data (lists and objects)', 'migrateplus' ) }, parents.map( ( f ) => createElement( 'option', { key: f, value: f }, sprintf( __( '%s (all)', 'migrateplus' ), f ) ) ) ) : null,
 			// Until then only the mapped field, so the select still shows it.
-			! filled && known ? createElement( 'option', { value }, isParent ? value + ' (all)' : value ) : null,
-			value && ! known ? createElement( 'option', { value }, value + ' (not in preview)' ) : null
+			! filled && known ? createElement( 'option', { value }, isParent ? sprintf( __( '%s (all)', 'migrateplus' ), value ) : value ) : null,
+			/* translators: %s: a source field name */
+			value && ! known ? createElement( 'option', { value }, sprintf( __( '%s (not in preview)', 'migrateplus' ), value ) ) : null
 		);
 	}
 
@@ -523,11 +615,12 @@
 	}
 
 	/**
-	 * A confirmation in the plugin's modal, in place of window.confirm. The modal does not block,
-	 * so whatever follows the answer goes in onConfirm. Its button is disabled once clicked so the
-	 * request can't be sent twice; onConfirm then closes the modal or updates it.
+	 * A confirmation in the plugin's modal, in place of window.confirm (and, with input, of
+	 * window.prompt). The modal does not block, so whatever follows the answer goes in onConfirm,
+	 * which gets the text field's value. Its button is disabled once clicked so the request can't
+	 * be sent twice; onConfirm then closes the modal or updates it.
 	 */
-	function ask( { title, message, label, danger, onConfirm } ) {
+	function ask( { title, message, label, danger, input, onConfirm } ) {
 		modal.open( {
 			kind: 'confirm',
 			// The spinner is for work in progress; until the user answers, show what is being asked.
@@ -536,13 +629,17 @@
 			dismissible: true,
 			title,
 			message,
+			input,
 			actions: [
 				{ label, primary: true, danger, onClick: () => {
+					const field = document.getElementById( 'migrateplus-modal-input' );
+					const value = field ? field.value : '';
 					// No icon of its own: the tone's shows, the spinner now and the result's once onConfirm updates the modal.
-					modal.update( { icon: null, dismissible: false, actions: [ { label: label + '…', primary: true, danger, disabled: true } ] } );
-					onConfirm();
+					/* translators: %s: the label of the button that was pressed, e.g. Delete */
+					modal.update( { icon: null, dismissible: false, actions: [ { label: sprintf( __( '%s…', 'migrateplus' ), label ), primary: true, danger, disabled: true } ] } );
+					onConfirm( value );
 				} },
-				{ label: 'Cancel', onClick: () => modal.close() },
+				{ label: __( 'Cancel', 'migrateplus' ), onClick: () => modal.close() },
 			],
 		} );
 	}
@@ -556,7 +653,7 @@
 			dismissible: true,
 			title,
 			note: err.message,
-			actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
+			actions: [ { label: __( 'Close', 'migrateplus' ), primary: true, onClick: () => modal.close() } ],
 		} );
 	}
 
@@ -567,36 +664,39 @@
 	function relativeTime( ts ) {
 		const diff = Date.now() / 1000 - ts;
 		if ( diff < 60 ) {
-			return 'just now';
+			return __( 'just now', 'migrateplus' );
 		}
 		if ( diff < 3600 ) {
-			return Math.floor( diff / 60 ) + ' min ago';
+			/* translators: %s: minutes */
+			return sprintf( __( '%s min ago', 'migrateplus' ), Math.floor( diff / 60 ) );
 		}
 		if ( diff < 86400 ) {
 			const hours = Math.floor( diff / 3600 );
-			return hours + ' hour' + ( hours === 1 ? '' : 's' ) + ' ago';
+			/* translators: %s: hours */
+			return sprintf( _n( '%s hour ago', '%s hours ago', hours, 'migrateplus' ), hours );
 		}
 		if ( diff < 86400 * 7 ) {
 			const d = Math.floor( diff / 86400 );
-			return d === 1 ? 'yesterday' : d + ' days ago';
+			/* translators: %s: days */
+			return d === 1 ? __( 'yesterday', 'migrateplus' ) : sprintf( _n( '%s day ago', '%s days ago', d, 'migrateplus' ), d );
 		}
 		return new Date( ts * 1000 ).toLocaleDateString();
 	}
 
 	const STATUS_LABELS = {
-		draft: 'Not started',
-		ready: 'Ready',
-		running: 'Running',
-		complete: 'Complete',
-		failed: 'Failed',
-		rolled_back: 'Rolled back',
+		draft: __( 'Not started', 'migrateplus' ),
+		ready: __( 'Ready', 'migrateplus' ),
+		running: __( 'Running', 'migrateplus' ),
+		complete: __( 'Complete', 'migrateplus' ),
+		failed: __( 'Failed', 'migrateplus' ),
+		rolled_back: __( 'Rolled back', 'migrateplus' ),
 	};
 
 	const OUTCOMES = [
-		[ 'created', 'Created', 'Would create' ],
-		[ 'updated', 'Updated', 'Would update' ],
-		[ 'skipped', 'Skipped', 'Skipped' ],
-		[ 'failed', 'Failed', 'Failed' ],
+		[ 'created', __( 'Created', 'migrateplus' ), __( 'Would create', 'migrateplus' ) ],
+		[ 'updated', __( 'Updated', 'migrateplus' ), __( 'Would update', 'migrateplus' ) ],
+		[ 'skipped', __( 'Skipped', 'migrateplus' ), __( 'Skipped', 'migrateplus' ) ],
+		[ 'failed', __( 'Failed', 'migrateplus' ), __( 'Failed', 'migrateplus' ) ],
 	];
 
 	/**
@@ -613,7 +713,7 @@
 			'aria-valuemin': 0,
 			'aria-valuemax': 100,
 			'aria-valuenow': indeterminate ? null : Math.round( ( processed / base ) * 100 ),
-			'aria-label': label || 'Progress',
+			'aria-label': label || __( 'Progress', 'migrateplus' ),
 			hidden,
 		},
 			OUTCOMES.map( ( [ key ] ) => createElement( 'span', { key, className: 'migrateplus-obar-seg is-' + key, style: { width: ( ( ( Number( stats[ key ] ) || 0 ) / base ) * 100 ) + '%' } } ) ),
@@ -637,8 +737,84 @@
 		);
 	}
 
+	// The date fields show m/d/Y; state and the queries keep YYYY-MM-DD.
+	const displayDate = ( ymd ) => {
+		const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec( ymd || '' );
+		return m ? m[ 2 ] + '/' + m[ 3 ] + '/' + m[ 1 ] : ( ymd || '' );
+	};
+	// YYYY-MM-DD from typed m/d/Y, or null while the text is not a whole, real date.
+	const parseDisplayDate = ( text ) => {
+		const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec( text.trim() );
+		if ( ! m ) {
+			return null;
+		}
+		const date = new Date( Number( m[ 3 ] ), Number( m[ 1 ] ) - 1, Number( m[ 2 ] ) );
+		if ( date.getMonth() !== Number( m[ 1 ] ) - 1 || date.getDate() !== Number( m[ 2 ] ) ) {
+			return null;
+		}
+		return m[ 3 ] + '-' + m[ 1 ].padStart( 2, '0' ) + '-' + m[ 2 ].padStart( 2, '0' );
+	};
+
+	// A date field backed by Vanilla Calendar Pro, the calendar Bootstrap's datepicker wraps. Focusing
+	// the input opens the popup; picking a day lands in onChange as YYYY-MM-DD. Without the library
+	// (an enqueue failure, or jsdom in tests) it stays a plain text input taking typed m/d/Y dates.
+	function DateInput( { label, value, onChange } ) {
+		const input = useRef( null );
+		const picker = useRef( null );
+		const change = useRef( onChange );
+		change.current = onChange;
+		const [ text, setText ] = useState( displayDate( value ) );
+		useLayoutEffect( () => {
+			const lib = window.VanillaCalendarPro;
+			if ( ! lib || ! input.current ) {
+				return undefined;
+			}
+			const calendar = new lib.Calendar( input.current, {
+				inputMode: true,
+				positionToInput: 'auto',
+				selectedTheme: 'light',
+				onChangeToInput: ( self ) => {
+					change.current( ( self.context.selectedDates && self.context.selectedDates[ 0 ] ) || '' );
+					self.hide();
+				},
+			} );
+			calendar.init();
+			picker.current = calendar;
+			return () => {
+				calendar.destroy();
+				picker.current = null;
+			};
+		}, [] );
+		useLayoutEffect( () => {
+			// The picker, a reset, anything that changes the value from outside: the shown text follows.
+			if ( value !== ( '' === text.trim() ? '' : parseDisplayDate( text ) ) ) {
+				setText( displayDate( value ) );
+			}
+			// A half-typed date must not reach the picker: it only gets whole days, or an empty clear.
+			if ( picker.current && ( '' === value || /^\d{4}-\d{2}-\d{2}$/.test( value ) ) ) {
+				picker.current.set( { selectedDates: value ? [ value ] : [] } );
+			}
+		}, [ value ] );
+		return createElement( 'input', {
+			type: 'text',
+			ref: input,
+			'aria-label': label,
+			placeholder: __( 'MM/DD/YYYY', 'migrateplus' ),
+			autoComplete: 'off',
+			value: text,
+			onChange: ( e ) => {
+				const raw = e.target.value;
+				setText( raw );
+				const ymd = '' === raw.trim() ? '' : parseDisplayDate( raw );
+				if ( null !== ymd && ymd !== value ) {
+					onChange( ymd );
+				}
+			},
+		} );
+	}
+
 	const SOURCE_BLURBS = {
-		json: 'A Migrate Plus export, or any JSON file or API',
+		json: __( 'A Migrate Plus export, or any JSON file or API', 'migrateplus' ),
 	};
 
 	// Render
@@ -662,10 +838,24 @@
 	}
 
 	function Import() {
+		// A file dropped outside the drop zone would make the browser leave the page to open it.
+		useLayoutEffect( () => {
+			const keepFileDrops = ( e ) => {
+				if ( e.dataTransfer && Array.from( e.dataTransfer.types || [] ).includes( 'Files' ) ) {
+					e.preventDefault();
+				}
+			};
+			window.addEventListener( 'dragover', keepFileDrops );
+			window.addEventListener( 'drop', keepFileDrops );
+			return () => {
+				window.removeEventListener( 'dragover', keepFileDrops );
+				window.removeEventListener( 'drop', keepFileDrops );
+			};
+		}, [] );
 		const dropScreen = state.step === 'source' && isDropSource();
 		let body;
-		if ( 'review' === state.step ) {
-			body = createElement( Review );
+		if ( 'duplicates' === state.step ) {
+			body = createElement( Duplicates );
 		} else if ( dropScreen ) {
 			body = createElement( Drop );
 		} else if ( state.step === 'source' ) {
@@ -676,7 +866,7 @@
 			body = createElement( Run );
 		}
 		return createElement( Fragment, null,
-			! dropScreen && ! state.direct && 'review' !== state.step ? createElement( Stepper ) : null,
+			! dropScreen && ! state.direct && 'duplicates' !== state.step ? createElement( Stepper ) : null,
 			state.error ? createElement( Notice, { type: 'error', message: state.error } ) : null,
 			body
 		);
@@ -684,12 +874,12 @@
 
 	function Stepper() {
 		const steps = [
-			[ 'source', isDropSource() ? 'Upload a file' : 'Choose a source' ],
-			[ 'map', 'Map fields' ],
-			[ 'run', 'Import' ],
+			[ 'source', isDropSource() ? __( 'Upload a file', 'migrateplus' ) : __( 'Choose a source', 'migrateplus' ) ],
+			[ 'map', __( 'Map fields', 'migrateplus' ) ],
+			[ 'run', __( 'Import', 'migrateplus' ) ],
 		];
 		const idx = steps.findIndex( ( s ) => s[ 0 ] === state.step );
-		return createElement( 'ol', { className: 'migrateplus-route', 'aria-label': 'Import steps' }, steps.map( ( s, i ) =>
+		return createElement( 'ol', { className: 'migrateplus-route', 'aria-label': __( 'Import steps', 'migrateplus' ) }, steps.map( ( s, i ) =>
 			createElement( 'li', {
 				key: s[ 0 ],
 				className: i === idx ? 'is-current' : ( i < idx ? 'is-done' : '' ),
@@ -705,7 +895,7 @@
 	function Source() {
 		const source = D.sources.find( ( s ) => s.id === state.sourceId );
 		return createElement( Fragment, null,
-			D.sources.length > 1 ? createElement( 'div', { className: 'migrateplus-tiles', role: 'radiogroup', 'aria-label': 'Source' }, D.sources.map( ( s ) =>
+			D.sources.length > 1 ? createElement( 'div', { className: 'migrateplus-tiles', role: 'radiogroup', 'aria-label': __( 'Source', 'migrateplus' ) }, D.sources.map( ( s ) =>
 				createElement( 'label', { key: s.id, className: 'migrateplus-tile' + ( s.id === state.sourceId ? ' is-selected' : '' ) },
 					createElement( 'input', { type: 'radio', name: 'migrateplus_source', value: s.id, checked: s.id === state.sourceId, onChange: () => {
 						state.sourceId = s.id;
@@ -731,8 +921,8 @@
 				),
 				createElement( 'div', { className: 'migrateplus-fields' }, source.schema.map( ( f ) => createElement( SourceField, { key: f.key, f } ) ) ),
 				createElement( 'footer', { className: 'migrateplus-panel-foot' },
-					createElement( 'p', { className: 'migrateplus-foot-note' }, 'Nothing is imported yet. You will see a preview and map the fields first.' ),
-					createElement( 'button', { type: 'submit', className: 'button button-primary migrateplus-btn-lg', disabled: state.busy }, 'Connect and preview' )
+					createElement( 'p', { className: 'migrateplus-foot-note' }, __( 'Nothing is imported yet. You will see a preview and map the fields first.', 'migrateplus' ) ),
+					createElement( 'button', { type: 'submit', className: 'button button-primary migrateplus-btn-lg', disabled: state.busy }, __( 'Connect and preview', 'migrateplus' ) )
 				)
 			)
 		);
@@ -765,10 +955,11 @@
 		return createElement( 'div', { className: 'migrateplus-field migrateplus-field-' + f.type },
 			createElement( 'label', { className: 'migrateplus-field-label', htmlFor: f.type === 'file' ? null : id },
 				f.label,
-				f.required ? createElement( 'span', { className: 'migrateplus-req' }, 'Required' ) : null ),
+				f.required ? createElement( 'span', { className: 'migrateplus-req' }, __( 'Required', 'migrateplus' ) ) : null ),
 			input,
 			f.help ? createElement( 'p', { className: 'migrateplus-field-help' }, f.help ) : null,
-			f.type === 'file' && f.remote === false ? createElement( 'p', { className: 'migrateplus-field-help' }, 'Max upload size: ' + D.maxUpload ) : null
+			/* translators: %s: the largest upload this server accepts, e.g. 8 MB */
+			f.type === 'file' && f.remote === false ? createElement( 'p', { className: 'migrateplus-field-help' }, sprintf( __( 'Max upload size: %s', 'migrateplus' ), D.maxUpload ) ) : null
 		);
 	}
 
@@ -813,46 +1004,53 @@
 				},
 			},
 				createElement( 'span', { className: 'dashicons dashicons-cloud-upload', 'aria-hidden': 'true' } ),
-				createElement( 'strong', null, 'Drop a JSON file (.json or .json.gz) here to import it' ),
-				createElement( 'span', { className: 'migrateplus-muted' }, 'A Migrate Plus export imports straight away. Other JSON files go to field mapping first.' ),
-				createElement( 'button', { type: 'button', className: 'button button-primary migrateplus-btn-lg', disabled: state.busy, onClick: () => input.current.click() }, 'Choose a JSON file' )
+				createElement( 'strong', null, __( 'Drop a JSON file (.json or .json.gz) here to import it', 'migrateplus' ) ),
+				createElement( 'span', { className: 'migrateplus-muted' }, __( 'A Migrate Plus export imports straight away. Other JSON files go to field mapping first.', 'migrateplus' ) ),
+				createElement( 'button', { type: 'button', className: 'button button-primary migrateplus-btn-lg', disabled: state.busy, onClick: () => input.current.click() }, __( 'Choose a JSON file', 'migrateplus' ) )
 			),
-			createElement( 'input', { ref: input, type: 'file', id: 'migrateplus-import-file', accept: field.accept || '', className: 'migrateplus-drop-input', 'aria-label': 'File to import', onChange: ( e ) => {
+			createElement( 'input', { ref: input, type: 'file', id: 'migrateplus-import-file', accept: field.accept || '', className: 'migrateplus-drop-input', 'aria-label': __( 'File to import', 'migrateplus' ), onChange: ( e ) => {
 				const file = e.target.files && e.target.files[ 0 ];
 				e.target.value = ''; // Choosing the same file again still fires change.
 				if ( file ) {
 					uploadFile( field, file );
 				}
 			} } ),
-			createElement( 'p', { className: 'migrateplus-import-limit' }, 'Maximum upload size: ' + D.maxUpload )
+			/* translators: %s: the largest upload this server accepts, e.g. 8 MB */
+			createElement( 'p', { className: 'migrateplus-import-limit' }, sprintf( __( 'Maximum upload size: %s', 'migrateplus' ), D.maxUpload ) )
 		);
 	}
 
-	/** Check the file type, then upload it. */
-	function uploadFile( field, file ) {
+	/** Whether a file can't be imported, because of its extension or its size. When so, the modal says why. */
+	function refuseUnfitFile( field, file ) {
 		const exts = ( field.accept || '' ).split( ',' ).map( ( a ) => a.trim().toLowerCase() ).filter( ( a ) => a.startsWith( '.' ) );
-		if ( exts.length && ! exts.some( ( x ) => file.name.toLowerCase().endsWith( x ) ) ) {
+		const refuse = ( title, note ) => {
 			modal.open( {
 				kind: 'preview',
 				bar: false,
-				title: 'This file can’t be imported',
+				title,
 				tone: 'error',
-				note: '“' + file.name + '” is not a ' + exts.join( ' or ' ) + ' file. Export one from Migrate Plus → Export on the other site.',
+				note,
 				dismissible: true,
-				actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
+				actions: [ { label: __( 'Close', 'migrateplus' ), primary: true, onClick: () => modal.close() } ],
 			} );
-			return;
+			return true;
+		};
+		if ( exts.length && ! exts.some( ( x ) => file.name.toLowerCase().endsWith( x ) ) ) {
+			/* translators: 1: file name, 2: the extensions accepted, e.g. ".json or .gz" */
+			return refuse( __( 'This file can’t be imported', 'migrateplus' ), sprintf( __( '“%1$s” is not a %2$s file. Export one from Migrate Plus → Export on the other site.', 'migrateplus' ), file.name, exts.join( ' ' + __( 'or', 'migrateplus' ) + ' ' ) ) );
 		}
 		if ( Number( D.maxUploadBytes ) && file.size > Number( D.maxUploadBytes ) ) {
-			modal.open( {
-				kind: 'preview',
-				bar: false,
-				title: 'This file is too large',
-				tone: 'error',
-				note: '“' + file.name + '” is ' + formatBytes( file.size ) + '. This server accepts uploads up to ' + D.maxUpload + '.' + ( D.zlib && ! /\.gz$/i.test( file.name ) ? ' Export it again with “Compress the file” on: a .json.gz is much smaller.' : '' ),
-				dismissible: true,
-				actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
-			} );
+			/* translators: 1: file name, 2: its size, 3: the largest upload this server accepts */
+			const note = sprintf( __( '“%1$s” is %2$s. This server accepts uploads up to %3$s.', 'migrateplus' ), file.name, formatBytes( file.size ), D.maxUpload );
+			const gzip = D.zlib && ! /\.gz$/i.test( file.name ) ? ' ' + __( 'Export it again with “Compress the file” on: a .json.gz is much smaller.', 'migrateplus' ) : '';
+			return refuse( __( 'This file is too large', 'migrateplus' ), note + gzip );
+		}
+		return false;
+	}
+
+	/** Check the file type and size, then upload it. */
+	function uploadFile( field, file ) {
+		if ( refuseUnfitFile( field, file ) ) {
 			return;
 		}
 		const fd = new FormData();
@@ -876,20 +1074,23 @@
 	 * the section type and how to count them ("3 terms", "the site settings").
 	 */
 	const SIDES = {
-		terms: { type: 'terms', one: 'term', many: 'terms', when: 'before' },
-		users: { type: 'users', one: 'user', many: 'users', when: 'before' },
-		acf_definitions: { type: 'acf_definitions', one: 'ACF definition', many: 'ACF definitions', when: 'before' },
-		acf_options: { type: 'acf_options', one: 'ACF options page', many: 'ACF options pages', when: 'after' },
-		site_settings: { type: 'site_settings', one: 'the site settings', many: 'the site settings', bare: true, when: 'after' },
-		menus: { type: 'nav_menu', one: 'menu', many: 'menus', when: 'after' },
-		orders: { type: 'orders', one: 'order', many: 'orders', when: 'after' },
+		/* translators: %s: number of ACF definitions (field groups, post types, taxonomies, options pages) */
+		acf_definitions: { type: 'acf_definitions', count: ( n ) => sprintf( _n( '%s ACF definition', '%s ACF definitions', n, 'migrateplus' ), n.toLocaleString() ), when: 'before' },
+		/* translators: %s: number of terms */
+		terms: { type: 'terms', count: ( n ) => sprintf( _n( '%s term', '%s terms', n, 'migrateplus' ), n.toLocaleString() ), when: 'before' },
+		/* translators: %s: number of ACF options pages */
+		acf_options: { type: 'acf_options', count: ( n ) => sprintf( _n( '%s ACF options page', '%s ACF options pages', n, 'migrateplus' ), n.toLocaleString() ), when: 'after' },
+		site_settings: { type: 'site_settings', count: () => __( 'the site settings', 'migrateplus' ), when: 'after' },
+		/* translators: %s: number of menus */
+		menus: { type: 'nav_menu', count: ( n ) => sprintf( _n( '%s menu', '%s menus', n, 'migrateplus' ), n.toLocaleString() ), when: 'after' },
+		/* translators: %s: number of orders */
+		orders: { type: 'orders', count: ( n ) => sprintf( _n( '%s order', '%s orders', n, 'migrateplus' ), n.toLocaleString() ), when: 'after' },
 	};
 	const SIDE_TYPES = Object.values( SIDES ).map( ( s ) => s.type );
 
 	/** "3 terms", "1 menu", "the site settings". */
 	function sideText( key, n ) {
-		const s = SIDES[ key ];
-		return s.bare ? s.one : n.toLocaleString() + ' ' + ( 1 === n ? s.one : s.many );
+		return SIDES[ key ].count( n );
 	}
 
 	/** The side sections in `counts` ({ terms: 3, menus: 1 }) as "3 terms and 1 menu", in import order. */
@@ -899,7 +1100,8 @@
 
 	/** "A, B and C". */
 	function joinAnd( parts ) {
-		return parts.length > 1 ? parts.slice( 0, -1 ).join( ', ' ) + ' and ' + parts[ parts.length - 1 ] : parts.join( '' );
+		/* translators: the end of a list, "A, B and C". 1: the items before the last, 2: the last item */
+		return parts.length > 1 ? sprintf( __( '%1$s and %2$s', 'migrateplus' ), parts.slice( 0, -1 ).join( ', ' ), parts[ parts.length - 1 ] ) : parts.join( '' );
 	}
 
 	/** The side sections a job's file holds, from its settings: { terms: 3, menus: 1 }. */
@@ -914,18 +1116,14 @@
 		return out;
 	}
 
-	/** "Media, Pages and Posts", from a job's sections or a list of labels. */
-	function listLabels( labels ) {
-		return labels.length > 1 ? labels.slice( 0, -1 ).join( ', ' ) + ' and ' + labels[ labels.length - 1 ] : labels.join( '' );
-	}
-
 	/** Progress per part of a MigratePlus export ("Media 12 of 12, Pages 3 of 10, Menus 0 of 2"), when it has more than one. */
 	function sectionsText( job ) {
 		const list = job.sections || [];
-		return list.length > 1 ? list.map( ( x ) => x.label + ' ' + Number( x.done ).toLocaleString() + ' of ' + Number( x.total ).toLocaleString() ).join( ', ' ) : '';
+		/* translators: progress of one part of an import. 1: the part, e.g. Pages, 2: items done, 3: items in it */
+		return list.length > 1 ? list.map( ( x ) => sprintf( __( '%1$s %2$s of %3$s', 'migrateplus' ), x.label, Number( x.done ).toLocaleString(), Number( x.total ).toLocaleString() ) ).join( ', ' ) : '';
 	}
 
-	/** The part being imported now: the job's side stage (terms, users, menus...), or the first one not done. */
+	/** The part being imported now: the job's side stage (terms, menus...), or the first one not done. */
 	function currentSection( job ) {
 		const list = job.sections || [];
 		if ( list.length < 2 || [ 'complete', 'rolled_back' ].includes( job.status ) ) {
@@ -937,7 +1135,7 @@
 
 	/**
 	 * Ask before importing a MigratePlus export straight away. With duplicates found
-	 * (d from checkDuplicates), the choice is whether to skip them.
+	 * (d from checkDuplicates), the next step is the duplicates screen instead of the import.
 	 */
 	function confirmImport( d ) {
 		const job = state.job;
@@ -947,48 +1145,65 @@
 		const menus = sides.menus || 0;
 		const parts = ( job.sections || [] ).filter( ( x ) => ! SIDE_TYPES.includes( x.type ) ).map( ( x ) => x.label );
 		// Which sections the options import; their import happens before or after the items.
-		const option = { terms: 'import_term_data', users: 'import_users', acf_definitions: 'import_acf_definitions', acf_options: 'import_acf_options', site_settings: 'import_site_settings', menus: 'import_menus', orders: 'import_orders' };
+		const option = { terms: 'import_term_data', acf_definitions: 'import_acf_definitions', acf_options: 'import_acf_options', site_settings: 'import_site_settings', menus: 'import_menus', orders: 'import_orders' };
 		const on = ( k ) => !! Number( state.options[ option[ k ] ] );
-		const before = sidesList( sides, ( k ) => 'before' === SIDES[ k ].when && on( k ) );
-		const after = sidesList( sides, ( k ) => 'after' === SIDES[ k ].when && on( k ) );
-		const beforeNote = before.length ? ' First ' + joinAnd( before ) + ( 1 === before.length && 1 === Number( sides[ Object.keys( SIDES ).find( ( k ) => 'before' === SIDES[ k ].when && on( k ) && sides[ k ] ) ] ) ? ' is' : ' are' ) + ' created or updated.' : '';
-		const afterNote = after.length ? ' Then ' + joinAnd( after ) + ( after.includes( 'the site settings' ) && 1 === after.length ? ' are applied.' : ' follow, linked to the imported content.' ) : '';
-		// An export of menus, terms, users or settings alone: nothing to map, no records.
-		const sidesOnly = ! total && Object.keys( sides ).length > 0;
-		let intro = ( from ? 'Exported from ' + from + '. ' : '' ) + ( isMultiType( job )
-			? listLabels( parts ) + ' are imported in that order, each as its own type, with the field mapping saved in the file.'
-			: 'Everything is imported as ' + postType( state.options.post_type ).label + ', with the field mapping saved in the file.' ) + beforeNote + afterNote;
+		const beforeKeys = Object.keys( SIDES ).filter( ( k ) => 'before' === SIDES[ k ].when && on( k ) && Number( sides[ k ] ) > 0 );
+		const afterKeys = Object.keys( SIDES ).filter( ( k ) => 'after' === SIDES[ k ].when && on( k ) && Number( sides[ k ] ) > 0 );
+		const before = joinAnd( beforeKeys.map( ( k ) => sideText( k, Number( sides[ k ] ) ) ) );
+		const after = joinAnd( afterKeys.map( ( k ) => sideText( k, Number( sides[ k ] ) ) ) );
+		/* translators: %s: what is imported before the items, e.g. "2 ACF definitions and 3 terms" */
+		const beforeNote = beforeKeys.length ? ' ' + sprintf( 1 === beforeKeys.length && 1 === Number( sides[ beforeKeys[ 0 ] ] ) ? __( 'First %s is created or updated.', 'migrateplus' ) : __( 'First %s are created or updated.', 'migrateplus' ), before ) : '';
+		/* translators: %s: what is imported after the items, e.g. "2 menus and the site settings" */
+		const afterNote = afterKeys.length ? ' ' + sprintf( 1 === afterKeys.length && 'site_settings' === afterKeys[ 0 ] ? __( 'Then %s are applied.', 'migrateplus' ) : __( 'Then %s follow, linked to the imported content.', 'migrateplus' ), after ) : '';
+		/* translators: %s: the site the file was exported from */
+		const fromNote = from ? sprintf( __( 'Exported from %s.', 'migrateplus' ), from ) + ' ' : '';
+		// An export of menus, terms or settings alone: nothing to map, no records.
+		const sidesOnly = ! needsAuthor( job );
+		let intro = fromNote + ( isMultiType( job )
+			/* translators: %s: the content types in the file, e.g. "Media, Pages and Posts" */
+			? sprintf( __( '%s are imported in that order, each as its own type, with the field mapping saved in the file.', 'migrateplus' ), joinAnd( parts ) )
+			/* translators: %s: a post type, e.g. Post */
+			: sprintf( __( 'Everything is imported as %s, with the field mapping saved in the file.', 'migrateplus' ), postType( state.options.post_type ).label ) ) + beforeNote + afterNote;
 		if ( sidesOnly ) {
 			const off = Object.keys( sides ).filter( ( k ) => ! on( k ) ).map( ( k ) => sideText( k, sides[ k ] ) );
-			intro = ( from ? 'Exported from ' + from + '. ' : '' ) + 'This file holds ' + joinAnd( sidesList( sides ) ) + ' only.' +
-				( menus ? ' Menu items link to the posts, pages and terms already on this site; an item whose target is not here is skipped.' : '' ) +
-				( off.length ? ' The import of ' + joinAnd( off ) + ' is off in Settings, so ' + ( 1 === off.length ? 'that part' : 'those parts' ) + ' would not be imported.' : '' );
+			/* translators: %s: what the file holds, e.g. "2 menus and 5 terms" */
+			intro = fromNote + sprintf( __( 'This file holds %s only.', 'migrateplus' ), joinAnd( sidesList( sides ) ) ) +
+				( menus ? ' ' + __( 'Menu items link to the posts, pages and terms already on this site; an item whose target is not here is skipped.', 'migrateplus' ) : '' ) +
+				/* translators: %s: the parts of the file whose import is off, e.g. "5 terms" */
+				( off.length ? ' ' + sprintf( _n( 'The import of %s is off in Settings, so that part would not be imported.', 'The import of %s is off in Settings, so those parts would not be imported.', off.length, 'migrateplus' ), joinAnd( off ) ) : '' );
 		}
 		// The mapping screen handles one post type; a file with several imports as it is, and menus or terms alone have nothing to map.
-		const review = isMultiType( job ) || sidesOnly ? [] : [ { label: 'Review mapping', onClick: () => {
+		const review = isMultiType( job ) || sidesOnly ? [] : [ { label: __( 'Review mapping', 'migrateplus' ), onClick: () => {
 			modal.close();
 			state.direct = false;
 			state.step = 'map';
 			render();
 		} } ];
-		const cancel = { label: 'Cancel', onClick: () => modal.close() };
+		const cancel = { label: __( 'Cancel', 'migrateplus' ), onClick: () => modal.close() };
 		const base = {
 			kind: 'confirm',
 			icon: 'file',
 			bar: false,
-			title: sidesOnly ? 'Import ' + joinAnd( sidesList( sides ) ) + '?' : 'Import ' + total.toLocaleString() + ' ' + ( 1 === total ? 'item' : 'items' ) + '?',
+			/* translators: %s: what the file holds, e.g. "2 menus" */
+			title: sidesOnly ? sprintf( __( 'Import %s?', 'migrateplus' ), joinAnd( sidesList( sides ) ) ) : sprintf( _n( 'Import %s item?', 'Import %s items?', total, 'migrateplus' ), total.toLocaleString() ),
 			dismissible: true,
 		};
+		const actions = () => ( d && d.count
+			? [ { label: __( 'Choose what to do with them', 'migrateplus' ), primary: true, onClick: () => openDuplicates( d, 'confirm' ) } ]
+			: [ { label: __( 'Import', 'migrateplus' ), primary: true, onClick: () => start( false, true ) } ] ).concat( review, [ cancel ] );
+		base.content = sidesOnly ? null : createElement( Fragment, null,
+			createElement( MainAuthorPicker, { id: 'migrateplus-modal-author', onPick: () => modal.update( {} ) } ),
+			review.length ? createElement( 'p', { className: 'migrateplus-help' }, __( 'To choose an author for each post or page, use Review mapping.', 'migrateplus' ) ) : null );
 		if ( d && d.count ) {
-			modal.open( Object.assign( base, duplicateSummary( d ), {
-				message: intro + ' ' + duplicateMessage( d ) + changedMessage( d ),
-				actions: duplicateActions( d, () => start( false, true ), () => confirmImport( d ) ).concat( review, [ cancel ] ),
+			modal.open( Object.assign( base, {
+				message: intro + ' ' + duplicateMessage( d ),
+				actions: actions(),
 			} ) );
 			return;
 		}
 		modal.open( Object.assign( base, {
-			message: intro + ' You can roll the import back from History.',
-			actions: [ { label: 'Import', primary: true, onClick: () => start( false, true ) } ].concat( review, [ cancel ] ),
+			message: intro + ' ' + __( 'You can roll the import back from History.', 'migrateplus' ),
+			actions: actions(),
 		} ) );
 	}
 
@@ -1012,193 +1227,304 @@
 		return api( 'duplicates', { job: state.job.id, mapping: mappingToSave(), options: state.options } );
 	}
 
-	/** "12 of them are already on this site…"; `of` names what the count is out of. */
-	function duplicateMessage( d, of ) {
+	/** "12 of them are already on this site.", for the export confirmation. */
+	function duplicateMessage( d ) {
 		const n = Number( d.count );
-		return n.toLocaleString() + ' ' + ( of || 'of them' ) + ( 1 === n ? ' is' : ' are' ) + ' already on this site. Skip them to import only the new items, or import everything anyway.';
+		/* translators: %s: items in the file already on this site */
+		return sprintf( _n( '%s of them is already on this site.', '%s of them are already on this site.', n, 'migrateplus' ), n.toLocaleString() ) + ' ' +
+			__( 'Next, choose which to update, skip or import as copies.', 'migrateplus' );
 	}
 
-	/** Count chips and a few examples for the duplicates dialog. */
-	function duplicateSummary( d ) {
-		const examples = ( d.examples || [] ).map( ( x ) => '“' + x.title + '” (#' + x.post_id + ')' );
-		const more = Number( d.count ) - examples.length;
-		return {
-			stats: [
-				{ key: 'created', value: Number( d.total ) - Number( d.count ), label: 'New' },
-				{ key: 'updated', value: d.before, label: 'Imported before' },
-				{ key: 'updated', value: d.existing, label: 'Same slug, SKU or file' },
-			].filter( ( s, i ) => 0 === i || Number( s.value ) ),
-			note: examples.length ? 'Already here: ' + examples.join( ', ' ) + ( more > 0 ? ' and ' + more.toLocaleString() + ' more' : '' ) + '.' : '',
+	/** How a duplicate was matched to the post on this site: "imported before" or "same slug". */
+	function matchedBy( it ) {
+		/* translators: %s: what matched, e.g. slug or SKU */
+		return 'before' === it.kind ? __( 'imported before', 'migrateplus' ) : sprintf( __( 'same %s', 'migrateplus' ), it.label );
+	}
+
+	// Rows per page on the duplicates screen.
+	const DUPLICATES_PAGE = 50;
+
+	/**
+	 * Open the duplicates screen for d (from checkDuplicates()). from is 'confirm' for the
+	 * confirmation of a dropped export, which Cancel goes back to; otherwise the step it came from.
+	 * Choices made for this job before, on a screen left with Back, are kept.
+	 */
+	function openDuplicates( d, from ) {
+		const prev = state.dups && state.dups.job === state.job.id ? state.dups : null;
+		modal.close();
+		state.dups = {
+			job: state.job.id,
+			d,
+			from,
+			back: state.step,
+			choices: prev ? prev.choices : new Map(), // Record index => choice; unset means the default.
+			rest: prev ? prev.rest : 'skip', // What happens to duplicates past the list, when it was cut short.
+			filter: 'all',
+			query: '',
+			page: 0,
+			open: new Set(), // Rows whose changes are shown.
 		};
+		state.step = 'duplicates';
+		render();
+		window.scrollTo( 0, 0 );
+	}
+
+	/** What a duplicate gets unless the user picks: an update for one that differs when the options say "Update them", otherwise a skip. */
+	function defaultChoice( it ) {
+		return ! it.media && it.changed && 'update' === state.options.duplicate ? 'update' : 'skip';
+	}
+
+	function choiceOf( it ) {
+		const v = state.dups.choices.get( it.index );
+		return v && ( it.media ? MEDIA_CHOICES : POST_CHOICES ).some( ( c ) => c[ 0 ] === v ) ? v : defaultChoice( it );
+	}
+
+	const POST_CHOICES = [ [ 'update', __( 'Update', 'migrateplus' ) ], [ 'skip', __( 'Skip', 'migrateplus' ) ], [ 'copy', __( 'Import as copy', 'migrateplus' ) ] ];
+	const MEDIA_CHOICES = [ [ 'update', __( 'Update details', 'migrateplus' ) ], [ 'replace', __( 'Replace file', 'migrateplus' ) ], [ 'skip', __( 'Skip', 'migrateplus' ) ] ];
+
+	/** How many records each choice covers, the duplicates past the list included. */
+	function duplicateCounts() {
+		const { d, rest } = state.dups;
+		const items = d.items || [];
+		const c = { created: Number( d.total ) - Number( d.count ), update: 0, skip: 0, copy: 0, details: 0, replace: 0 };
+		items.forEach( ( it ) => {
+			const v = choiceOf( it );
+			if ( it.media && 'update' === v ) {
+				c.details++;
+			} else {
+				c[ v ]++;
+			}
+		} );
+		c[ rest ] += Math.max( 0, Number( d.count ) - items.length );
+		return c;
+	}
+
+	/** "Import 12 new items, update 5, skip 3." */
+	function duplicatePlan( c ) {
+		/* translators: %s: number of new items */
+		const parts = [ sprintf( _n( 'Import %s new item', 'Import %s new items', c.created, 'migrateplus' ), c.created.toLocaleString() ) ];
+		/* translators: %s: number of items already on this site that are updated */
+		[ [ c.update, _n( 'update %s', 'update %s', c.update, 'migrateplus' ) ],
+			/* translators: %s: number of items imported again as copies */
+			[ c.copy, _n( 'import %s as a copy', 'import %s as copies', c.copy, 'migrateplus' ) ],
+			/* translators: %s: number of media files whose details are updated */
+			[ c.details, _n( 'update the details of %s media file', 'update the details of %s media files', c.details, 'migrateplus' ) ],
+			/* translators: %s: number of media files replaced */
+			[ c.replace, _n( 'replace %s file', 'replace %s files', c.replace, 'migrateplus' ) ],
+			/* translators: %s: number of items skipped */
+			[ c.skip, _n( 'skip %s', 'skip %s', c.skip, 'migrateplus' ) ],
+		].forEach( ( [ n, text ] ) => n && parts.push( sprintf( text, n.toLocaleString() ) ) );
+		return parts.join( ', ' ) + '.';
 	}
 
 	/**
-	 * "Review changes" (when some duplicates differ from what is here) / "Skip duplicates" /
-	 * "Import anyway". Records imported before keep "Update them" when that was chosen in
-	 * the options; otherwise skipping or copying covers both kinds.
+	 * The choices as the options the server reads. Each listed duplicate is named in update_ids,
+	 * replace_ids or copy_ids, or skipped: by skip_existing for a match by slug, SKU or file, and
+	 * for one imported before by the duplicate option, which stays as chosen when every such row
+	 * agrees with it. A list cut short also names the skipped ones, and duplicate_rest says what
+	 * becomes of the duplicates past it.
 	 */
-	function duplicateActions( d, go, reopen ) {
-		const choose = ( skip, updateIds, replaceIds, copyIds ) => {
-			const update = state.options.duplicate === 'update';
-			state.options.skip_existing = skip ? 1 : 0;
-			state.options.duplicate = update ? 'update' : ( skip ? 'skip' : 'create' );
-			state.options.update_ids = updateIds || [];
-			state.options.replace_ids = replaceIds || [];
-			state.options.copy_ids = copyIds || [];
-			go();
+	function duplicateOptions() {
+		const { d, rest } = state.dups;
+		const items = d.items || [];
+		const lists = { update: [], replace: [], copy: [], skip: [] };
+		items.forEach( ( it ) => lists[ choiceOf( it ) ].push( it.post_id ) );
+		const natural = { update: 'update', create: 'copy' }[ state.options.duplicate ] || 'skip';
+		const agree = items.every( ( it ) => 'before' !== it.kind || choiceOf( it ) === natural );
+		const out = {
+			skip_existing: 1,
+			duplicate: agree ? state.options.duplicate : 'skip',
+			update_ids: lists.update,
+			replace_ids: lists.replace,
+			copy_ids: lists.copy,
+			skip_ids: [],
+			duplicate_rest: '',
 		};
-		const posts = ( d.changed || [] ).length;
-		const images = ( d.images || [] ).length;
-		const changed = posts + images;
-		const actions = [
-			{ label: 'Skip duplicates', primary: ! changed, onClick: () => choose( true ) },
-			{ label: 'Import anyway', onClick: () => choose( false ) },
-		];
-		if ( changed ) {
-			const noun = ! posts ? ( 1 === images ? ' image' : ' images' ) : ( ! images ? ( 1 === posts ? ' change' : ' changes' ) : ' items' );
-			actions.unshift( { label: 'Review ' + changed + noun, primary: true, onClick: () => {
-				modal.close();
-				state.review = {
-					d,
-					selected: new Set(),
-					media: new Map(), // attachment id => 'update' | 'replace'; unset means skip.
-					back: state.step,
-					reopen,
-					apply: ( ids, replaceIds, copyIds ) => choose( true, ids, replaceIds, copyIds ),
-				};
-				state.step = 'review';
-				render();
-				window.scrollTo( 0, 0 );
-			} } );
+		if ( d.items_truncated ) {
+			out.duplicate = state.options.duplicate;
+			out.skip_ids = lists.skip;
+			out.duplicate_rest = rest;
 		}
-		return actions;
+		return out;
 	}
 
-	function changedMessage( d ) {
-		const n = ( d.changed || [] ).length;
-		const m = ( d.images || [] ).length;
-		return ( n ? ' ' + n.toLocaleString() + ( 1 === n ? ' of them differs' : ' of them differ' ) + ' from what is here: review the changes to choose which to update.' : '' ) +
-			( m ? ' ' + m.toLocaleString() + ( 1 === m ? ' is media' : ' are media' ) + ': compare ' + ( 1 === m ? 'it' : 'them' ) + ' with the copy on this site to update the details or replace the file.' : '' );
+	/** Whether a duplicate passes the screen's filter and title search. */
+	function duplicateShown( it, filter, query ) {
+		const pass = {
+			all: true,
+			differs: it.changed,
+			unchanged: ! it.changed,
+			before: 'before' === it.kind,
+			existing: 'existing' === it.kind,
+			media: !! it.media,
+		}[ filter ];
+		const q = query.trim().toLowerCase();
+		return pass && ( ! q || ( it.title + '\n' + it.existing_title ).toLowerCase().includes( q ) );
+	}
+
+	/** Both copies of a media duplicate side by side. */
+	function MediaCompare( { it } ) {
+		const m = it.media;
+		const mediaFigure = ( src, href, caption ) => createElement( 'figure', { className: 'migrateplus-media-pick' },
+			src && m.is_image
+				/* translators: 1: where the copy is, e.g. On this site, 2: the image title */
+				? createElement( 'a', { href: safeUrl( href ), target: '_blank', rel: 'noopener' }, createElement( 'img', { src: safeUrl( src ), alt: sprintf( __( '%1$s: %2$s', 'migrateplus' ), caption, it.title || __( 'image', 'migrateplus' ) ), loading: 'lazy' } ) )
+				: createElement( 'span', { className: 'migrateplus-media-file' }, ( href || '' ).split( '/' ).pop() || __( '(no preview)', 'migrateplus' ) ),
+			createElement( 'figcaption', null, caption ) );
+		return createElement( 'div', { className: 'migrateplus-media-compare' },
+			mediaFigure( m.current, m.current_full, __( 'On this site', 'migrateplus' ) ),
+			mediaFigure( m.imported_preview || m.imported, m.imported, __( 'In the import', 'migrateplus' ) ) );
 	}
 
 	/**
-	 * Review screen: each duplicate that differs from the post on this site, with what
-	 * would change. Only the ticked ones are updated; every other duplicate is skipped.
+	 * Every record already on this site, with what to do with each: update it, skip it or
+	 * import it as a copy (media: update its details, replace its file or skip it), and
+	 * what the import will do with the choices as they stand.
 	 */
-	function Review() {
-		const r = state.review;
-		const items = r.d.changed || [];
-		const images = r.d.images || [];
-		const n = r.selected.size + r.media.size;
-		const setAll = ( on ) => {
-			items.forEach( ( it ) => ( on ? r.selected.add( it.post_id ) : r.selected.delete( it.post_id ) ) );
+	function Duplicates() {
+		const s = state.dups;
+		const d = s.d;
+		const items = d.items || [];
+		const shown = items.filter( ( it ) => duplicateShown( it, s.filter, s.query ) );
+		const pages = Math.max( 1, Math.ceil( shown.length / DUPLICATES_PAGE ) );
+		const page = Math.min( s.page, pages - 1 );
+		const rows = shown.slice( page * DUPLICATES_PAGE, ( page + 1 ) * DUPLICATES_PAGE );
+		const c = duplicateCounts();
+		const set = ( list, v ) => {
+			list.forEach( ( it ) => s.choices.set( it.index, v ) );
 			render();
 		};
-		const setAllMedia = ( v ) => {
-			images.forEach( ( it ) => ( 'skip' === v ? r.media.delete( it.post_id ) : r.media.set( it.post_id, v ) ) );
+		const posts = shown.filter( ( it ) => ! it.media );
+		const media = shown.filter( ( it ) => it.media );
+		const rest = Number( d.count ) - items.length;
+		const leave = () => {
+			state.step = s.back;
 			render();
 		};
-		const importSelected = () => {
-			const ids = Array.from( r.selected );
-			const lists = { update: ids, replace: [], copy: [] };
-			r.media.forEach( ( v, id ) => lists[ v ].push( id ) );
-			state.step = r.back;
-			state.review = null;
-			r.apply( ids, lists.replace, lists.copy );
-		};
+		const chips = [
+			[ 'created', c.created, __( 'New', 'migrateplus' ) ],
+			[ 'updated', c.update, __( 'Will update', 'migrateplus' ) ],
+			[ 'skipped', c.skip, __( 'Skipped', 'migrateplus' ) ],
+			[ 'copied', c.copy, __( 'Imported as copies', 'migrateplus' ) ],
+		].concat( items.some( ( it ) => it.media ) ? [ [ 'updated', c.details, __( 'Update details', 'migrateplus' ) ], [ 'replaced', c.replace, __( 'Replace file', 'migrateplus' ) ] ] : [] );
+		const filters = [
+			[ 'all', __( 'All', 'migrateplus' ) ],
+			[ 'differs', __( 'Differs', 'migrateplus' ) ],
+			[ 'unchanged', __( 'Unchanged', 'migrateplus' ) ],
+			[ 'before', __( 'Imported before', 'migrateplus' ) ],
+			[ 'existing', __( 'Same slug, SKU or file', 'migrateplus' ) ],
+			[ 'media', __( 'Media', 'migrateplus' ) ],
+		];
+		const bulk = ( label, list, v ) => createElement( 'button', { type: 'button', className: 'button button-small', disabled: ! list.length, onClick: () => set( list, v ) }, label );
 
 		return createElement( Fragment, null,
-			items.length ? createElement( 'section', { className: 'migrateplus-panel migrateplus-review-head' },
-				createElement( 'h2', null, 'Review changes' ),
-				createElement( 'p', null, items.length + ( 1 === items.length ? ' item in this import is' : ' items in this import are' ) + ' already on this site and differ from it. Tick the ones to update with the imported version. Everything else that is already here is skipped.' ),
-				createElement( 'p', { className: 'migrateplus-muted' }, 'Custom fields, terms and images are updated too and are not shown here. WordPress keeps a revision of each post or page that is updated, so you can restore the old version from the editor.' ),
-				createElement( 'div', { className: 'migrateplus-review-tools' },
-					createElement( 'button', { type: 'button', className: 'button button-small', onClick: () => setAll( true ) }, 'Select all' ),
-					createElement( 'button', { type: 'button', className: 'button button-small', onClick: () => setAll( false ) }, 'Select none' ) )
-			) : null,
-			createElement( 'ol', { className: 'migrateplus-review' }, items.map( ( it, i ) => {
-				const id = 'migrateplus-review-' + it.post_id;
-				const fields = Object.keys( it.changes ).map( ( k ) => it.changes[ k ] );
-				return createElement( 'li', { key: it.post_id, className: 'migrateplus-panel migrateplus-review-item' },
-					createElement( 'div', { className: 'migrateplus-review-row' },
-						createElement( 'input', { type: 'checkbox', id, value: it.post_id, checked: r.selected.has( it.post_id ), onChange: ( e ) => {
-							if ( e.target.checked ) {
-								r.selected.add( it.post_id );
-							} else {
-								r.selected.delete( it.post_id );
-							}
-							render();
-						} } ),
-						createElement( 'label', { htmlFor: id },
-							createElement( 'strong', null, it.title || '(untitled)' ),
-							createElement( 'span', { className: 'migrateplus-muted' }, it.type + ' #' + it.post_id + ' · ' + ( 'before' === it.kind ? 'imported before' : 'same ' + it.label ) + ' · changes: ' + fields.map( ( f ) => f.label.toLowerCase() ).join( ', ' ) ) )
-					),
-					createElement( 'details', { className: 'migrateplus-review-body', open: i < 3 },
-						createElement( 'summary', null, 'Show changes' ),
-						createElement( FieldChanges, { fields } ) )
-				);
-			} ) ),
-			images.length ? createElement( 'section', { className: 'migrateplus-panel migrateplus-review-head' },
-				createElement( 'h2', null, 'Compare media' ),
-				createElement( 'p', null, images.length + ( 1 === images.length ? ' file in this import is' : ' files in this import are' ) + ' already in the Media Library. For each one, choose what to do. Skipped files are left as they are.' ),
-				createElement( 'p', { className: 'migrateplus-muted' }, '"Update details" keeps the file on this site and copies the title, caption, description and alt text. "Replace image" also swaps in the imported file, in the same Media Library item, so pages that use it show the new image. A replaced file cannot be rolled back. "Keep both" adds the imported file as a new item and leaves this one alone.' ),
-				createElement( 'div', { className: 'migrateplus-review-tools' },
-					createElement( 'button', { type: 'button', className: 'button button-small', onClick: () => setAllMedia( 'skip' ) }, 'Skip all' ),
-					createElement( 'button', { type: 'button', className: 'button button-small', onClick: () => setAllMedia( 'update' ) }, 'Update all details' ),
-					createElement( 'button', { type: 'button', className: 'button button-small', onClick: () => setAllMedia( 'replace' ) }, 'Replace all' ),
-					createElement( 'button', { type: 'button', className: 'button button-small', onClick: () => setAllMedia( 'copy' ) }, 'Keep both for all' ) )
-			) : null,
-			images.length ? createElement( 'ol', { className: 'migrateplus-review' }, images.map( ( it ) => createElement( ReviewMedia, { key: it.post_id, it, r } ) ) ) : null,
-			createElement( 'div', { className: 'migrateplus-actionbar' },
-				createElement( 'span', { className: 'migrateplus-actionbar-status', 'aria-live': 'polite' }, n + ' of ' + ( items.length + images.length ) + ' selected' ),
-				createElement( 'div', { className: 'migrateplus-actionbar-buttons' },
-					createElement( 'button', { type: 'button', className: 'button', onClick: () => {
-						state.step = r.back;
-						state.review = null;
-						render();
-						r.reopen();
-					} }, 'Back' ),
-					createElement( 'button', { type: 'button', className: 'button button-primary', onClick: importSelected }, n ? 'Import with ' + n + ' selected' : 'Import without updating' ) )
-			)
-		);
-	}
-
-	/** One media duplicate: both copies side by side, and what to do with it. */
-	function ReviewMedia( { it, r } ) {
-		const fields = Object.keys( it.changes ).map( ( k ) => it.changes[ k ] );
-		const mediaChoice = ( v, label ) => {
-			const id = 'migrateplus-media-' + it.post_id + '-' + v;
-			return createElement( 'label', { className: 'migrateplus-check-chip', htmlFor: id },
-				createElement( 'input', { type: 'radio', id, name: 'migrateplus-media-' + it.post_id, value: v, checked: ( r.media.get( it.post_id ) || 'skip' ) === v, onChange: () => {
-					if ( 'skip' === v ) {
-						r.media.delete( it.post_id );
-					} else {
-						r.media.set( it.post_id, v );
-					}
-					render();
-				} } ),
-				createElement( 'span', null, label ) );
-		};
-		const mediaFigure = ( src, href, caption ) => createElement( 'figure', { className: 'migrateplus-media-pick' },
-			src && it.is_image
-				? createElement( 'a', { href: safeUrl( href ), target: '_blank', rel: 'noopener' }, createElement( 'img', { src: safeUrl( src ), alt: caption + ': ' + ( it.title || 'image' ), loading: 'lazy' } ) )
-				: createElement( 'span', { className: 'migrateplus-media-file' }, ( href || '' ).split( '/' ).pop() || '(no preview)' ),
-			createElement( 'figcaption', null, caption ) );
-		return createElement( 'li', { className: 'migrateplus-panel migrateplus-review-item' },
-			createElement( 'div', { className: 'migrateplus-review-row' },
-				createElement( 'div', { className: 'migrateplus-review-title' },
-					createElement( 'strong', null, it.title || '(untitled)' ),
-					createElement( 'span', { className: 'migrateplus-muted' }, 'Media #' + it.post_id + ' · ' + ( 'before' === it.kind ? 'imported before' : 'same ' + it.label ) + ( fields.length ? ' · details differ: ' + fields.map( ( f ) => f.label.toLowerCase() ).join( ', ' ) : ' · same details' ) ) )
+			createElement( 'section', { className: 'migrateplus-panel migrateplus-dups-head' },
+				createElement( 'h2', null, __( 'Items already on this site', 'migrateplus' ) ),
+				/* translators: 1: records already on this site, 2: records in the import */
+				createElement( 'p', null, sprintf( _n( '%1$s of %2$s records is already on this site. Choose what to do with it.', '%1$s of %2$s records are already on this site. Choose what to do with each.', Number( d.count ), 'migrateplus' ), Number( d.count ).toLocaleString(), Number( d.total ).toLocaleString() ) ),
+				createElement( 'ul', { className: 'migrateplus-legend migrateplus-dups-chips' }, chips.map( ( [ key, value, label ], i ) =>
+					createElement( 'li', { key: i, className: 'is-' + key + ( value ? '' : ' is-zero' ) },
+						createElement( 'strong', null, value.toLocaleString() ),
+						createElement( 'span', null, label ) ) ) ),
+				createElement( 'p', { className: 'migrateplus-dups-plan', 'aria-live': 'polite' }, duplicatePlan( c ) ),
+				createElement( 'p', { className: 'migrateplus-muted' }, __( 'An update also writes the custom fields, terms and images. WordPress keeps a revision of each post or page it updates, so the old version can be restored from the editor. A replaced file cannot be rolled back.', 'migrateplus' ) )
 			),
-			createElement( 'div', { className: 'migrateplus-media-compare' },
-				mediaFigure( it.current, it.current_full, 'On this site' ),
-				mediaFigure( it.imported_preview || it.imported, it.imported, 'In the import' ) ),
-			createElement( 'div', { className: 'migrateplus-chips', role: 'radiogroup', 'aria-label': 'What to do with ' + ( it.title || 'this file' ) },
-				mediaChoice( 'skip', 'Skip' ),
-				mediaChoice( 'update', 'Update details' ),
-				mediaChoice( 'replace', 'Replace image' ),
-				mediaChoice( 'copy', 'Keep both' ) ),
-			fields.length ? createElement( 'details', { className: 'migrateplus-review-body' }, createElement( 'summary', null, 'Show detail changes' ), createElement( FieldChanges, { fields } ) ) : null
+			createElement( 'section', { className: 'migrateplus-panel migrateplus-dups' },
+				createElement( 'div', { className: 'migrateplus-dups-tools' },
+					createElement( 'label', { htmlFor: 'migrateplus-dups-filter' }, __( 'Show', 'migrateplus' ) ),
+					createElement( 'select', { id: 'migrateplus-dups-filter', value: s.filter, onChange: ( e ) => {
+						s.filter = e.target.value;
+						s.page = 0;
+						render();
+					} }, filters.map( ( [ v, l ] ) => createElement( 'option', { key: v, value: v }, l ) ) ),
+					createElement( 'input', { type: 'search', id: 'migrateplus-dups-search', value: s.query, placeholder: __( 'Search titles', 'migrateplus' ), 'aria-label': __( 'Search duplicates by title', 'migrateplus' ), onChange: ( e ) => {
+						s.query = e.target.value;
+						s.page = 0;
+						render();
+					} } ) ),
+				createElement( 'div', { className: 'migrateplus-dups-bulk' },
+					/* translators: %s: number of rows the filter shows */
+					createElement( 'span', { className: 'migrateplus-muted' }, sprintf( _n( 'Applies to the %s row shown:', 'Applies to the %s rows shown:', shown.length, 'migrateplus' ), shown.length.toLocaleString() ) ),
+					bulk( __( 'Update all that differ', 'migrateplus' ), posts.filter( ( it ) => it.changed ), 'update' ),
+					bulk( __( 'Skip all', 'migrateplus' ), posts, 'skip' ),
+					bulk( __( 'Import all as copies', 'migrateplus' ), posts, 'copy' ),
+					media.length ? bulk( __( 'Update details for all', 'migrateplus' ), media, 'update' ) : null,
+					media.length ? bulk( __( 'Replace all files', 'migrateplus' ), media, 'replace' ) : null,
+					media.length ? bulk( __( 'Skip all media', 'migrateplus' ), media, 'skip' ) : null ),
+				rows.length ? createElement( 'table', { className: 'migrateplus-map-table migrateplus-dups-table' },
+					createElement( 'caption', { className: 'screen-reader-text' }, __( 'Items already on this site', 'migrateplus' ) ),
+					createElement( 'thead', null, createElement( 'tr', null,
+						createElement( 'th', { scope: 'col' }, __( 'In the file', 'migrateplus' ) ),
+						createElement( 'th', { scope: 'col' }, __( 'On this site', 'migrateplus' ) ),
+						createElement( 'th', { scope: 'col' }, __( 'Why it matched', 'migrateplus' ) ),
+						createElement( 'th', { scope: 'col' }, __( 'Status', 'migrateplus' ) ),
+						createElement( 'th', { scope: 'col' }, __( 'What to do', 'migrateplus' ) ) ) ),
+					createElement( 'tbody', null, rows.flatMap( ( it ) => {
+						const open = s.open.has( it.index );
+						const id = 'migrateplus-dup-' + it.index;
+						const view = it.view_url ? safeUrl( it.view_url ) : null;
+						const edit = it.edit_url ? safeUrl( it.edit_url ) : null;
+						const fields = Object.keys( it.changes || {} ).map( ( k ) => it.changes[ k ] );
+						const title = it.title || __( '(untitled)', 'migrateplus' );
+						const row = createElement( 'tr', { key: it.index, className: open ? 'is-open' : '' },
+							createElement( 'td', { className: 'migrateplus-dups-title' }, title ),
+							createElement( 'td', null,
+								view ? createElement( 'a', { href: view, target: '_blank', rel: 'noopener' }, it.existing_title || __( '(untitled)', 'migrateplus' ) ) : ( it.existing_title || __( '(untitled)', 'migrateplus' ) ),
+								/* translators: 1: post type, 2: post ID */
+								createElement( 'span', { className: 'migrateplus-help' }, sprintf( __( '%1$s #%2$s', 'migrateplus' ), it.type, it.post_id ),
+									/* translators: %s: the title of the item on this site */
+									edit ? [ ' · ', createElement( 'a', { key: 'edit', href: edit, target: '_blank', rel: 'noopener', 'aria-label': sprintf( __( 'Edit “%s”', 'migrateplus' ), it.existing_title ) }, __( 'Edit', 'migrateplus' ) ) ] : null ) ),
+							createElement( 'td', null, matchedBy( it ) ),
+							createElement( 'td', null,
+								createElement( 'span', { className: 'migrateplus-badge' + ( it.changed ? ' migrateplus-badge-differs' : '' ) }, it.changed ? __( 'Differs', 'migrateplus' ) : __( 'Unchanged', 'migrateplus' ) ),
+								it.changed || it.media ? createElement( 'button', { type: 'button', className: 'button-link migrateplus-dups-toggle', 'aria-expanded': open ? 'true' : 'false', 'aria-controls': id + '-changes', onClick: () => {
+									if ( open ) {
+										s.open.delete( it.index );
+									} else {
+										s.open.add( it.index );
+									}
+									render();
+								} }, it.changed ? __( 'Show changes', 'migrateplus' ) : __( 'Compare files', 'migrateplus' ) ) : null ),
+							createElement( 'td', null,
+								/* translators: %s: the title of a record in the file */
+								createElement( 'label', { className: 'screen-reader-text', htmlFor: id }, sprintf( __( 'What to do with “%s”', 'migrateplus' ), title ) ),
+								createElement( 'select', { id, value: choiceOf( it ), onChange: ( e ) => set( [ it ], e.target.value ) },
+									( it.media ? MEDIA_CHOICES : POST_CHOICES ).map( ( [ v, l ] ) => createElement( 'option', { key: v, value: v }, l ) ) ) ) );
+						return open ? [ row, createElement( 'tr', { key: it.index + '-changes', className: 'migrateplus-dups-changes' },
+							createElement( 'td', { colSpan: 5, id: id + '-changes' },
+								it.media ? createElement( MediaCompare, { it } ) : null,
+								fields.length ? createElement( FieldChanges, { fields } ) : null ) ) ] : [ row ];
+					} ) ) ) : createElement( 'p', { className: 'migrateplus-muted' }, __( 'No duplicates match.', 'migrateplus' ) ),
+				pages > 1 ? createElement( 'div', { className: 'migrateplus-authors-paging' },
+					createElement( 'button', { type: 'button', className: 'button', disabled: ! page, onClick: () => {
+						s.page = page - 1;
+						render();
+					} }, __( 'Previous', 'migrateplus' ) ),
+					/* translators: 1: first row shown, 2: last row shown, 3: rows in all */
+					createElement( 'span', { className: 'migrateplus-muted' }, sprintf( __( '%1$s–%2$s of %3$s', 'migrateplus' ), ( page * DUPLICATES_PAGE + 1 ).toLocaleString(), ( page * DUPLICATES_PAGE + rows.length ).toLocaleString(), shown.length.toLocaleString() ) ),
+					createElement( 'button', { type: 'button', className: 'button', disabled: page >= pages - 1, onClick: () => {
+						s.page = page + 1;
+						render();
+					} }, __( 'Next', 'migrateplus' ) ) ) : null,
+				d.items_truncated ? createElement( 'div', { className: 'migrateplus-opt migrateplus-dups-rest' },
+					/* translators: 1: rows listed, 2: duplicates in all */
+					createElement( 'p', { className: 'migrateplus-help' }, sprintf( __( 'Showing the first %1$s of %2$s.', 'migrateplus' ), items.length.toLocaleString(), Number( d.count ).toLocaleString() ) ),
+					/* translators: %s: number of duplicates not listed */
+					createElement( 'label', { className: 'migrateplus-opt-label', htmlFor: 'migrateplus-dups-rest' }, sprintf( _n( 'For the other %s duplicate:', 'For the other %s duplicates:', rest, 'migrateplus' ), rest.toLocaleString() ) ),
+					createElement( 'select', { id: 'migrateplus-dups-rest', value: s.rest, onChange: ( e ) => {
+						s.rest = e.target.value;
+						render();
+					} },
+						createElement( 'option', { value: 'skip' }, __( 'Skip', 'migrateplus' ) ),
+						createElement( 'option', { value: 'update' }, __( 'Update', 'migrateplus' ) ),
+						createElement( 'option', { value: 'copy' }, __( 'Import as copies', 'migrateplus' ) ) ) ) : null
+			),
+			createElement( 'div', { className: 'migrateplus-actionbar' },
+				createElement( 'span', { className: 'migrateplus-actionbar-status' }, duplicatePlan( c ) ),
+				createElement( 'div', { className: 'migrateplus-actionbar-buttons' },
+					createElement( 'button', { type: 'button', className: 'button', onClick: leave }, 'confirm' === s.from ? __( 'Cancel', 'migrateplus' ) : ( 'map' === s.back ? __( 'Back to mapping', 'migrateplus' ) : __( 'Back', 'migrateplus' ) ) ),
+					'map' === s.back ? createElement( 'button', { type: 'button', className: 'button', disabled: state.busy, title: __( 'Process everything without saving, to check the mapping', 'migrateplus' ), onClick: () => start( true ) }, __( 'Dry run', 'migrateplus' ) ) : null,
+					createElement( 'button', { type: 'button', className: 'button button-primary', disabled: state.busy, onClick: () => start( false, true, duplicateOptions() ) }, __( 'Import', 'migrateplus' ) ) ) )
 		);
 	}
 
@@ -1209,8 +1535,8 @@
 			f.old.includes( '\n' ) || f.new.includes( '\n' ) || f.old.length + f.new.length > 160
 				? createElement( DiffView, { oldText: f.old, newText: f.new } )
 				: createElement( 'dl', { className: 'migrateplus-review-swap' },
-					createElement( 'dt', null, 'Now' ), createElement( 'dd', { className: 'is-old' }, f.old || '(empty)' ),
-					createElement( 'dt', null, 'Imported' ), createElement( 'dd', { className: 'is-new' }, f.new || '(empty)' ) )
+					createElement( 'dt', null, __( 'Now', 'migrateplus' ) ), createElement( 'dd', { className: 'is-old' }, f.old || __( '(empty)', 'migrateplus' ) ),
+					createElement( 'dt', null, __( 'Imported', 'migrateplus' ) ), createElement( 'dd', { className: 'is-new' }, f.new || __( '(empty)', 'migrateplus' ) ) )
 		) ) );
 	}
 
@@ -1273,7 +1599,8 @@
 		let folded = 0;
 		const addFoldedLines = ( k ) => {
 			if ( folded ) {
-				out.push( createElement( 'li', { key: 'fold-' + k, className: 'is-fold' }, '⋯ ' + folded + ( 1 === folded ? ' unchanged line' : ' unchanged lines' ) ) );
+				/* translators: %s: number of unchanged lines folded away */
+				out.push( createElement( 'li', { key: 'fold-' + k, className: 'is-fold' }, '⋯ ' + sprintf( _n( '%s unchanged line', '%s unchanged lines', folded, 'migrateplus' ), folded ) ) );
 				folded = 0;
 			}
 		};
@@ -1284,8 +1611,10 @@
 			}
 			addFoldedLines( k );
 			const kind = { ' ': 'is-same', '-': 'is-old', '+': 'is-new' }[ row[ 0 ] ];
+			// The sign is drawn for the eye; screen readers ignore aria-label on a span, so they get the word as hidden text.
 			out.push( createElement( 'li', { key: k, className: kind },
-				createElement( 'span', { className: 'migrateplus-diff-sign', 'aria-label': { ' ': 'Unchanged', '-': 'Removed', '+': 'Added' }[ row[ 0 ] ] }, ' ' === row[ 0 ] ? '' : ( '-' === row[ 0 ] ? '−' : '+' ) ),
+				createElement( 'span', { className: 'migrateplus-diff-sign', 'aria-hidden': 'true' }, ' ' === row[ 0 ] ? '' : ( '-' === row[ 0 ] ? '−' : '+' ) ),
+				' ' === row[ 0 ] ? null : createElement( 'span', { className: 'screen-reader-text' }, '-' === row[ 0 ] ? __( 'Removed:', 'migrateplus' ) : __( 'Added:', 'migrateplus' ) ),
 				createElement( 'span', null, row[ 1 ] || ' ' ) ) );
 		} );
 		addFoldedLines( rows.length );
@@ -1305,7 +1634,8 @@
 		const isUrl = f.remote !== false && 'url' === state.fileMode[ modeKey ];
 		const showFile = () => {
 			const file = upload.current.files && upload.current.files[ 0 ];
-			setChosen( file ? file.name + ' (' + formatBytes( file.size ) + ')' : '' );
+			/* translators: 1: file name, 2: file size */
+			setChosen( file ? sprintf( __( '%1$s (%2$s)', 'migrateplus' ), file.name, formatBytes( file.size ) ) : '' );
 		};
 		const markDragging = ( e ) => {
 			e.preventDefault();
@@ -1318,7 +1648,11 @@
 			htmlFor: id,
 			onDragEnter: markDragging,
 			onDragOver: markDragging,
-			onDragLeave: () => setDragging( false ),
+			onDragLeave: ( e ) => {
+				if ( ! e.currentTarget.contains( e.relatedTarget ) ) {
+					setDragging( false );
+				}
+			},
 			onDragEnd: () => setDragging( false ),
 			onDrop: ( e ) => {
 				e.preventDefault();
@@ -1333,8 +1667,9 @@
 			createElement( 'input', { ref: upload, id, name, type: 'file', accept: f.accept || '', className: 'migrateplus-drop-input', disabled: isUrl, onChange: showFile } ),
 			createElement( 'span', { className: 'migrateplus-drop-icon', 'aria-hidden': 'true' } ),
 			createElement( 'span', { className: 'migrateplus-drop-text' },
-				createElement( 'strong', null, 'Drop a file here or choose one' ),
-				createElement( 'span', null, ( f.accept || '' ).split( ',' ).filter( ( a ) => a.trim().startsWith( '.' ) ).join( ', ' ) + ', up to ' + D.maxUpload ) ),
+				createElement( 'strong', null, __( 'Drop a file here or choose one', 'migrateplus' ) ),
+				/* translators: 1: the file extensions accepted, 2: the largest upload this server accepts */
+				createElement( 'span', null, sprintf( __( '%1$s, up to %2$s', 'migrateplus' ), ( f.accept || '' ).split( ',' ).filter( ( a ) => a.trim().startsWith( '.' ) ).join( ', ' ), D.maxUpload ) ) ),
 			createElement( 'span', { className: 'migrateplus-drop-file' }, chosen )
 		);
 
@@ -1353,7 +1688,8 @@
 			onClick: () => setMode( m ),
 		}, label );
 		return createElement( 'div', { className: 'migrateplus-file-field' },
-			createElement( 'div', { className: 'migrateplus-segmented', role: 'group', 'aria-label': f.label + ': how to provide it' }, modeButton( 'upload', 'Upload a file' ), modeButton( 'url', 'From a URL' ) ),
+			/* translators: %s: the name of a file setting, e.g. JSON file */
+			createElement( 'div', { className: 'migrateplus-segmented', role: 'group', 'aria-label': sprintf( __( '%s: how to provide it', 'migrateplus' ), f.label ) }, modeButton( 'upload', __( 'Upload a file', 'migrateplus' ) ), modeButton( 'url', __( 'From a URL', 'migrateplus' ) ) ),
 			createElement( 'div', { className: 'migrateplus-file-pane', hidden: isUrl }, zone ),
 			createElement( 'div', { className: 'migrateplus-file-pane', hidden: ! isUrl },
 				createElement( 'input', {
@@ -1363,11 +1699,13 @@
 					type: 'url',
 					placeholder: 'https://',
 					autoComplete: 'off',
-					'aria-label': f.label + ' URL',
+					/* translators: %s: the name of a file setting, e.g. JSON file */
+					'aria-label': sprintf( __( '%s URL', 'migrateplus' ), f.label ),
 					disabled: ! isUrl,
 					required: isUrl && !! f.required,
 				} ),
-				createElement( 'p', { className: 'migrateplus-field-help' }, 'Your server downloads the file (up to ' + D.maxRemote + '). Google Sheets, Google Drive, Dropbox and GitHub share links work too, as long as they are shared publicly.' ) )
+				/* translators: %s: the largest file the server downloads, e.g. 64 MB */
+				createElement( 'p', { className: 'migrateplus-field-help' }, sprintf( __( 'Your server downloads the file (up to %s). Google Sheets, Google Drive, Dropbox and GitHub share links work too, as long as they are shared publicly.', 'migrateplus' ), D.maxRemote ) ) )
 		);
 	}
 
@@ -1377,19 +1715,24 @@
 		fd.append( 'source', state.sourceId );
 		const source = D.sources.find( ( s ) => s.id === state.sourceId );
 
-		// Work out what the server is about to do, for the modal copy.
+		// Work out what the server is about to do, for the modal copy. A file is checked as one dropped on the upload screen.
 		let upload = null;
 		let remote = '';
+		let refused = false;
 		source.schema.filter( ( f ) => f.type === 'file' ).forEach( ( f ) => {
 			const file = fd.get( 'file_' + f.key );
 			if ( file && file.name && file.size ) {
 				upload = file;
+				refused = refused || refuseUnfitFile( f, file );
 			}
 			const url = fd.get( 'settings[' + f.key + '_url]' );
 			if ( url ) {
 				remote = String( url );
 			}
 		} );
+		if ( refused ) {
+			return;
+		}
 		const urlField = source.schema.find( ( f ) => f.type === 'url' && fd.get( 'settings[' + f.key + ']' ) );
 		const connectTo = urlField ? hostOf( String( fd.get( 'settings[' + urlField.key + ']' ) ) ) : '';
 
@@ -1408,46 +1751,83 @@
 	 */
 	function requestPreview( fd, ctx ) {
 		const upload = ctx.upload || null;
-		const readingMsg = ctx.remote
-			? 'Downloading the file from ' + hostOf( ctx.remote ) + ' and reading the first records…'
-			: ( ctx.connectTo ? 'Connecting to ' + ctx.connectTo + ' and reading the first records…' : 'Reading the first records…' );
+		let readingMsg = __( 'Reading the first records…', 'migrateplus' );
+		if ( ctx.remote ) {
+			/* translators: %s: the host the file is downloaded from */
+			readingMsg = sprintf( __( 'Downloading the file from %s and reading the first records…', 'migrateplus' ), hostOf( ctx.remote ) );
+		} else if ( ctx.connectTo ) {
+			/* translators: %s: the host of the source */
+			readingMsg = sprintf( __( 'Connecting to %s and reading the first records…', 'migrateplus' ), ctx.connectTo );
+		}
+		let title = __( 'Fetching remote file', 'migrateplus' );
+		if ( upload ) {
+			/* translators: %s: file name */
+			title = sprintf( __( 'Uploading %s', 'migrateplus' ), upload.name );
+		} else if ( ! ctx.remote ) {
+			/* translators: %s: the source's name */
+			title = sprintf( __( 'Connecting to %s', 'migrateplus' ), ctx.label );
+		}
 
+		discardDraftJob(); // The file this one replaces was never imported.
 		state.busy = true;
 		state.error = '';
+		let req = null;
+		let cancelled = false;
+		const cancel = () => {
+			cancelled = true;
+			if ( req.abort ) {
+				req.abort();
+			}
+			state.busy = false;
+			modal.close();
+			render();
+		};
 		modal.open( {
 			kind: 'preview',
-			title: upload ? 'Uploading ' + upload.name : ( ctx.remote ? 'Fetching remote file' : 'Connecting to ' + ctx.label ),
-			message: upload ? 'Sending the file to your server.' : readingMsg,
+			title,
+			message: upload ? __( 'Sending the file to your server.', 'migrateplus' ) : readingMsg,
 			percent: upload ? 0 : null,
-			detail: upload ? '0 B of ' + formatBytes( upload.size ) : '',
-			actions: [],
+			/* translators: 1: bytes sent so far, 2: the file size */
+			detail: upload ? sprintf( __( '%1$s of %2$s', 'migrateplus' ), formatBytes( 0 ), formatBytes( upload.size ) ) : '',
+			actions: [ { label: __( 'Cancel', 'migrateplus' ), onClick: cancel } ],
 		} );
 
-		const req = upload
+		req = upload
 			? apiWithProgress( 'preview', fd, ( loaded, total ) => {
 				modal.update( {
 					percent: ( loaded / total ) * 100,
-					detail: formatBytes( loaded ) + ' of ' + formatBytes( total ),
+					detail: sprintf( __( '%1$s of %2$s', 'migrateplus' ), formatBytes( loaded ), formatBytes( total ) ),
 				} );
 			}, () => {
-				modal.update( { title: 'Reading ' + upload.name, message: 'Upload complete. Checking the file and reading the first records…', percent: null, detail: '' } );
+				/* translators: %s: file name */
+				modal.update( { title: sprintf( __( 'Reading %s', 'migrateplus' ), upload.name ), message: __( 'Upload complete. Checking the file and reading the first records…', 'migrateplus' ), percent: null, detail: '' } );
 			} )
 			: api( 'preview', fd );
 
 		req.then( ( data ) => {
+			if ( cancelled ) {
+				// The server read the file before the cancel reached it: don't leave its job in History.
+				api( 'delete', { job: data.job.id } ).catch( () => {} );
+				return;
+			}
 			state.job = data.job;
 			state.records = data.records;
 			state.fields = ( data.fields || [] ).map( String ); // Numeric JSON keys may arrive as numbers.
 			state.mapping = normalizeMapping( data.job.mapping );
 			state.options = Object.assign( {}, D.defaults, data.job.options );
+			// Picked by the person importing, never preselected.
+			state.options.author = 0;
+			state.options.authors = {};
 			state.suggested = {};
 			state.busy = false;
 			state.savedPick = data.savedMapping || '';
-			state.savedNotice = data.savedMapping ? { type: 'info', text: 'This file has the same fields as the saved mapping “' + data.savedMapping + '”, so it is selected below. Choose Apply to use it, or map the fields yourself.' } : null;
-			if ( isExport( data.job ) ) {
-				state.direct = true;
+			/* translators: %s: the name of a saved mapping */
+			state.savedNotice = data.savedMapping ? { type: 'info', text: sprintf( __( 'This file has the same fields as the saved mapping “%s”, so it is selected below. Choose Apply to use it, or map the fields yourself.', 'migrateplus' ), data.savedMapping ) } : null;
+			// Set either way: an export dropped and cancelled before would otherwise hide the steps of the next file.
+			state.direct = isExport( data.job );
+			if ( state.direct ) {
 				render();
-				modal.update( { title: 'Checking for duplicates', message: 'Looking for items in this file that are already on this site…', percent: null, detail: '' } );
+				modal.update( { title: __( 'Checking for duplicates', 'migrateplus' ), message: __( 'Looking for items in this file that are already on this site…', 'migrateplus' ), percent: null, detail: '', actions: [] } );
 				checkDuplicates().then( confirmImport ).catch( duplicateCheckFailed );
 				return;
 			}
@@ -1455,9 +1835,12 @@
 			state.step = 'map';
 			render();
 		} ).catch( ( err ) => {
+			if ( cancelled ) {
+				return;
+			}
 			state.busy = false;
 			modal.update( {
-				title: upload ? 'Could not read the file' : 'Could not connect',
+				title: upload ? __( 'Could not read the file', 'migrateplus' ) : __( 'Could not connect', 'migrateplus' ),
 				message: '',
 				percent: 100,
 				tone: 'error',
@@ -1465,7 +1848,7 @@
 				note: err.message,
 				dismissible: true,
 				onDismiss: null,
-				actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
+				actions: [ { label: __( 'Close', 'migrateplus' ), primary: true, onClick: () => modal.close() } ],
 			} );
 			if ( ctx.onError ) {
 				ctx.onError( err );
@@ -1474,6 +1857,14 @@
 				render();
 			}
 		} );
+	}
+
+	/** Delete the current job when it is a draft, never imported, so it doesn't stay in History as "Not started"; then forget it. */
+	function discardDraftJob() {
+		if ( state.job && 'draft' === state.job.status ) {
+			api( 'delete', { job: state.job.id } ).catch( () => {} );
+		}
+		state.job = null;
 	}
 
 	// Step 2
@@ -1485,41 +1876,60 @@
 		const cols = state.fields.slice( 0, 40 );
 		const mapped = D.targets.filter( ( t ) => state.mapping.fields[ t.key ] ).length;
 		const ready = !! ( state.mapping.fields.post_title || state.mapping.fields.post_content );
+		let status = __( 'Map the title or the content to continue', 'migrateplus' );
+		if ( ready ) {
+			/* translators: 1: fields mapped, 2: WordPress fields that can be mapped */
+			status = sprintf( __( '%1$s of %2$s fields mapped', 'migrateplus' ), mapped, D.targets.length );
+		}
 		const where = job.settings.file_url || job.settings.url || job.settings.site_url;
 
 		return createElement( Fragment, null,
 			createElement( 'section', { className: 'migrateplus-summary' },
 				createElement( 'span', { className: 'migrateplus-source-icon migrateplus-icon-' + source.id, 'aria-hidden': 'true' } ),
 				createElement( 'div', { className: 'migrateplus-summary-text' },
-					createElement( 'strong', null, 'Connected to ' + source.label ),
-					createElement( 'span', null, ( total === null ? 'Unknown number of' : total.toLocaleString() ) + ' records, ' + state.fields.length + ' fields' + ( where ? ' from ' + hostOf( where ) : '' ) ) ),
+					/* translators: %s: the source's name */
+					createElement( 'strong', null, sprintf( __( 'Connected to %s', 'migrateplus' ), source.label ) ),
+					createElement( 'span', null, mapSummary( total, where ) ) ),
 				createElement( 'button', { type: 'button', className: 'button', onClick: () => {
+					discardDraftJob();
 					state.step = 'source';
 					state.error = '';
 					render();
-				} }, isDropSource() ? 'Choose another file' : 'Change source' )
+				} }, isDropSource() ? __( 'Choose another file', 'migrateplus' ) : __( 'Change source', 'migrateplus' ) )
 			),
 			isExport( job ) ? null : createElement( SavedMappings ),
 			// No records when a job's cached copy is gone: an empty table would only say "First 0 records".
 			state.records.length ? createElement( 'details', { className: 'migrateplus-panel migrateplus-preview-panel', open: true },
 				createElement( 'summary', null,
-					createElement( 'h2', null, 'Preview' ),
-					createElement( 'span', { className: 'migrateplus-muted' }, 'First ' + state.records.length + ' records' + ( state.fields.length > cols.length ? ', ' + cols.length + ' of ' + state.fields.length + ' fields shown' : '' ) ) ),
-				createElement( 'div', { className: 'migrateplus-preview-scroll', tabIndex: 0, 'aria-label': 'Preview records' }, createElement( 'table', { className: 'migrateplus-preview' },
+					createElement( 'h2', null, __( 'Preview', 'migrateplus' ) ),
+					/* translators: %s: number of records shown */
+					createElement( 'span', { className: 'migrateplus-muted' }, sprintf( _n( 'First %s record', 'First %s records', state.records.length, 'migrateplus' ), state.records.length ) +
+						/* translators: 1: fields shown, 2: fields in the file */
+						( state.fields.length > cols.length ? ', ' + sprintf( __( '%1$s of %2$s fields shown', 'migrateplus' ), cols.length, state.fields.length ) : '' ) ) ),
+				createElement( 'div', { className: 'migrateplus-preview-scroll', tabIndex: 0, 'aria-label': __( 'Preview records', 'migrateplus' ) }, createElement( 'table', { className: 'migrateplus-preview' },
 					createElement( 'thead', null, createElement( 'tr', null, cols.map( ( c ) => createElement( 'th', { key: c, scope: 'col' }, c ) ) ) ),
 					createElement( 'tbody', null, state.records.map( ( r, i ) => createElement( 'tr', { key: i }, cols.map( ( c ) => createElement( 'td', { key: c, title: r[ c ] || '' }, truncate( r[ c ], 80 ) ) ) ) ) )
 				) )
 			) : null,
 			createElement( 'div', { className: 'migrateplus-grid' }, createElement( MappingCard ), createElement( OptionsCard ) ),
 			createElement( 'div', { className: 'migrateplus-actionbar' },
-				createElement( 'span', { className: 'migrateplus-actionbar-status' + ( ready ? '' : ' is-warn' ), 'aria-live': 'polite' }, ready
-					? mapped + ' of ' + D.targets.length + ' fields mapped'
-					: 'Map the title or the content to continue' ),
+				createElement( 'span', { className: 'migrateplus-actionbar-status' + ( ready ? '' : ' is-warn' ), 'aria-live': 'polite' }, status ),
 				createElement( 'div', { className: 'migrateplus-actionbar-buttons' },
-					createElement( 'button', { type: 'button', className: 'button', disabled: state.busy, title: 'Process everything without saving, to check the mapping', onClick: () => start( true ) }, 'Dry run' ),
-					createElement( 'button', { type: 'button', className: 'button button-primary', disabled: state.busy, onClick: () => start( false ) }, 'Start import' ) )
+					createElement( 'button', { type: 'button', className: 'button', disabled: state.busy, title: __( 'Process everything without saving, to check the mapping', 'migrateplus' ), onClick: () => start( true ) }, __( 'Dry run', 'migrateplus' ) ),
+					createElement( 'button', { type: 'button', className: 'button button-primary', disabled: state.busy, onClick: () => start( false ) }, __( 'Start import', 'migrateplus' ) ) )
 			)
 		);
+	}
+
+	/** "15 records, 3 fields from example.com", for the mapping step's summary. */
+	function mapSummary( total, where ) {
+		const records = null === total
+			/* translators: %s: number of fields */
+			? sprintf( __( 'Unknown number of records, %s fields', 'migrateplus' ), state.fields.length )
+			/* translators: 1: number of records, 2: number of fields */
+			: sprintf( __( '%1$s records, %2$s fields', 'migrateplus' ), total.toLocaleString(), state.fields.length );
+		/* translators: 1: records and fields, 2: the host they come from */
+		return where ? sprintf( __( '%1$s from %2$s', 'migrateplus' ), records, hostOf( where ) ) : records;
 	}
 
 	/**
@@ -1540,74 +1950,86 @@
 		const save = () => {
 			const name = ( state.savedName || '' ).trim() || ( pick ? pick.name : '' );
 			if ( ! name ) {
-				showNotice( 'error', 'Give the mapping a name first.' );
+				showNotice( 'error', __( 'Give the mapping a name first.', 'migrateplus' ) );
 				return;
 			}
-			const send = () => api( 'mapping_save', { job: state.job.id, name, mapping: mappingToSave(), options: state.options } ).then( ( d ) => {
+			const send = () => api( 'mapping_save', { job: state.job.id, name, mapping: mappingToSave(), options: optionsWithoutAuthors( state.options ) } ).then( ( d ) => {
 				refresh( d );
 				state.savedName = '';
-				showNotice( 'success', 'Saved as “' + d.name + '”. A file with the same fields will offer it.' );
+				/* translators: %s: the name of a saved mapping */
+				showNotice( 'success', sprintf( __( 'Saved as “%s”. A file with the same fields will offer it.', 'migrateplus' ), d.name ) );
 			} ).catch( ( err ) => showNotice( 'error', err.message ) );
 			if ( ! list.some( ( m ) => m.name === name ) ) {
 				send();
 				return;
 			}
 			ask( {
-				title: 'Replace saved mapping?',
-				message: 'Replace the saved mapping “' + name + '” with this one?',
-				label: 'Replace',
+				title: __( 'Replace saved mapping?', 'migrateplus' ),
+				/* translators: %s: the name of a saved mapping */
+				message: sprintf( __( 'Replace the saved mapping “%s” with this one?', 'migrateplus' ), name ),
+				label: __( 'Replace', 'migrateplus' ),
 				onConfirm: () => {
 					modal.close();
 					send();
 				},
 			} );
 		};
-		const rename = () => {
-			// eslint-disable-next-line no-alert
-			const name = window.prompt( 'New name for “' + pick.name + '”:', pick.name );
-			if ( ! name || name.trim() === pick.name ) {
-				return;
-			}
-			api( 'mapping_rename', { name: pick.name, new_name: name.trim() } ).then( ( d ) => {
-				refresh( d );
-				showNotice( 'success', 'Renamed to “' + d.name + '”.' );
-			} ).catch( ( err ) => showNotice( 'error', err.message ) );
-		};
+		const rename = () => ask( {
+			title: __( 'Rename saved mapping', 'migrateplus' ),
+			/* translators: %s: the name of a saved mapping */
+			message: sprintf( __( 'New name for “%s”:', 'migrateplus' ), pick.name ),
+			input: { label: __( 'New name', 'migrateplus' ), value: pick.name },
+			label: __( 'Rename', 'migrateplus' ),
+			onConfirm: ( value ) => {
+				modal.close();
+				const name = value.trim();
+				if ( ! name || name === pick.name ) {
+					return;
+				}
+				api( 'mapping_rename', { name: pick.name, new_name: name } ).then( ( d ) => {
+					refresh( d );
+					/* translators: %s: the new name of a saved mapping */
+					showNotice( 'success', sprintf( __( 'Renamed to “%s”.', 'migrateplus' ), d.name ) );
+				} ).catch( ( err ) => showNotice( 'error', err.message ) );
+			},
+		} );
 		const remove = () => ask( {
-			title: 'Delete saved mapping?',
-			message: 'Delete the saved mapping “' + pick.name + '”? It is deleted for everyone who imports on this site.',
-			label: 'Delete',
+			title: __( 'Delete saved mapping?', 'migrateplus' ),
+			/* translators: %s: the name of a saved mapping */
+			message: sprintf( __( 'Delete the saved mapping “%s”? It is deleted for everyone who imports on this site.', 'migrateplus' ), pick.name ),
+			label: __( 'Delete', 'migrateplus' ),
 			danger: true,
 			onConfirm: () => {
 				modal.close();
 				api( 'mapping_delete', { name: pick.name } ).then( ( d ) => {
 					refresh( d );
-					showNotice( 'success', 'Deleted “' + pick.name + '”.' );
+					/* translators: %s: the name of a saved mapping */
+					showNotice( 'success', sprintf( __( 'Deleted “%s”.', 'migrateplus' ), pick.name ) );
 				} ).catch( ( err ) => showNotice( 'error', err.message ) );
 			},
 		} );
 		return createElement( 'section', { className: 'migrateplus-panel migrateplus-saved' },
-			createElement( 'h2', null, 'Saved mappings' ),
-			createElement( 'p', { className: 'migrateplus-muted' }, 'Save this mapping and the import options to use them again for the next file from the same place. Saved mappings are shared by everyone who imports on this site.' ),
+			createElement( 'h2', null, __( 'Saved mappings', 'migrateplus' ) ),
+			createElement( 'p', { className: 'migrateplus-muted' }, __( 'Save this mapping and the import options to use them again for the next file from the same place. Saved mappings are shared by everyone who imports on this site.', 'migrateplus' ) ),
 			state.savedNotice ? createElement( Notice, { type: state.savedNotice.type, message: state.savedNotice.text } ) : null,
 			createElement( 'div', { className: 'migrateplus-saved-row' },
-				createElement( 'select', { id: 'migrateplus-saved-select', 'aria-label': 'Load saved mapping', disabled: ! list.length, value: pick ? pick.name : '', onChange: ( e ) => {
+				createElement( 'select', { id: 'migrateplus-saved-select', 'aria-label': __( 'Load saved mapping', 'migrateplus' ), disabled: ! list.length, value: pick ? pick.name : '', onChange: ( e ) => {
 					state.savedPick = e.target.value;
 					state.savedNotice = null;
 					render();
 				} },
-					createElement( 'option', { value: '' }, list.length ? 'Choose a saved mapping' : 'No saved mappings yet' ),
+					createElement( 'option', { value: '' }, list.length ? __( 'Choose a saved mapping', 'migrateplus' ) : __( 'No saved mappings yet', 'migrateplus' ) ),
 					list.map( ( m ) => createElement( 'option', { key: m.name, value: m.name }, m.name ) ) ),
-				createElement( 'button', { type: 'button', className: 'button', disabled: ! pick, onClick: () => applySavedMapping( pick ) }, 'Apply' ),
-				createElement( 'button', { type: 'button', className: 'button-link', disabled: ! pick, onClick: rename }, 'Rename' ),
-				createElement( 'button', { type: 'button', className: 'migrateplus-link-danger', disabled: ! pick, onClick: remove }, 'Delete' )
+				createElement( 'button', { type: 'button', className: 'button', disabled: ! pick, onClick: () => applySavedMapping( pick ) }, __( 'Apply', 'migrateplus' ) ),
+				createElement( 'button', { type: 'button', className: 'button-link', disabled: ! pick, onClick: rename }, __( 'Rename', 'migrateplus' ) ),
+				createElement( 'button', { type: 'button', className: 'migrateplus-link-danger', disabled: ! pick, onClick: remove }, __( 'Delete', 'migrateplus' ) )
 			),
 			createElement( 'div', { className: 'migrateplus-saved-row' },
-				createElement( 'input', { type: 'text', id: 'migrateplus-saved-name', 'aria-label': 'Name for this mapping', placeholder: pick ? pick.name : 'Name, for example Books feed', value: state.savedName, maxLength: 100, onChange: ( e ) => {
+				createElement( 'input', { type: 'text', id: 'migrateplus-saved-name', 'aria-label': __( 'Name for this mapping', 'migrateplus' ), placeholder: pick ? pick.name : __( 'Name, for example Books feed', 'migrateplus' ), value: state.savedName, maxLength: 100, onChange: ( e ) => {
 					state.savedName = e.target.value;
 					render();
 				} } ),
-				createElement( 'button', { type: 'button', className: 'button', onClick: save }, 'Save mapping' )
+				createElement( 'button', { type: 'button', className: 'button', onClick: save }, __( 'Save mapping', 'migrateplus' ) )
 			)
 		);
 	}
@@ -1639,7 +2061,7 @@
 				delete m.acf[ k ];
 			}
 		} );
-		const options = Object.assign( {}, entry.options );
+		const options = optionsWithoutAuthors( entry.options );
 		const missingType = options.post_type && ! D.postTypes.some( ( p ) => p.name === options.post_type ) ? options.post_type : '';
 		if ( missingType ) {
 			delete options.post_type;
@@ -1648,12 +2070,15 @@
 		state.options = Object.assign( {}, state.options, options );
 		// Suggestions would add fields to a mapping chosen on purpose.
 		state.suggested = { [ state.options.post_type ]: true };
-		const notes = [ 'Applied “' + entry.name + '”.' ];
+		/* translators: %s: the name of a saved mapping */
+		const notes = [ sprintf( __( 'Applied “%s”.', 'migrateplus' ), entry.name ) ];
 		if ( dropped.size ) {
-			notes.push( 'Not in this file, so left unmapped: ' + Array.from( dropped ).join( ', ' ) + '.' );
+			/* translators: %s: source fields, comma-separated */
+			notes.push( sprintf( __( 'Not in this file, so left unmapped: %s.', 'migrateplus' ), Array.from( dropped ).join( ', ' ) ) );
 		}
 		if ( missingType ) {
-			notes.push( 'Its post type “' + missingType + '” does not exist on this site; “Import as” was left as it was.' );
+			/* translators: %s: a post type name */
+			notes.push( sprintf( __( 'Its post type “%s” does not exist on this site; “Import as” was left as it was.', 'migrateplus' ), missingType ) );
 		}
 		state.savedNotice = { type: dropped.size || missingType ? 'warning' : 'success', text: notes.join( ' ' ) };
 		render();
@@ -1669,14 +2094,14 @@
 
 		return createElement( 'section', { className: 'migrateplus-panel migrateplus-mapping' },
 			createElement( 'header', { className: 'migrateplus-section-head' },
-				createElement( 'h2', null, 'Field mapping' ),
-				createElement( 'p', { className: 'migrateplus-muted' }, 'Pick which source field fills each WordPress field. Suggestions are already filled in.' ) ),
+				createElement( 'h2', null, __( 'Field mapping', 'migrateplus' ) ),
+				createElement( 'p', { className: 'migrateplus-muted' }, __( 'Pick which source field fills each WordPress field. Suggestions are already filled in.', 'migrateplus' ) ) ),
 			createElement( 'table', { className: 'migrateplus-map-table' },
 				createElement( 'thead', null, createElement( 'tr', null,
-					createElement( 'th', { scope: 'col' }, 'WordPress field' ),
+					createElement( 'th', { scope: 'col' }, __( 'WordPress field', 'migrateplus' ) ),
 					createElement( 'th', { 'aria-hidden': 'true' } ),
-					createElement( 'th', { scope: 'col' }, 'Source field' ),
-					createElement( 'th', { scope: 'col' }, 'Sample value' ) ) ),
+					createElement( 'th', { scope: 'col' }, __( 'Source field', 'migrateplus' ) ),
+					createElement( 'th', { scope: 'col' }, __( 'Sample value', 'migrateplus' ) ) ) ),
 				createElement( 'tbody', null, D.targets.map( ( t ) => createElement( 'tr', { key: t.key, className: m.fields[ t.key ] ? 'is-mapped' : '' },
 					createElement( 'th', { scope: 'row' }, createElement( 'span', null, t.label ), t.help ? createElement( 'span', { className: 'migrateplus-help' }, t.help ) : null ),
 					createElement( 'td', { className: 'migrateplus-arrow', 'aria-hidden': 'true' }, '←' ),
@@ -1693,75 +2118,79 @@
 			),
 			createElement( AcfSection ),
 			createElement( 'div', { className: 'migrateplus-subsection' },
-				createElement( 'h3', null, 'Custom fields' ),
+				createElement( 'h3', null, __( 'Custom fields', 'migrateplus' ) ),
 				m.meta.length ? createElement( 'div', { className: 'migrateplus-pairs' }, m.meta.map( ( row, i ) => createElement( 'div', { key: i, className: 'migrateplus-pair' },
-					createElement( 'input', { type: 'text', className: 'code', placeholder: 'meta_key', 'aria-label': 'Custom field name', value: row.key || '', onChange: ( e ) => {
+					createElement( 'input', { type: 'text', className: 'code', placeholder: 'meta_key', 'aria-label': __( 'Custom field name', 'migrateplus' ), value: row.key || '', onChange: ( e ) => {
 						row.key = e.target.value;
+						userMetaRows.add( row );
 						render();
 					} } ),
 					createElement( 'span', { className: 'migrateplus-arrow', 'aria-hidden': 'true' }, '←' ),
 					createElement( FieldSelect, { value: row.source, onChange: ( v ) => {
 						row.source = v;
+						userMetaRows.add( row );
 						render();
 					} } ),
-					createElement( 'button', { type: 'button', className: 'migrateplus-icon-btn', 'aria-label': 'Remove custom field', title: 'Remove', onClick: remove( m.meta, i ) }, '×' )
-				) ) ) : createElement( 'p', { className: 'migrateplus-muted' }, 'Save any source field as post meta. ACF field names work too.' ),
+					createElement( 'button', { type: 'button', className: 'migrateplus-icon-btn', 'aria-label': __( 'Remove custom field', 'migrateplus' ), title: __( 'Remove', 'migrateplus' ), onClick: remove( m.meta, i ) }, '×' )
+				) ) ) : createElement( 'p', { className: 'migrateplus-muted' }, __( 'Save any source field as post meta. ACF field names work too.', 'migrateplus' ) ),
 				createElement( 'button', { type: 'button', className: 'button migrateplus-add', onClick: () => {
-					m.meta.push( { key: '', source: '' } );
+					const row = { key: '', source: '' };
+					userMetaRows.add( row );
+					m.meta.push( row );
 					render();
-				} }, 'Add custom field' )
+				} }, __( 'Add custom field', 'migrateplus' ) )
 			),
 			createElement( 'div', { className: 'migrateplus-subsection' },
-				createElement( 'h3', null, 'Other taxonomies' ),
+				createElement( 'h3', null, __( 'Other taxonomies', 'migrateplus' ) ),
 				taxes.length
 					? ( m.taxonomies.length ? createElement( 'div', { className: 'migrateplus-pairs' }, m.taxonomies.map( ( row, i ) => createElement( 'div', { key: i, className: 'migrateplus-pair' },
-						createElement( 'select', { 'aria-label': 'Taxonomy', value: row.taxonomy || '', onChange: ( e ) => {
+						createElement( 'select', { 'aria-label': __( 'Taxonomy', 'migrateplus' ), value: row.taxonomy || '', onChange: ( e ) => {
 							row.taxonomy = e.target.value;
 							render();
 						} },
-							createElement( 'option', { value: '' }, 'Choose taxonomy' ),
+							createElement( 'option', { value: '' }, __( 'Choose taxonomy', 'migrateplus' ) ),
 							taxes.map( ( t ) => createElement( 'option', { key: t.name, value: t.name }, t.label + ' (' + t.name + ')' ) ) ),
 						createElement( 'span', { className: 'migrateplus-arrow', 'aria-hidden': 'true' }, '←' ),
 						createElement( FieldSelect, { value: row.source, onChange: ( v ) => {
 							row.source = v;
 							render();
 						} } ),
-						createElement( 'button', { type: 'button', className: 'migrateplus-icon-btn', 'aria-label': 'Remove taxonomy', title: 'Remove', onClick: remove( m.taxonomies, i ) }, '×' )
-					) ) ) : createElement( 'p', { className: 'migrateplus-muted' }, 'Assign terms in custom taxonomies registered for this post type.' ) )
-					: createElement( 'p', { className: 'migrateplus-muted' }, 'This post type has no other taxonomies.' ),
+						createElement( 'button', { type: 'button', className: 'migrateplus-icon-btn', 'aria-label': __( 'Remove taxonomy', 'migrateplus' ), title: __( 'Remove', 'migrateplus' ), onClick: remove( m.taxonomies, i ) }, '×' )
+					) ) ) : createElement( 'p', { className: 'migrateplus-muted' }, __( 'Assign terms in custom taxonomies registered for this post type.', 'migrateplus' ) ) )
+					: createElement( 'p', { className: 'migrateplus-muted' }, __( 'This post type has no other taxonomies.', 'migrateplus' ) ),
 				taxes.length ? createElement( 'button', { type: 'button', className: 'button migrateplus-add', onClick: () => {
 					m.taxonomies.push( { taxonomy: '', source: '' } );
 					render();
-				} }, 'Add taxonomy' ) : null
+				} }, __( 'Add taxonomy', 'migrateplus' ) ) : null
 			)
 		);
 	}
 
 	const ACF_TYPE_LABELS = {
-		text: 'Text', textarea: 'Text area', wysiwyg: 'Editor', number: 'Number', range: 'Range', email: 'Email', url: 'URL', password: 'Password',
-		image: 'Image', file: 'File', gallery: 'Gallery', oembed: 'oEmbed', select: 'Select', checkbox: 'Checkbox', radio: 'Radio', button_group: 'Buttons',
-		true_false: 'True / false', link: 'Link', post_object: 'Post', page_link: 'Page link', relationship: 'Relationship', taxonomy: 'Taxonomy', user: 'User',
-		google_map: 'Map', date_picker: 'Date', date_time_picker: 'Date and time', time_picker: 'Time', color_picker: 'Color',
-		group: 'Group', repeater: 'Repeater', flexible_content: 'Flexible content',
+		text: __( 'Text', 'migrateplus' ), textarea: __( 'Text area', 'migrateplus' ), wysiwyg: __( 'Editor', 'migrateplus' ), number: __( 'Number', 'migrateplus' ), range: __( 'Range', 'migrateplus' ), email: __( 'Email', 'migrateplus' ), url: __( 'URL', 'migrateplus' ), password: __( 'Password', 'migrateplus' ),
+		image: __( 'Image', 'migrateplus' ), file: __( 'File', 'migrateplus' ), gallery: __( 'Gallery', 'migrateplus' ), oembed: __( 'oEmbed', 'migrateplus' ), select: __( 'Select', 'migrateplus' ), checkbox: __( 'Checkbox', 'migrateplus' ), radio: __( 'Radio', 'migrateplus' ), button_group: __( 'Buttons', 'migrateplus' ),
+		true_false: __( 'True / false', 'migrateplus' ), link: __( 'Link', 'migrateplus' ), post_object: __( 'Post', 'migrateplus' ), page_link: __( 'Page link', 'migrateplus' ), relationship: __( 'Relationship', 'migrateplus' ), taxonomy: __( 'Taxonomy', 'migrateplus' ), user: __( 'User', 'migrateplus' ),
+		google_map: __( 'Map', 'migrateplus' ), date_picker: __( 'Date', 'migrateplus' ), date_time_picker: __( 'Date and time', 'migrateplus' ), time_picker: __( 'Time', 'migrateplus' ), color_picker: __( 'Color', 'migrateplus' ),
+		group: __( 'Group', 'migrateplus' ), repeater: __( 'Repeater', 'migrateplus' ), flexible_content: __( 'Flexible content', 'migrateplus' ),
 	};
 
 	const ACF_HINTS = {
-		image: 'Image URL. Downloaded into the Media Library.',
-		file: 'File URL. Downloaded into the Media Library.',
-		gallery: 'List of image URLs.',
-		relationship: 'IDs, slugs or titles. Source IDs from earlier imports work.',
-		post_object: 'ID, slug or title. Source IDs from earlier imports work.',
-		page_link: 'ID, slug, title or URL.',
-		taxonomy: 'Term names or IDs.',
-		user: 'Email, login or ID.',
-		select: 'Choice values or labels.',
-		checkbox: 'Choice values or labels.',
-		repeater: 'A list of rows, nested data or JSON.',
-		group: 'An object, nested data or JSON.',
-		flexible_content: 'Rows with acf_fc_layout, as nested data or JSON.',
-		google_map: '"lat, lng" or an object.',
-		date_picker: 'Any date format.',
-		date_time_picker: 'Any date format.',
+		image: __( 'Image URL. Downloaded into the Media Library.', 'migrateplus' ),
+		file: __( 'File URL. Downloaded into the Media Library.', 'migrateplus' ),
+		gallery: __( 'List of image URLs.', 'migrateplus' ),
+		relationship: __( 'IDs, slugs or titles. Source IDs from earlier imports work.', 'migrateplus' ),
+		post_object: __( 'ID, slug or title. Source IDs from earlier imports work.', 'migrateplus' ),
+		page_link: __( 'ID, slug, title or URL.', 'migrateplus' ),
+		taxonomy: __( 'Term names or IDs.', 'migrateplus' ),
+		user: __( 'Email, login or ID.', 'migrateplus' ),
+		select: __( 'Choice values or labels.', 'migrateplus' ),
+		checkbox: __( 'Choice values or labels.', 'migrateplus' ),
+		repeater: __( 'A list of rows, nested data or JSON.', 'migrateplus' ),
+		group: __( 'An object, nested data or JSON.', 'migrateplus' ),
+		flexible_content: __( 'Rows with acf_fc_layout, as nested data or JSON.', 'migrateplus' ),
+		google_map: __( '"lat, lng" or an object.', 'migrateplus' ),
+		date_picker: __( 'Any date format.', 'migrateplus' ),
+		date_time_picker: __( 'Any date format.', 'migrateplus' ),
 	};
 
 	function AcfSection() {
@@ -1771,12 +2200,13 @@
 		const fields = acfFields( state.options.post_type );
 		const m = state.mapping;
 		const head = createElement( 'div', { className: 'migrateplus-acf-head' },
-			createElement( 'h3', null, 'ACF fields' ),
-			createElement( 'span', { className: 'migrateplus-badge' }, fields.length + ' field' + ( fields.length === 1 ? '' : 's' ) ) );
+			createElement( 'h3', null, __( 'ACF fields', 'migrateplus' ) ),
+			/* translators: %s: number of ACF fields */
+			createElement( 'span', { className: 'migrateplus-badge' }, sprintf( _n( '%s field', '%s fields', fields.length, 'migrateplus' ), fields.length ) ) );
 		if ( ! fields.length ) {
 			return createElement( 'div', { className: 'migrateplus-subsection migrateplus-acf' },
 				head,
-				createElement( 'p', { className: 'migrateplus-muted' }, 'No ACF field groups are assigned to this post type. Assign one in ACF, or pick another post type under "Import as".' ) );
+				createElement( 'p', { className: 'migrateplus-muted' }, __( 'No ACF field groups are assigned to this post type. Assign one in ACF, or pick another post type under "Import as".', 'migrateplus' ) ) );
 		}
 		const groups = {};
 		fields.forEach( ( f ) => {
@@ -1812,7 +2242,7 @@
 		} );
 		return createElement( 'div', { className: 'migrateplus-subsection migrateplus-acf' },
 			head,
-			createElement( 'p', { className: 'migrateplus-muted' }, 'Values are converted for each field type: image URLs are downloaded, related posts and terms are looked up, dates and choices are normalised.' ),
+			createElement( 'p', { className: 'migrateplus-muted' }, __( 'Values are converted for each field type: image URLs are downloaded, related posts and terms are looked up, dates and choices are normalised.', 'migrateplus' ) ),
 			createElement( 'table', { className: 'migrateplus-map-table' }, createElement( 'tbody', null, body ) ) );
 	}
 
@@ -1828,37 +2258,201 @@
 			control,
 			help ? createElement( 'span', { className: 'migrateplus-help' }, help ) : null );
 		const choices = ( list ) => list.map( ( [ v, l ] ) => createElement( 'option', { key: v, value: v }, l ) );
-		const statuses = [ [ 'publish', 'Published' ], [ 'draft', 'Draft' ], [ 'pending', 'Pending review' ], [ 'private', 'Private' ] ];
+		const statuses = [ [ 'publish', __( 'Published', 'migrateplus' ) ], [ 'draft', __( 'Draft', 'migrateplus' ) ], [ 'pending', __( 'Pending review', 'migrateplus' ) ], [ 'private', __( 'Private', 'migrateplus' ) ] ];
+		/* translators: %s: a link to the Settings screen, labelled Settings */
+		const defaultsNote = __( 'Defaults come from %s.', 'migrateplus' ).split( '%s' );
 
 		return createElement( 'aside', { className: 'migrateplus-panel migrateplus-options' },
 			createElement( 'header', { className: 'migrateplus-section-head' },
-				createElement( 'h2', null, 'Import options' ),
-				D.settingsUrl ? createElement( 'p', { className: 'migrateplus-muted' }, 'Defaults come from ', createElement( 'a', { href: D.settingsUrl }, 'Settings' ), '.' ) : null ),
-			optionRow( 'migrateplus-opt-row-1', 'Import as', createElement( 'select', { id: 'migrateplus-opt-row-1', value: o.post_type, onChange: setOption( 'post_type' ) },
-				D.postTypes.map( ( p ) => createElement( 'option', { key: p.name, value: p.name }, p.label + ' (' + p.name + ')' ) ) ), 'Used for every record, unless "Post type" is mapped and names a type this site has.' ),
-			optionRow( 'migrateplus-opt-row-2', 'Default status', createElement( 'select', { id: 'migrateplus-opt-row-2', value: o.default_status, onChange: setOption( 'default_status' ) }, choices( statuses ) ), 'Used when a record has no status, or one Migrate Plus does not recognise.' ),
-			optionRow( 'migrateplus-opt-row-3', 'Status for every item', createElement( 'select', { id: 'migrateplus-opt-row-3', value: o.force_status || '', onChange: setOption( 'force_status' ) }, choices( [ [ '', 'Keep each record’s status' ] ].concat( statuses ) ) ), 'Overrides the status in the file, also for posts that are updated. Published posts with a future date are scheduled.' ),
-			optionRow( 'migrateplus-opt-row-4', 'Default author', createElement( 'select', { id: 'migrateplus-opt-row-4', value: String( o.default_author ), onChange: setOption( 'default_author' ) },
-				D.users.map( ( u ) => createElement( 'option', { key: u.id, value: String( u.id ) }, u.name ) ) ) ),
-			optionRow( 'migrateplus-opt-row-5', 'Records imported before', createElement( 'select', { id: 'migrateplus-opt-row-5', value: o.duplicate, onChange: setOption( 'duplicate' ) }, choices( [
-				[ 'skip', 'Skip them' ], [ 'update', 'Update them' ], [ 'create', 'Create duplicates' ],
-			] ) ), 'Matched by the mapped Source ID.' ),
-			optionRow( 'migrateplus-opt-row-6', 'Batch size', createElement( 'input', { id: 'migrateplus-opt-row-6', type: 'number', min: 1, max: 100, value: o.batch_size, onChange: setOption( 'batch_size' ) } ), 'Records per request. Lower it if image downloads time out.' ),
+				createElement( 'h2', null, __( 'Import options', 'migrateplus' ) ),
+				D.settingsUrl ? createElement( 'p', { className: 'migrateplus-muted' }, defaultsNote[ 0 ], createElement( 'a', { href: D.settingsUrl }, __( 'Settings', 'migrateplus' ) ), defaultsNote[ 1 ] || '' ) : null ),
+			needsAuthor( state.job ) ? createElement( MainAuthorPicker, { id: 'migrateplus-opt-author', onPick: render } ) : null,
+			needsAuthor( state.job ) ? createElement( AuthorsPerRecord ) : null,
+			optionRow( 'migrateplus-opt-row-1', __( 'Import as', 'migrateplus' ), createElement( 'select', { id: 'migrateplus-opt-row-1', value: o.post_type, onChange: setOption( 'post_type' ) },
+				D.postTypes.map( ( p ) => createElement( 'option', { key: p.name, value: p.name }, p.label + ' (' + p.name + ')' ) ) ), __( 'Used for every record, unless "Post type" is mapped and names a type this site has.', 'migrateplus' ) ),
+			optionRow( 'migrateplus-opt-row-2', __( 'Default status', 'migrateplus' ), createElement( 'select', { id: 'migrateplus-opt-row-2', value: o.default_status, onChange: setOption( 'default_status' ) }, choices( statuses ) ), __( 'Used when a record has no status, or one Migrate Plus does not recognise.', 'migrateplus' ) ),
+			optionRow( 'migrateplus-opt-row-3', __( 'Status for every item', 'migrateplus' ), createElement( 'select', { id: 'migrateplus-opt-row-3', value: o.force_status || '', onChange: setOption( 'force_status' ) }, choices( [ [ '', __( 'Keep each record’s status', 'migrateplus' ) ] ].concat( statuses ) ) ), __( 'Overrides the status in the file, also for posts that are updated. Published posts with a future date are scheduled.', 'migrateplus' ) ),
+			optionRow( 'migrateplus-opt-row-5', __( 'Records imported before', 'migrateplus' ), createElement( 'select', { id: 'migrateplus-opt-row-5', value: o.duplicate, onChange: setOption( 'duplicate' ) }, choices( [
+				[ 'skip', __( 'Skip them', 'migrateplus' ) ], [ 'update', __( 'Update them', 'migrateplus' ) ], [ 'create', __( 'Create duplicates', 'migrateplus' ) ],
+			] ) ), __( 'Matched by the mapped Source ID.', 'migrateplus' ) ),
+			optionRow( 'migrateplus-opt-row-6', __( 'Batch size', 'migrateplus' ), createElement( 'input', { id: 'migrateplus-opt-row-6', type: 'number', min: 1, max: 100, value: o.batch_size, onChange: setOption( 'batch_size' ) } ), __( 'Records per request. Lower it if image downloads time out.', 'migrateplus' ) ),
 			createElement( 'div', { className: 'migrateplus-toggles' },
-				toggle( 'import_featured_image', 'Download featured images' ),
-				toggle( 'import_content_images', 'Download images in content', 'Copies <img> files into the Media Library and rewrites their URLs.' ),
-				toggle( 'create_terms', 'Create missing categories and terms' ),
-				toggle( 'create_authors', 'Create missing authors', 'New users get the Author role and a random password.' ),
-				toggle( 'rewrite_links', 'Point links to the old site here', 'Migrate Plus exports only. Files in wp-content keep their old URLs unless images in content are downloaded.' ),
-				toggle( 'import_comments', 'Import comments', 'Migrate Plus exports that include comments. Importing the file again updates them instead of adding them twice.' ),
-				toggle( 'import_menus', 'Import menus', 'Migrate Plus exports that include menus, after all posts. A menu with the same slug is filled rather than copied.' ),
-				toggle( 'import_term_data', 'Import term data', 'Migrate Plus exports that include terms, before the posts: descriptions, custom fields, ACF fields, category images and empty terms. Terms already here are updated, never deleted.' ),
-				toggle( 'import_users', 'Import users', 'Migrate Plus exports that include users, before the posts. A user with the same email or login is updated but keeps their roles and password.' ),
-				toggle( 'import_acf_definitions', 'Import ACF definitions', 'Field groups, post types, taxonomies and options pages, before the posts. Definitions this site has in code or acf-json are left alone.' ),
-				toggle( 'import_acf_options', 'Import ACF options pages', 'The values of ACF options pages, after the posts. Rollback puts the previous values back.' ),
-				toggle( 'import_site_settings', 'Import site settings', 'General, Reading, Discussion, Media and Permalinks settings, widgets, Customizer settings of the same theme, Additional CSS, global styles and Yoast SEO settings, after the posts. Rollback puts the previous values back.' ),
-				toggle( 'import_orders', 'Import orders', 'WooCommerce orders, after the products and customers they name. No emails are sent and no stock is moved.' ),
-				toggle( 'import_redirects', 'Redirect old addresses', 'When a post lands at another address than it had on the old site, the old one sends visitors to the new one once the domain points here.' ) )
+				toggle( 'import_featured_image', __( 'Download featured images', 'migrateplus' ) ),
+				toggle( 'import_content_images', __( 'Download images in content', 'migrateplus' ), __( 'Copies <img> files into the Media Library and rewrites their URLs.', 'migrateplus' ) ),
+				toggle( 'create_terms', __( 'Create missing categories and terms', 'migrateplus' ) ),
+				toggle( 'rewrite_links', __( 'Point links to the old site here', 'migrateplus' ), __( 'Migrate Plus exports only. Files in wp-content keep their old URLs unless images in content are downloaded.', 'migrateplus' ) ),
+				toggle( 'import_comments', __( 'Import comments', 'migrateplus' ), __( 'Migrate Plus exports that include comments. Importing the file again updates them instead of adding them twice.', 'migrateplus' ) ),
+				toggle( 'import_menus', __( 'Import menus', 'migrateplus' ), __( 'Migrate Plus exports that include menus, after all posts. A menu with the same slug is filled rather than copied.', 'migrateplus' ) ),
+				toggle( 'import_term_data', __( 'Import term data', 'migrateplus' ), __( 'Migrate Plus exports that include terms, before the posts: descriptions, custom fields, ACF fields, category images and empty terms. Terms already here are updated, never deleted.', 'migrateplus' ) ),
+				toggle( 'import_acf_definitions', __( 'Import ACF definitions', 'migrateplus' ), __( 'Field groups, post types, taxonomies and options pages, before the posts. Definitions this site has in code or acf-json are left alone.', 'migrateplus' ) ),
+				toggle( 'import_acf_options', __( 'Import ACF options pages', 'migrateplus' ), __( 'The values of ACF options pages, after the posts. Rollback puts the previous values back.', 'migrateplus' ) ),
+				toggle( 'import_site_settings', __( 'Import site settings', 'migrateplus' ), __( 'General, Reading, Discussion, Media and Permalinks settings, widgets, Customizer settings of the same theme, Additional CSS, global styles and Yoast SEO settings, after the posts. Rollback puts the previous values back.', 'migrateplus' ) ),
+				toggle( 'import_orders', __( 'Import orders', 'migrateplus' ), __( 'WooCommerce orders, after the products and customers they name. No emails are sent and no stock is moved.', 'migrateplus' ) ),
+				toggle( 'import_redirects', __( 'Redirect old addresses', 'migrateplus' ), __( 'When a post lands at another address than it had on the old site, the old one sends visitors to the new one once the domain points here.', 'migrateplus' ) ) )
+		);
+	}
+
+	// bootstrap_data() lists at most this many users who can edit posts. A list that long may be cut short, so a search is offered.
+	const AUTHORS_CAP = 200;
+	// Every user the picker has listed, by id, so the one picked still shows after a search that leaves it out.
+	const seenAuthors = new Map( ( D.authors || [] ).map( ( u ) => [ String( u.id ), u ] ) );
+
+	/** Whether a job imports posts or pages, which get an author. A file of menus, terms or settings alone does not. */
+	function needsAuthor( job ) {
+		return !! Number( job.total ) || ! Object.keys( jobSides( job ) ).length;
+	}
+
+	/** The options without the authors: user ids differ per site, so a saved mapping neither keeps nor applies them. */
+	function optionsWithoutAuthors( options ) {
+		const rest = Object.assign( {}, options );
+		delete rest.author;
+		delete rest.authors;
+		return rest;
+	}
+
+	/** How many records have an author of their own. */
+	function ownAuthorCount() {
+		return Object.values( state.options.authors || {} ).filter( ( id ) => Number( id ) > 0 ).length;
+	}
+
+	/**
+	 * A select of the people who may write posts, searchable on a site with more than D.authors
+	 * lists. Authors are not matched from the file. value is a user id, 0 for emptyLabel;
+	 * onChange gets the id picked, or 0.
+	 */
+	function AuthorPicker( { id, label, hideLabel, emptyLabel, value, onChange, help } ) {
+		const [ found, setFound ] = useImmediateState( null ); // Search results, or null to list D.authors.
+		const timer = useRef( null );
+		const picked = Number( value ) > 0 ? String( value ) : '';
+		const list = ( found || D.authors || [] ).slice();
+		if ( picked && seenAuthors.has( picked ) && ! list.some( ( u ) => String( u.id ) === picked ) ) {
+			list.unshift( seenAuthors.get( picked ) );
+		}
+		const search = ( e ) => {
+			const q = e.target.value.trim();
+			clearTimeout( timer.current );
+			timer.current = setTimeout( () => {
+				if ( ! q ) {
+					setFound( null );
+					return;
+				}
+				api( 'users', { q } ).then( ( d ) => {
+					const users = Array.isArray( d ) ? d : ( d.authors || [] );
+					users.forEach( ( u ) => seenAuthors.set( String( u.id ), u ) );
+					setFound( users );
+				} ).catch( () => setFound( [] ) );
+			}, 300 );
+		};
+		return createElement( 'div', { className: 'migrateplus-author' + ( hideLabel ? '' : ' migrateplus-opt' ) },
+			createElement( 'label', { className: hideLabel ? 'screen-reader-text' : 'migrateplus-opt-label', htmlFor: id }, label ),
+			( D.authors || [] ).length >= AUTHORS_CAP ? createElement( 'input', { type: 'search', className: 'migrateplus-author-search', placeholder: __( 'Search users by name or login', 'migrateplus' ), 'aria-label': __( 'Search users', 'migrateplus' ), onChange: search } ) : null,
+			createElement( 'select', { id, value: picked, onChange: ( e ) => onChange( Number( e.target.value ) || 0 ) },
+				createElement( 'option', { value: '' }, emptyLabel ),
+				/* translators: 1: a user's display name, 2: their login */
+				list.map( ( u ) => createElement( 'option', { key: u.id, value: String( u.id ) }, sprintf( __( '%1$s (%2$s)', 'migrateplus' ), u.name, u.login ) ) ) ),
+			help ? createElement( 'span', { className: 'migrateplus-help' }, help ) : null
+		);
+	}
+
+	/** The author of every imported post and page without one of its own, as state.options.author. onPick redraws what depends on it. */
+	function MainAuthorPicker( { id, onPick } ) {
+		return createElement( AuthorPicker, {
+			id,
+			label: __( 'Author for all posts and pages', 'migrateplus' ),
+			emptyLabel: __( 'You (the person importing)', 'migrateplus' ),
+			value: state.options.author,
+			help: __( 'User accounts differ between sites, so authors are not taken from the file.', 'migrateplus' ),
+			onChange: ( user ) => {
+				state.options.author = user;
+				onPick();
+			},
+		} );
+	}
+
+	// Records per page in the author for each post or page.
+	const RECORDS_PAGE = 50;
+
+	/**
+	 * "Choose an author for each post or page": the job's records a page at a time, read from the
+	 * server, each with a picker whose choice goes into state.options.authors by its position in the file.
+	 */
+	function AuthorsPerRecord() {
+		const [ open, setOpen ] = useImmediateState( false );
+		const [ page, setPage ] = useImmediateState( null ); // { records, total, matched, truncated, offset, q }, null until loaded.
+		const [ problem, setProblem ] = useImmediateState( '' );
+		const query = useRef( '' );
+		const timer = useRef( null );
+		const asked = useRef( 0 );
+		const load = ( offset, q ) => {
+			const ticket = ++asked.current;
+			api( 'records', { job: state.job.id, offset, limit: RECORDS_PAGE, q, mapping: mappingToSave() } ).then( ( d ) => {
+				if ( ticket === asked.current ) { // An answer to an earlier page or search arriving late is dropped.
+					setProblem( '' );
+					setPage( Object.assign( {}, d, { offset, q } ) );
+				}
+			} ).catch( ( err ) => ticket === asked.current && setProblem( err.message ) );
+		};
+		const toggle = () => {
+			if ( ! open && ! page ) {
+				load( 0, '' );
+			}
+			setOpen( ! open );
+		};
+		const search = ( e ) => {
+			query.current = e.target.value.trim();
+			clearTimeout( timer.current );
+			timer.current = setTimeout( () => load( 0, query.current ), 300 );
+		};
+		const own = ownAuthorCount();
+		const rows = page ? page.records || [] : [];
+		const of = page ? Number( page.q ? page.matched : page.total ) || 0 : 0;
+		return createElement( 'div', { className: 'migrateplus-opt migrateplus-authors-each' },
+			createElement( 'button', { type: 'button', className: 'button-link migrateplus-authors-toggle', 'aria-expanded': open ? 'true' : 'false', 'aria-controls': 'migrateplus-authors-each', onClick: toggle },
+				__( 'Choose an author for each post or page', 'migrateplus' ) ),
+			/* translators: %s: number of posts and pages with an author of their own */
+			own ? createElement( 'span', { className: 'migrateplus-help migrateplus-authors-count' }, sprintf( _n( '%s post has its own author.', '%s posts have their own author.', own, 'migrateplus' ), own.toLocaleString() ) ) : null,
+			createElement( 'div', { id: 'migrateplus-authors-each', hidden: ! open },
+				createElement( 'div', { className: 'migrateplus-authors-tools' },
+					createElement( 'input', { type: 'search', id: 'migrateplus-authors-search', placeholder: __( 'Search titles', 'migrateplus' ), 'aria-label': __( 'Search posts and pages by title', 'migrateplus' ), onChange: search } ),
+					createElement( 'button', { type: 'button', className: 'button', disabled: ! own, onClick: () => {
+						state.options.authors = {};
+						render();
+					} }, __( 'Reset all to the author above', 'migrateplus' ) ) ),
+				problem ? createElement( 'div', { className: 'notice notice-error inline' }, createElement( 'p', null, problem ) ) : null,
+				page || problem ? null : createElement( 'p', { className: 'migrateplus-muted' }, __( 'Loading…', 'migrateplus' ) ),
+				page && ! rows.length ? createElement( 'p', { className: 'migrateplus-muted' }, page.q ? __( 'No titles match.', 'migrateplus' ) : __( 'No records.', 'migrateplus' ) ) : null,
+				rows.length ? createElement( 'table', { className: 'migrateplus-map-table migrateplus-authors-table' },
+					createElement( 'caption', { className: 'screen-reader-text' }, __( 'Author for each post or page', 'migrateplus' ) ),
+					createElement( 'thead', null, createElement( 'tr', null,
+						createElement( 'th', { scope: 'col' }, __( 'Title', 'migrateplus' ) ),
+						createElement( 'th', { scope: 'col' }, __( 'Type', 'migrateplus' ) ),
+						createElement( 'th', { scope: 'col' }, __( 'Author', 'migrateplus' ) ) ) ),
+					createElement( 'tbody', null, rows.map( ( r ) => createElement( 'tr', { key: r.index },
+						createElement( 'td', { className: 'migrateplus-authors-title' }, r.title ),
+						createElement( 'td', null, ( D.postTypes.find( ( p ) => p.name === r.type ) || { label: r.type } ).label ),
+						createElement( 'td', null, createElement( AuthorPicker, {
+							id: 'migrateplus-author-' + r.index,
+							/* translators: %s: a post's title */
+							label: sprintf( __( 'Author of “%s”', 'migrateplus' ), r.title ),
+							hideLabel: true,
+							emptyLabel: __( 'Same as above', 'migrateplus' ),
+							value: ( state.options.authors || {} )[ r.index ],
+							onChange: ( user ) => {
+								state.options.authors = Object.assign( {}, state.options.authors );
+								if ( user ) {
+									state.options.authors[ r.index ] = user;
+								} else {
+									delete state.options.authors[ r.index ];
+								}
+								render();
+							},
+						} ) ) ) ) ) ) : null,
+				rows.length ? createElement( 'div', { className: 'migrateplus-authors-paging' },
+					createElement( 'button', { type: 'button', className: 'button', disabled: ! page.offset, onClick: () => load( Math.max( 0, page.offset - RECORDS_PAGE ), page.q ) }, __( 'Previous', 'migrateplus' ) ),
+					/* translators: 1: first record shown, 2: last record shown, 3: records in all */
+					createElement( 'span', { className: 'migrateplus-muted', 'aria-live': 'polite' }, sprintf( __( '%1$s–%2$s of %3$s', 'migrateplus' ), ( page.offset + 1 ).toLocaleString(), ( page.offset + rows.length ).toLocaleString(), of.toLocaleString() ) ),
+					createElement( 'button', { type: 'button', className: 'button', disabled: page.offset + rows.length >= of, onClick: () => load( page.offset + RECORDS_PAGE, page.q ) }, __( 'Next', 'migrateplus' ) ) ) : null,
+				page && page.truncated ? createElement( 'p', { className: 'migrateplus-help' }, __( 'Only the first 5,000 records were searched.', 'migrateplus' ) ) : null )
 		);
 	}
 
@@ -1866,7 +2460,7 @@
 	 * Save and run. A real import first looks for records already on this site and
 	 * asks what to do with them; `checked` skips that once the user has answered.
 	 */
-	function start( dry, checked ) {
+	function start( dry, checked, overrides ) {
 		state.options.dry_run = dry ? 1 : 0;
 		if ( dry ) {
 			// A real run asks what to do with records already on this site. A dry run
@@ -1879,22 +2473,13 @@
 		}
 		if ( ! dry && ! checked ) {
 			state.options.skip_existing = 0;
-			modal.open( { kind: 'confirm', title: 'Checking for duplicates', message: 'Looking for items in this import that are already on this site…', percent: null, actions: [] } );
-			const askAbout = ( d ) => modal.open( Object.assign( {
-				kind: 'confirm',
-				icon: 'file',
-				bar: false,
-				dismissible: true,
-				title: 'Some items are already here',
-				message: duplicateMessage( d, 'of ' + Number( d.total ).toLocaleString() + ' records' ) + changedMessage( d ),
-				actions: duplicateActions( d, () => start( false, true ), () => askAbout( d ) ).concat( { label: 'Cancel', onClick: () => modal.close() } ),
-			}, duplicateSummary( d ) ) );
+			modal.open( { kind: 'confirm', title: __( 'Checking for duplicates', 'migrateplus' ), message: __( 'Looking for items in this import that are already on this site…', 'migrateplus' ), percent: null, actions: [] } );
 			checkDuplicates().then( ( d ) => {
 				if ( ! d.count ) {
 					start( false, true );
 					return;
 				}
-				askAbout( d );
+				openDuplicates( d, state.step );
 			} ).catch( duplicateCheckFailed );
 			return;
 		}
@@ -1903,16 +2488,15 @@
 		}
 		state.busy = true;
 		state.error = '';
-		modal.update( { actions: [ { label: 'Starting…', primary: true, disabled: true } ] } );
+		modal.update( { actions: [ { label: __( 'Starting…', 'migrateplus' ), primary: true, disabled: true } ] } );
 		render();
 		const mapping = mappingToSave();
-		api( 'save', { job: state.job.id, mapping, options: state.options } ).then( ( data ) => {
+		// The choices on the duplicates screen go with this save only: Back keeps the options as they were.
+		api( 'save', { job: state.job.id, mapping, options: Object.assign( {}, state.options, overrides || {} ) } ).then( ( data ) => {
 			state.job = data.job;
-			state.results = [];
 			state.step = 'run';
 			state.busy = false;
 			state.paused = false;
-			state.modalHidden = false;
 			modal.open( { kind: 'run' } );
 			runLoop();
 		} ).catch( ( err ) => {
@@ -1930,12 +2514,12 @@
 			bar: false,
 			tone: 'error',
 			dismissible: true,
-			title: 'Could not check for duplicates',
-			message: 'Items that are already on this site may be imported again.',
+			title: __( 'Could not check for duplicates', 'migrateplus' ),
+			message: __( 'Items that are already on this site may be imported again.', 'migrateplus' ),
 			note: err.message,
 			actions: [
-				{ label: 'Import anyway', primary: true, onClick: () => start( false, true ) },
-				{ label: 'Cancel', onClick: () => modal.close() },
+				{ label: __( 'Import anyway', 'migrateplus' ), primary: true, onClick: () => start( false, true ) },
+				{ label: __( 'Cancel', 'migrateplus' ), onClick: () => modal.close() },
 			],
 		} );
 	}
@@ -1951,24 +2535,35 @@
 		const done = [ 'complete', 'rolled_back' ].includes( job.status );
 		const idle = done || 'draft' === job.status;
 		const pct = done ? 100 : ( total ? Math.min( 100, Math.floor( ( processed / total ) * 100 ) ) : null );
+		// A paused or abandoned import can be rolled back too, once this tab isn't running it; the server refuses while a batch holds the lock.
+		const canRollBack = ! dry && ! state.running && ! [ 'rolled_back', 'draft' ].includes( job.status ) && importedCount( job ) > 0;
 
 		let statusText;
 		let tone = '';
 		if ( job.status === 'rolled_back' ) {
-			statusText = 'Rolled back';
+			statusText = __( 'Rolled back', 'migrateplus' );
 		} else if ( done ) {
-			statusText = dry ? 'Dry run complete. Nothing was saved.' : 'Import complete';
+			statusText = dry ? __( 'Dry run complete. Nothing was saved.', 'migrateplus' ) : __( 'Import complete', 'migrateplus' );
 			tone = 'success';
 		} else if ( job.status === 'draft' ) {
-			statusText = 'Not started. Nothing was imported.';
+			statusText = __( 'Not started. Nothing was imported.', 'migrateplus' );
 		} else if ( state.error ) {
-			statusText = 'Stopped. Progress is saved.';
+			statusText = __( 'Stopped. Progress is saved.', 'migrateplus' );
 			tone = 'error';
 		} else if ( state.paused ) {
-			statusText = state.running ? 'Pausing after this batch…' : 'Paused. Progress is saved.';
+			statusText = state.running ? __( 'Pausing after this batch…', 'migrateplus' ) : __( 'Paused. Progress is saved.', 'migrateplus' );
 			tone = 'paused';
 		} else {
-			statusText = ( dry ? 'Dry run in progress' : 'Importing' ) + '. Keep this tab open.';
+			statusText = dry ? __( 'Dry run in progress. Keep this tab open.', 'migrateplus' ) : __( 'Importing. Keep this tab open.', 'migrateplus' );
+		}
+		let processedText = total
+			/* translators: 1: records processed, 2: records in the import */
+			? sprintf( __( '%1$s of %2$s records processed', 'migrateplus' ), processed.toLocaleString(), total.toLocaleString() )
+			/* translators: %s: records processed */
+			: sprintf( __( '%s records processed', 'migrateplus' ), processed.toLocaleString() );
+		if ( dry ) {
+			/* translators: %s: how many records were processed */
+			processedText = sprintf( __( '%s (dry run)', 'migrateplus' ), processedText );
 		}
 
 		return createElement( Fragment, null,
@@ -1979,25 +2574,25 @@
 						: createElement( Fragment, null, createElement( 'span', { className: 'migrateplus-run-count' }, String( pct ) ), createElement( 'span', { className: 'migrateplus-run-unit' }, '%' ) ) ),
 					createElement( 'div', { className: 'migrateplus-run-text' },
 						createElement( 'h2', { 'aria-live': 'polite' }, statusText ),
-						createElement( 'p', { className: 'migrateplus-muted' }, processed.toLocaleString() + ( total ? ' of ' + total.toLocaleString() : '' ) + ' records processed' + ( dry ? ' (dry run)' : '' ) ),
+						createElement( 'p', { className: 'migrateplus-muted' }, processedText ),
 						sectionsText( job ) ? createElement( 'p', { className: 'migrateplus-muted' }, sectionsText( job ) ) : null )
 				),
-				createElement( OutcomeBar, { stats: s, total, size: 'lg', indeterminate: ! done && ! total && ! state.paused, tone, label: 'Import progress' } ),
+				createElement( OutcomeBar, { stats: s, total, size: 'lg', indeterminate: ! done && ! total && ! state.paused, tone, label: __( 'Import progress', 'migrateplus' ) } ),
 				createElement( OutcomeLegend, { stats: s, dry } ),
 				createElement( 'div', { className: 'migrateplus-actions' },
 					// One button for Pause and Resume, so focus stays on it when it flips after each batch.
 					idle ? null : createElement( 'button', state.paused
 						? { type: 'button', id: 'migrateplus-run-toggle', className: 'button button-primary', disabled: state.running, onClick: resume }
-						: { type: 'button', id: 'migrateplus-run-toggle', className: 'button', onClick: pause }, state.paused ? 'Resume' : 'Pause' ),
-					! idle && ! modal.isOpen() ? createElement( 'button', { type: 'button', className: 'button', onClick: showRunModal }, 'Show progress window' ) : null,
-					idle && dry ? createElement( 'button', { type: 'button', className: 'button button-primary', onClick: () => start( false ) }, 'Run the real import' ) : null,
+						: { type: 'button', id: 'migrateplus-run-toggle', className: 'button', onClick: pauseUnlessJustResumed }, state.paused ? __( 'Resume', 'migrateplus' ) : __( 'Pause', 'migrateplus' ) ),
+					! idle && ! modal.isOpen() ? createElement( 'button', { type: 'button', className: 'button', onClick: () => modal.open( { kind: 'run' } ) }, __( 'Show progress window', 'migrateplus' ) ) : null,
+					idle && dry ? createElement( 'button', { type: 'button', className: 'button button-primary', onClick: () => start( false ) }, __( 'Run the real import', 'migrateplus' ) ) : null,
 					idle && dry ? createElement( 'button', { type: 'button', className: 'button', onClick: () => {
 						state.step = 'map';
 						render();
-					} }, 'Adjust mapping' ) : null,
-					idle && ! dry && job.status === 'complete' ? createElement( 'a', { className: 'button button-primary', href: contentUrl( job ) }, 'View imported content' ) : null,
-					idle ? createElement( 'button', { type: 'button', className: 'button', onClick: reset }, 'Import' ) : null,
-					idle && ! dry && job.status === 'complete' && importedCount( job ) > 0 ? createElement( 'button', { type: 'button', className: 'button migrateplus-danger migrateplus-push', onClick: () => rollback( job.id ) }, 'Roll back this import' ) : null
+					} }, __( 'Adjust mapping', 'migrateplus' ) ) : null,
+					idle && ! dry && job.status === 'complete' ? createElement( 'a', { className: 'button button-primary', href: contentUrl( job ) }, __( 'View imported content', 'migrateplus' ) ) : null,
+					idle ? createElement( 'button', { type: 'button', className: 'button', onClick: reset }, __( 'Import', 'migrateplus' ) ) : null,
+					canRollBack ? createElement( 'button', { type: 'button', className: 'button migrateplus-danger migrateplus-push', onClick: () => rollback( job.id ) }, __( 'Roll back this import', 'migrateplus' ) ) : null
 				)
 			),
 			createElement( RunLog, { job } )
@@ -2030,10 +2625,10 @@
 
 		return createElement( 'section', { className: 'migrateplus-panel migrateplus-log-panel' },
 			createElement( 'header', { className: 'migrateplus-log-head' },
-				createElement( 'h2', null, 'Log' ),
-				createElement( 'div', { className: 'migrateplus-chips', role: 'group', 'aria-label': 'Filter log' },
-					filterChip( 'all', 'All' ), filterChip( 'success', 'Saved' ), filterChip( 'warning', 'Warnings' ), filterChip( 'error', 'Errors' ) ),
-				createElement( 'input', { type: 'search', id: 'migrateplus-log-search', className: 'migrateplus-search', placeholder: 'Search the log', 'aria-label': 'Search the log', value: state.logQuery, onChange: ( e ) => {
+				createElement( 'h2', null, __( 'Log', 'migrateplus' ) ),
+				createElement( 'div', { className: 'migrateplus-chips', role: 'group', 'aria-label': __( 'Filter log', 'migrateplus' ) },
+					filterChip( 'all', __( 'All', 'migrateplus' ) ), filterChip( 'success', __( 'Saved', 'migrateplus' ) ), filterChip( 'warning', __( 'Warnings', 'migrateplus' ) ), filterChip( 'error', __( 'Errors', 'migrateplus' ) ) ),
+				createElement( 'input', { type: 'search', id: 'migrateplus-log-search', className: 'migrateplus-search', placeholder: __( 'Search the log', 'migrateplus' ), 'aria-label': __( 'Search the log', 'migrateplus' ), value: state.logQuery, onChange: ( e ) => {
 					state.logQuery = e.target.value;
 					render();
 				} } )
@@ -2042,19 +2637,16 @@
 				? entries.map( ( e, i ) => createElement( 'li', { key: i, className: 'migrateplus-log-' + e.l },
 					createElement( 'time', { dateTime: new Date( e.t * 1000 ).toISOString() }, new Date( e.t * 1000 ).toLocaleTimeString() ),
 					createElement( 'span', null, e.m ) ) )
-				: createElement( 'li', { className: 'migrateplus-log-empty' }, counts.all ? 'No log lines match.' : 'Waiting for the first batch…' ) )
+				: createElement( 'li', { className: 'migrateplus-log-empty' }, counts.all ? __( 'No log lines match.', 'migrateplus' ) : __( 'Waiting for the first batch…', 'migrateplus' ) ) )
 		);
 	}
 
-	/** Where the imported content is listed: the menus, users or settings screen for an export of those alone. */
+	/** Where the imported content is listed: the menus or settings screen for an export of those alone. */
 	function contentUrl( job ) {
 		const sides = jobSides( job );
 		if ( ! Number( job.total ) ) {
 			if ( sides.menus ) {
 				return D.adminUrl + 'nav-menus.php';
-			}
-			if ( sides.users ) {
-				return D.adminUrl + 'users.php';
 			}
 			if ( sides.site_settings ) {
 				return D.adminUrl + 'options-general.php';
@@ -2068,21 +2660,20 @@
 		render();
 	}
 
+	/** Pause from the page's Pause/Resume button, but not when it was Resume a moment ago: that's the second click of a double click. */
+	function pauseUnlessJustResumed() {
+		if ( Date.now() - state.resumedAt < 500 ) {
+			return;
+		}
+		pause();
+	}
+
 	function resume() {
 		state.paused = false;
 		state.error = '';
+		state.resumedAt = Date.now();
 		render();
 		runLoop();
-	}
-
-	function hideRunModal() {
-		state.modalHidden = true;
-		modal.close();
-	}
-
-	function showRunModal() {
-		state.modalHidden = false;
-		modal.open( { kind: 'run' } );
 	}
 
 	/**
@@ -2096,7 +2687,6 @@
 		const dry = Number( job.options.dry_run ) === 1;
 		const done = [ 'complete', 'rolled_back' ].includes( job.status );
 		const pausing = state.paused && state.running;
-		const noun = dry ? 'Dry run' : 'Import';
 
 		let percent = null;
 		if ( done ) {
@@ -2105,12 +2695,15 @@
 			percent = Math.min( 100, ( processed / total ) * 100 );
 		}
 
-		let detail = processed.toLocaleString() + ( total ? ' of ' + total.toLocaleString() : '' ) + ' records processed';
+		let detail = total
+			? sprintf( __( '%1$s of %2$s records processed', 'migrateplus' ), processed.toLocaleString(), total.toLocaleString() )
+			: sprintf( __( '%s records processed', 'migrateplus' ), processed.toLocaleString() );
 		const clock = state.runClock;
 		if ( ! done && ! state.paused && total && clock && processed > clock.processed ) {
 			const rate = ( processed - clock.processed ) / ( ( Date.now() - clock.t ) / 1000 );
 			if ( rate > 0 ) {
-				detail += ', about ' + formatDuration( ( total - processed ) / rate ) + ' left';
+				/* translators: 1: records processed, 2: time left, e.g. 3m 05s */
+				detail = sprintf( __( '%1$s, about %2$s left', 'migrateplus' ), detail, formatDuration( ( total - processed ) / rate ) );
 			}
 		}
 
@@ -2119,59 +2712,71 @@
 		let tone = '';
 		let note = '';
 		let actions;
+		const close = () => modal.close();
 		if ( done ) {
-			title = job.status === 'rolled_back' ? 'Rolled back' : noun + ' complete';
-			message = dry ? 'Nothing was saved. Review the numbers below, then run the real import.' : 'All records have been processed.';
+			title = dry ? __( 'Dry run complete', 'migrateplus' ) : __( 'Import complete', 'migrateplus' );
+			if ( job.status === 'rolled_back' ) {
+				title = __( 'Rolled back', 'migrateplus' );
+			}
+			message = dry ? __( 'Nothing was saved. Review the numbers below, then run the real import.', 'migrateplus' ) : __( 'All records have been processed.', 'migrateplus' );
 			tone = Number( s.failed ) > 0 ? '' : 'success';
 			if ( Number( s.failed ) > 0 ) {
-				note = s.failed + ' record' + ( Number( s.failed ) === 1 ? '' : 's' ) + ' failed. See the log for details.';
+				/* translators: %s: number of records that failed */
+				note = sprintf( _n( '%s record failed. See the log for details.', '%s records failed. See the log for details.', Number( s.failed ), 'migrateplus' ), s.failed );
 			}
 			actions = dry
 				? [
-					{ label: 'Run the real import', primary: true, onClick: () => start( false ) },
-					{ label: 'Adjust mapping', onClick: () => {
+					{ label: __( 'Run the real import', 'migrateplus' ), primary: true, onClick: () => start( false ) },
+					{ label: __( 'Adjust mapping', 'migrateplus' ), onClick: () => {
 						modal.close();
 						state.step = 'map';
 						render();
 					} },
-					{ label: 'Close', onClick: () => modal.close() },
+					{ label: __( 'Close', 'migrateplus' ), onClick: close },
 				]
 				: [
-					{ label: 'View imported content', primary: true, href: contentUrl( job ) },
-					{ label: 'Close', onClick: () => modal.close() },
+					{ label: __( 'View imported content', 'migrateplus' ), primary: true, href: contentUrl( job ) },
+					{ label: __( 'Close', 'migrateplus' ), onClick: close },
 				];
 		} else if ( state.error ) {
-			title = noun + ' stopped';
-			message = 'Progress is saved. Fix the problem, then resume to pick up where it stopped.';
+			title = dry ? __( 'Dry run stopped', 'migrateplus' ) : __( 'Import stopped', 'migrateplus' );
+			message = __( 'Progress is saved. Fix the problem, then resume to pick up where it stopped.', 'migrateplus' );
 			tone = 'error';
-			note = state.error.replace( / Fix the problem, then press Resume to pick up where it stopped\.$/, '' );
+			note = state.error.endsWith( ' ' + RESUME_ADVICE ) ? state.error.slice( 0, -RESUME_ADVICE.length - 1 ) : state.error;
 			actions = [
-				{ label: 'Resume', primary: true, onClick: resume },
-				{ label: 'Close', onClick: hideRunModal },
+				{ label: __( 'Resume', 'migrateplus' ), primary: true, onClick: resume },
+				{ label: __( 'Close', 'migrateplus' ), onClick: close },
 			];
 		} else if ( pausing ) {
-			title = 'Pausing…';
-			message = 'Finishing the current batch, then pausing.';
+			title = __( 'Pausing…', 'migrateplus' );
+			message = __( 'Finishing the current batch, then pausing.', 'migrateplus' );
 			tone = 'paused';
-			actions = [ { label: 'Pausing…', disabled: true }, { label: 'Hide', onClick: hideRunModal } ];
+			actions = [ { label: __( 'Pausing…', 'migrateplus' ), disabled: true }, { label: __( 'Hide', 'migrateplus' ), onClick: close } ];
 		} else if ( state.paused ) {
-			title = noun + ' paused';
-			message = 'Progress is saved. Resume any time, or come back later from History.';
+			title = dry ? __( 'Dry run paused', 'migrateplus' ) : __( 'Import paused', 'migrateplus' );
+			message = __( 'Progress is saved. Resume any time, or come back later from History.', 'migrateplus' );
 			tone = 'paused';
 			actions = [
-				{ label: 'Resume', primary: true, onClick: resume },
-				{ label: 'Close', onClick: hideRunModal },
+				{ label: __( 'Resume', 'migrateplus' ), primary: true, onClick: resume },
+				{ label: __( 'Close', 'migrateplus' ), onClick: close },
 			];
 		} else {
-			title = ( dry ? 'Dry run in progress' : 'Importing content' ) + '…';
+			title = dry ? __( 'Dry run in progress…', 'migrateplus' ) : __( 'Importing content…', 'migrateplus' );
 			const part = currentSection( job );
-			message = ( part ? 'Now: ' + part.label.toLowerCase() + ', ' + Number( part.done ).toLocaleString() + ' of ' + Number( part.total ).toLocaleString() + '. ' + sectionsText( job ) + '. ' : '' ) +
-				'Keep this tab open. Records are processed in batches of ' + job.options.batch_size + '.';
+			/* translators: %s: records per batch */
+			message = sprintf( __( 'Keep this tab open. Records are processed in batches of %s.', 'migrateplus' ), job.options.batch_size );
+			if ( part ) {
+				/* translators: 1: the part being imported, e.g. pages, 2: items done, 3: items in it, 4: progress of every part */
+				message = sprintf( __( 'Now: %1$s, %2$s of %3$s. %4$s.', 'migrateplus' ), part.label.toLowerCase(), Number( part.done ).toLocaleString(), Number( part.total ).toLocaleString(), sectionsText( job ) ) + ' ' + message;
+			}
 			const last = ( job.log || [] )[ ( job.log || [] ).length - 1 ];
-			note = last ? truncate( last.m, 140 ) : 'Waiting for the first batch…';
+			note = last ? truncate( last.m, 140 ) : __( 'Waiting for the first batch…', 'migrateplus' );
+			if ( state.lockWait ) {
+				note = __( 'Waiting for another tab…', 'migrateplus' );
+			}
 			actions = [
-				{ label: 'Pause', onClick: pause },
-				{ label: 'Hide', onClick: hideRunModal },
+				{ label: __( 'Pause', 'migrateplus' ), onClick: pause },
+				{ label: __( 'Hide', 'migrateplus' ), onClick: close },
 			];
 		}
 
@@ -2184,14 +2789,17 @@
 			detail,
 			tone,
 			note,
-			stats: [
-				[ 'created', dry ? 'Would create' : 'Created' ], [ 'updated', dry ? 'Would update' : 'Updated' ], [ 'skipped', 'Skipped' ], [ 'failed', 'Failed' ],
-			].map( ( [ key, label ] ) => ( { key, label, value: s[ key ] } ) ),
+			stats: OUTCOMES.map( ( [ key, label, dryLabel ] ) => ( { key, label: dry ? dryLabel : label, value: s[ key ] } ) ),
 			actions,
 			dismissible: true,
-			onDismiss: done ? () => modal.close() : hideRunModal,
 		};
 	}
+
+	// Added to the message of an error that stopped a run.
+	const RESUME_ADVICE = __( 'Fix the problem, then press Resume to pick up where it stopped.', 'migrateplus' );
+	// How long a run waits for another tab or request to let go of the batch lock: a batch may take as long as API_TIMEOUT.
+	const LOCK_RETRY_MS = 3000;
+	const LOCK_RETRIES = Math.ceil( API_TIMEOUT / LOCK_RETRY_MS );
 
 	function runLoop() {
 		if ( state.running ) {
@@ -2200,14 +2808,18 @@
 		state.running = true;
 		state.runClock = { t: Date.now(), processed: Number( state.job.stats.processed ) || 0 };
 		let retries = 0;
+		let lockRetries = 0;
 		const tick = () => {
 			if ( state.paused ) {
 				state.running = false;
+				state.lockWait = false;
 				render();
 				return;
 			}
 			api( 'run', { job: state.job.id } ).then( ( data ) => {
 				retries = 0;
+				lockRetries = 0;
+				state.lockWait = false;
 				state.job = data.job;
 				if ( state.tab === 'new' && state.step === 'run' ) {
 					render();
@@ -2219,9 +2831,12 @@
 				}
 				tick();
 			} ).catch( ( err ) => {
-				// Another tab or request holds the batch lock: wait for it.
-				if ( 'migrateplus_locked' === err.code ) {
-					setTimeout( tick, 3000 );
+				// Another tab or request holds the batch lock: wait for it, and say so, for as long as one batch can take.
+				if ( 'migrateplus_locked' === err.code && lockRetries < LOCK_RETRIES ) {
+					lockRetries++;
+					state.lockWait = true;
+					render();
+					setTimeout( tick, LOCK_RETRY_MS );
 					return;
 				}
 				// A dropped connection shouldn't stop a long import: try again after 2, 4 and 8 seconds.
@@ -2231,7 +2846,8 @@
 				}
 				state.running = false;
 				state.paused = true;
-				state.error = err.message.replace( /([^.!?])$/, '$1.' ) + ' Fix the problem, then press Resume to pick up where it stopped.';
+				state.lockWait = false;
+				state.error = err.message.replace( /([^.!?])$/, '$1.' ) + ' ' + RESUME_ADVICE;
 				render();
 			} );
 		};
@@ -2245,16 +2861,31 @@
 		state.fields = [];
 		state.mapping = normalizeMapping();
 		state.options = Object.assign( {}, D.defaults );
+		state.options.authors = {};
 		state.error = '';
 		state.paused = false;
 		state.direct = false;
 		state.savedPick = '';
 		state.savedNotice = null;
+		state.logFilter = 'all';
+		state.logQuery = '';
 		if ( state.tab !== 'new' ) {
 			window.location.href = D.importUrl;
 			return;
 		}
+		dropJobFromUrl();
 		render();
+	}
+
+	/** Take ?job= and &resume=1 out of the address, so a reload doesn't open or resume that import again. */
+	function dropJobFromUrl() {
+		const url = new URL( window.location.href );
+		if ( ! url.searchParams.has( 'job' ) && ! url.searchParams.has( 'resume' ) ) {
+			return;
+		}
+		url.searchParams.delete( 'job' );
+		url.searchParams.delete( 'resume' );
+		window.history.replaceState( window.history.state, '', url.toString() );
 	}
 
 	/** Posts the job created over all its runs (stats only cover the last; jobs saved before created_total fall back to them). */
@@ -2265,9 +2896,9 @@
 	function rollback( jobId, confirmed ) {
 		if ( ! confirmed ) {
 			ask( {
-				title: 'Roll back this import?',
-				message: 'Permanently delete every post, media file, comment and menu created by this import? Posts that were only updated are kept, without the comments it added to them.',
-				label: 'Roll back',
+				title: __( 'Roll back this import?', 'migrateplus' ),
+				message: __( 'Permanently delete every post, media file, comment and menu created by this import? Posts that were only updated are kept, without the comments it added to them.', 'migrateplus' ),
+				label: __( 'Roll back', 'migrateplus' ),
 				danger: true,
 				onConfirm: () => rollback( jobId, true ),
 			} );
@@ -2282,12 +2913,14 @@
 				render();
 			}
 		};
+		/* translators: %s: number of items deleted */
+		const deletedText = () => sprintf( _n( '%s item deleted', '%s items deleted', removed, 'migrateplus' ), removed.toLocaleString() );
 		modal.open( {
 			kind: 'rollback',
-			title: 'Rolling back import',
-			message: 'Deleting the posts and media files this import created. Keep this tab open.',
+			title: __( 'Rolling back import', 'migrateplus' ),
+			message: __( 'Deleting the posts and media files this import created. Keep this tab open.', 'migrateplus' ),
 			percent: null,
-			detail: 'Counting items…',
+			detail: __( 'Counting items…', 'migrateplus' ),
 			tone: '',
 			actions: [],
 			dismissible: false,
@@ -2304,38 +2937,39 @@
 			}
 			if ( data.done ) {
 				modal.update( {
-					title: 'Rollback complete',
-					message: 'The imported content was deleted. Posts that were only updated were kept.',
+					title: __( 'Rollback complete', 'migrateplus' ),
+					message: __( 'The imported content was deleted. Posts that were only updated were kept.', 'migrateplus' ),
 					percent: 100,
 					tone: 'success',
-					detail: removed.toLocaleString() + ' item' + ( removed === 1 ? '' : 's' ) + ' deleted',
+					detail: deletedText(),
 					dismissible: true,
 					onDismiss: null,
-					actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
+					actions: [ { label: __( 'Close', 'migrateplus' ), primary: true, onClick: () => modal.close() } ],
 				} );
 				refresh();
 				return;
 			}
 			modal.update( {
 				percent: total ? ( removed / total ) * 100 : null,
-				detail: removed.toLocaleString() + ' of ' + total.toLocaleString() + ' items deleted',
+				/* translators: 1: items deleted so far, 2: items to delete */
+				detail: sprintf( __( '%1$s of %2$s items deleted', 'migrateplus' ), removed.toLocaleString(), total.toLocaleString() ),
 			} );
 			return nextBatch();
 		} ).catch( ( err ) => {
 			modal.update( {
-				title: 'Rollback stopped',
-				message: 'Some items may already be deleted. You can run the rollback again to finish it.',
+				title: __( 'Rollback stopped', 'migrateplus' ),
+				message: __( 'Some items may already be deleted. You can run the rollback again to finish it.', 'migrateplus' ),
 				tone: 'error',
-				detail: removed ? removed.toLocaleString() + ' item' + ( removed === 1 ? '' : 's' ) + ' deleted' : '',
+				detail: removed ? deletedText() : '',
 				note: err.message,
 				dismissible: true,
 				onDismiss: null,
 				actions: [
-					{ label: 'Try again', primary: true, onClick: () => {
-						modal.update( { title: 'Rolling back import', tone: '', note: '', dismissible: false, actions: [] } );
+					{ label: __( 'Try again', 'migrateplus' ), primary: true, onClick: () => {
+						modal.update( { title: __( 'Rolling back import', 'migrateplus' ), tone: '', note: '', dismissible: false, actions: [] } );
 						nextBatch();
 					} },
-					{ label: 'Close', onClick: () => {
+					{ label: __( 'Close', 'migrateplus' ), onClick: () => {
 						modal.close();
 						refresh();
 					} },
@@ -2347,7 +2981,7 @@
 
 	// Export
 
-	const EXPORT_STATUSES = [ [ 'publish', 'Published' ], [ 'draft', 'Draft' ], [ 'pending', 'Pending review' ], [ 'private', 'Private' ], [ 'future', 'Scheduled' ] ];
+	const EXPORT_STATUSES = [ [ 'publish', __( 'Published', 'migrateplus' ) ], [ 'draft', __( 'Draft', 'migrateplus' ) ], [ 'pending', __( 'Pending review', 'migrateplus' ) ], [ 'private', __( 'Private', 'migrateplus' ) ], [ 'future', __( 'Scheduled', 'migrateplus' ) ] ];
 	// Shown as chips on the Export screen; every other type goes in the Custom Post Types list.
 	const BUILTIN_TYPES = [ 'post', 'page', 'attachment' ];
 	// WooCommerce's content, listed under its own label with orders when WooCommerce is active.
@@ -2364,34 +2998,49 @@
 	function recount() {
 		clearTimeout( exportCountTimer );
 		const a = state.exportArgs;
-		if ( ! a.post_types.length && ! Number( a.include_users ) && ! Number( a.include_orders ) && ! Number( a.include_site_settings ) && ! Number( a.include_menus ) ) {
+		if ( ! a.post_types.length && ! Number( a.include_orders ) && ! Number( a.include_site_settings ) && ! Number( a.include_menus ) ) {
 			++exportCountSeq; // An answer still on its way is stale.
-			state.exportCount = { text: 'Nothing to export yet. Select at least one card to export.', warn: true, empty: true, lines: [] };
+			state.exportCount = { text: __( 'Nothing to export yet. Select at least one card to export.', 'migrateplus' ), warn: true, empty: true, lines: [] };
 			render();
 			return;
 		}
-		state.exportCount.text = 'Counting…';
+		// Not empty until the count says so: a count that fails must not leave Export disabled by an older answer.
+		state.exportCount = Object.assign( {}, state.exportCount, { text: __( 'Counting…', 'migrateplus' ), empty: false } );
 		render();
 		exportCountTimer = setTimeout( () => {
 			const seq = ++exportCountSeq;
-			api( 'export_count', { args: state.exportArgs } ).then( ( d ) => {
+			api( 'export_count', { args: exportArgsToSend() } ).then( ( d ) => {
 				if ( seq !== exportCountSeq ) {
 					return;
 				}
 				const counts = Object.entries( d.counts || {} );
-				const each = counts.length > 1 ? ' (' + counts.map( ( [ type, n ] ) => n.toLocaleString() + ' ' + ( 1 === n ? postType( type ).label : postType( type ).plural || postType( type ).label ).toLowerCase() ).join( ', ' ) + ')' : '';
-						const sides = sidesList( d.sides || { terms: d.terms, menus: d.menus } );
-				const withSides = sides.length ? ', with ' + joinAnd( sides ) : '';
+				const typeName = ( type, n ) => ( 1 === n ? postType( type ).label : postType( type ).plural || postType( type ).label ).toLowerCase();
+				/* translators: a number of items of one content type. 1: the number, 2: the type, e.g. posts */
+				const typeCount = ( [ type, n ] ) => sprintf( __( '%1$s %2$s', 'migrateplus' ), n.toLocaleString(), typeName( type, n ) );
+				const each = counts.length > 1 ? ' (' + counts.map( typeCount ).join( ', ' ) + ')' : '';
+				const sides = sidesList( d.sides || { terms: d.terms, menus: d.menus } );
 				// One line per part of the file, for the rail: types with something in them, then the side sections.
-				const lines = counts.filter( ( [ , n ] ) => n > 0 ).map( ( [ type, n ] ) => n.toLocaleString() + ' ' + ( 1 === n ? postType( type ).label : postType( type ).plural || postType( type ).label ).toLowerCase() ).concat( sides );
-				// No post type ticked (users or orders alone) is a choice, not an empty match.
+				const lines = counts.filter( ( [ , n ] ) => n > 0 ).map( typeCount ).concat( sides );
+				// No post type ticked (orders or settings alone) is a choice, not an empty match.
 				const noTypes = ! state.exportArgs.post_types.length;
+				let text;
+				if ( ! d.count && sides.length ) {
+					/* translators: %s: what will be exported, e.g. "2 orders" */
+					text = noTypes ? sprintf( __( '%s will be exported', 'migrateplus' ), joinAnd( sides ) ) : sprintf( __( 'No content matches: only %s will be exported', 'migrateplus' ), joinAnd( sides ) );
+				} else {
+					/* translators: %s: number of items */
+					let what = 1 === d.count && 1 === counts.length ? typeCount( counts[ 0 ] ) : sprintf( _n( '%s item', '%s items', d.count, 'migrateplus' ), d.count.toLocaleString() );
+					what += each;
+					if ( sides.length ) {
+						/* translators: 1: the items, 2: what else is exported, e.g. "5 terms and 2 orders" */
+						what = sprintf( __( '%1$s, with %2$s', 'migrateplus' ), what, joinAnd( sides ) );
+					}
+					text = sprintf( __( '%s will be exported', 'migrateplus' ), what );
+				}
 				state.exportCount = {
-					text: ! d.count && sides.length
-						? ( noTypes ? '' : 'No content matches: only ' ) + joinAnd( sides ) + ' will be exported'
-						: d.count.toLocaleString() + ' ' + ( d.count === 1 && 1 === counts.length ? postType( counts[ 0 ][ 0 ] ).label.toLowerCase() : 'items' ) + each + withSides + ' will be exported',
+					text,
 					warn: ! d.count && ! ( noTypes && sides.length ),
-					empty: ! d.count && ! sides.length, // Menus, terms, users or settings alone are worth a file.
+					empty: ! d.count && ! sides.length, // Menus, terms, orders or settings alone are worth a file.
 					lines,
 				};
 				render();
@@ -2405,14 +3054,78 @@
 		}, 250 );
 	}
 
+	/** The ACF fields on the ticked post types. */
+	function exportAcfCount() {
+		return state.exportArgs.post_types.reduce( ( n, t ) => n + acfFields( t ).length, 0 );
+	}
+
+	// The toggles the export cards can show, with their label and help.
+	const EXPORT_CARD_TOGGLES = {
+		include_terms: [ __( 'Categories, tags and terms', 'migrateplus' ), __( 'Hierarchy is kept as "Parent > Child".', 'migrateplus' ) ],
+		include_term_data: [ __( 'Term data', 'migrateplus' ), __( 'The terms of these content types as their own section: descriptions, custom fields, ACF fields, category images and terms nothing uses yet.', 'migrateplus' ) ],
+		include_image: [ __( 'Featured images', 'migrateplus' ), __( 'Exported as URLs; the importing site downloads them.', 'migrateplus' ) ],
+		include_meta: [ __( 'Custom fields', 'migrateplus' ), __( 'Public post meta. Private keys starting with "_" and keys listed in Settings are left out.', 'migrateplus' ) ],
+		/* translators: %s: number of ACF fields */
+		include_acf: [ __( 'ACF fields', 'migrateplus' ), () => sprintf( _n( '%s field on these content types. Images become URLs, related posts become references.', '%s fields on these content types. Images become URLs, related posts become references.', exportAcfCount(), 'migrateplus' ), exportAcfCount() ) ],
+		include_acf_definitions: [ __( 'ACF definitions', 'migrateplus' ), __( 'Field groups, post types, taxonomies and options pages, as ACF\'s own export writes them.', 'migrateplus' ) ],
+		include_comments: [ __( 'Comments', 'migrateplus' ), __( 'Approved comments and replies, with their public comment fields. Pending, spam and trashed comments are left out.', 'migrateplus' ) ],
+		include_yoast: [ __( 'Yoast SEO', 'migrateplus' ), __( 'Titles, descriptions, keyphrases, social images and primary categories of posts and terms.', 'migrateplus' ) ],
+		include_woo: [ __( 'Product data', 'migrateplus' ), __( 'Prices, stock, attributes, downloads and variations. Images become URLs; related products link up by ID or SKU.', 'migrateplus' ) ],
+		include_acf_options: [ __( 'ACF options pages', 'migrateplus' ), __( 'The values of every options page. Images become URLs, related posts become references.', 'migrateplus' ) ],
+	};
+
+	/**
+	 * Which card toggles are on screen for what is ticked now: `post` for the card that carries the post field
+	 * toggles, then by card key. The Export screen draws these, and exportArgsToSend() sends every other one as 0.
+	 */
+	function shownCardToggles() {
+		const x = state.exportArgs;
+		const acf = !! ( D.acf && D.acf.active );
+		// Only what the ticked types can carry: no terms toggle for types without taxonomies, no featured
+		// images or comments for types that don't support them, no ACF toggle without ACF fields.
+		const picked = x.post_types.map( postType );
+		const can = ( key ) => picked.some( ( p ) => ! p.supports || p.supports[ key ] );
+		const hasTerms = picked.some( ( p ) => ( p.taxonomies || [] ).length > 0 );
+		// Statuses, featured images and the like don't apply to media.
+		const isMedia = picked.length > 0 && x.post_types.every( ( t ) => t === 'attachment' );
+		const post = ! picked.length ? [] : [
+			hasTerms && 'include_terms',
+			hasTerms && 'include_term_data',
+			! isMedia && can( 'thumbnail' ) && 'include_image',
+			'include_meta',
+			acf && exportAcfCount() && 'include_acf',
+			acf && 'include_acf_definitions',
+			can( 'comments' ) && 'include_comments',
+			D.sides && D.sides.yoast && 'include_yoast',
+		].filter( Boolean );
+		return {
+			post,
+			woo: D.woo && D.woo.active && x.post_types.includes( 'product' ) ? [ 'include_woo' ] : [],
+			site: acf && D.sides && D.sides.site && Number( x.include_site_settings ) ? [ 'include_acf_options' ] : [],
+		};
+	}
+
+	/** The export args as sent: a card toggle only applies while it is on screen, so every hidden one goes as 0. */
+	function exportArgsToSend() {
+		const x = state.exportArgs;
+		const shown = Object.values( shownCardToggles() ).flat();
+		const args = Object.assign( {}, x, {
+			// The PHP side drops an empty array from the request, so no sections goes as ''.
+			site_sections: ( x.site_sections || [] ).length ? x.site_sections : '',
+		} );
+		Object.keys( EXPORT_CARD_TOGGLES ).forEach( ( k ) => {
+			args[ k ] = shown.includes( k ) && Number( x[ k ] ) ? 1 : 0;
+		} );
+		return args;
+	}
+
 	function Export() {
 		const x = state.exportArgs;
 		const setArg = ( k, v ) => {
 			x[ k ] = v;
 			recount();
 		};
-		const toggle = ( k, label, help, disabled ) => createElement( Toggle, { id: 'migrateplus-export-' + k, label, help, disabled, checked: ! disabled && !! Number( x[ k ] ), onChange: ( e ) => setArg( k, e.target.checked ? 1 : 0 ) } );
-		const acfCount = x.post_types.reduce( ( n, t ) => n + acfFields( t ).length, 0 );
+		const toggle = ( k, label, help, disabled ) => createElement( Toggle, { key: k, id: 'migrateplus-export-' + k, label, help, disabled, checked: ! disabled && !! Number( x[ k ] ), onChange: ( e ) => setArg( k, e.target.checked ? 1 : 0 ) } );
 		// Statuses, featured images and the like don't apply to media.
 		const isMedia = x.post_types.length > 0 && x.post_types.every( ( t ) => t === 'attachment' );
 		// WooCommerce's types go behind a button of their own, with orders, like the Custom Post Types.
@@ -2424,24 +3137,22 @@
 		const blocks = byName( BLOCK_TYPES );
 		const customs = exportTypes().filter( ( p ) => ! BUILTIN_TYPES.includes( p.name ) && ! BLOCK_TYPES.includes( p.name ) && 'wp_navigation' !== p.name && ! ( wooActive && WOO_TYPES.includes( p.name ) ) );
 		// Classic menus (Appearance → Menus) and the Site Editor's navigation blocks share one card.
-		const menus = D.menus ? { name: 'menus', label: 'Menus', arg: 'include_menus' } : null;
-		const navigation = byName( [ 'wp_navigation' ] ).map( ( p ) => Object.assign( {}, p, { plural: 'Navigation blocks' } ) );
-		const orders = D.sides && D.sides.orders ? { name: 'orders', label: 'Orders', arg: 'include_orders' } : null;
-		const users = D.sides && D.sides.users ? { name: 'users', label: 'Users', arg: 'include_users' } : null;
-		const site = D.sides && D.sides.site ? { name: 'site_settings', label: 'Site settings', arg: 'include_site_settings' } : null;
+		const menus = D.menus ? { name: 'menus', label: __( 'Menus', 'migrateplus' ), arg: 'include_menus' } : null;
+		const navigation = byName( [ 'wp_navigation' ] ).map( ( p ) => Object.assign( {}, p, { plural: __( 'Navigation blocks', 'migrateplus' ) } ) );
+		const orders = D.sides && D.sides.orders ? { name: 'orders', label: __( 'Orders', 'migrateplus' ), arg: 'include_orders' } : null;
+		const site = D.sides && D.sides.site ? { name: 'site_settings', label: __( 'Site settings', 'migrateplus' ), arg: 'include_site_settings' } : null;
 		const siteSections = D.siteSections || [];
 		const pickedSections = ( x.site_sections || [] ).filter( ( k ) => siteSections.some( ( s ) => s.key === k ) );
 		// A feature's parts: post types (by name) and side sections (by arg). What is picked of each.
 		const typeItem = ( p ) => ( { kind: 'type', name: p.name, label: p.plural || p.label, on: x.post_types.includes( p.name ) } );
 		const sideItem = ( s ) => ( { kind: 'side', name: s.name, label: s.label, arg: s.arg, on: !! Number( x[ s.arg ] ) } );
 		const features = [
-			{ key: 'content', label: 'Posts, pages and media', help: 'Tick the types, then choose below what travels with them.', items: byName( BUILTIN_TYPES ).map( typeItem ) },
-			{ key: 'blocks', label: 'Block editor', help: 'Synced patterns, templates and template parts of the Site Editor.', items: blocks.map( typeItem ) },
-			{ key: 'navigation', label: 'Navigation', help: 'Menus from Appearance → Menus with their items and theme locations, and the Site Editor\'s navigation blocks. Export the content they link to in the same file.', items: ( menus ? [ sideItem( menus ) ] : [] ).concat( navigation.map( typeItem ) ) },
-			{ key: 'woo', label: 'WooCommerce', help: 'Products with their data, coupons, and orders with their items, refunds and notes.', items: wooTypes.map( typeItem ).concat( orders ? [ sideItem( orders ) ] : [] ) },
-			{ key: 'cpt', label: 'Custom post types', help: 'Content types added by the theme or plugins.', items: customs.map( typeItem ) },
-			users ? { key: 'users', label: 'Users', help: 'Every account with its profile, roles and custom fields. Password hashes travel too when you may edit users: treat the file as confidential.', items: [ sideItem( users ) ], single: true } : null,
-			site ? { key: 'site', label: 'Site settings', help: 'Settings, widgets, theme and plugin options. Pick which parts below.', items: [ sideItem( site ) ], single: true } : null,
+			{ key: 'content', label: __( 'Posts, pages and media', 'migrateplus' ), help: __( 'Tick the types, then choose below what travels with them.', 'migrateplus' ), items: byName( BUILTIN_TYPES ).map( typeItem ) },
+			{ key: 'blocks', label: __( 'Block editor', 'migrateplus' ), help: __( 'Synced patterns, templates and template parts of the Site Editor.', 'migrateplus' ), items: blocks.map( typeItem ) },
+			{ key: 'navigation', label: __( 'Navigation', 'migrateplus' ), help: __( 'Menus from Appearance → Menus with their items and theme locations, and the Site Editor\'s navigation blocks. Export the content they link to in the same file.', 'migrateplus' ), items: ( menus ? [ sideItem( menus ) ] : [] ).concat( navigation.map( typeItem ) ) },
+			{ key: 'woo', label: __( 'WooCommerce', 'migrateplus' ), help: __( 'Products with their data, coupons, and orders with their items, refunds and notes.', 'migrateplus' ), items: wooTypes.map( typeItem ).concat( orders ? [ sideItem( orders ) ] : [] ) },
+			{ key: 'cpt', label: __( 'Custom post types', 'migrateplus' ), help: __( 'Content types added by the theme or plugins.', 'migrateplus' ), items: customs.map( typeItem ) },
+			site ? { key: 'site', label: __( 'Site settings', 'migrateplus' ), help: __( 'Settings, widgets, theme and plugin options. Pick which parts below.', 'migrateplus' ), items: [ sideItem( site ) ], single: true } : null,
 		].filter( ( f ) => f && f.items.length );
 		const pickedCount = features.reduce( ( n, f ) => n + f.items.filter( ( i ) => i.on ).length, 0 );
 		// Apply a set of items: post types in the order shown, side sections by their arg. Everything may be
@@ -2463,7 +3174,7 @@
 		// The status and date filters sit in the Posts, pages and media card: they apply to its content (dates to orders too).
 		const contentFilters = () => createElement( 'div', { className: 'migrateplus-export-filters' },
 				isMedia ? null : createElement( 'fieldset', { className: 'migrateplus-opt' },
-					createElement( 'legend', { className: 'migrateplus-opt-label' }, 'Status' ),
+					createElement( 'legend', { className: 'migrateplus-opt-label' }, __( 'Status', 'migrateplus' ) ),
 					createElement( 'div', { className: 'migrateplus-chips' }, EXPORT_STATUSES.map( ( [ v, l ] ) => {
 						const id = 'migrateplus-export-status-' + v;
 						return createElement( 'label', { key: v, className: 'migrateplus-check-chip', htmlFor: id },
@@ -2480,44 +3191,23 @@
 					} ) )
 				),
 				createElement( 'fieldset', { className: 'migrateplus-opt' },
-					createElement( 'legend', { className: 'migrateplus-opt-label' }, isMedia ? 'Uploaded between' : 'Published between' ),
+					createElement( 'legend', { className: 'migrateplus-opt-label' }, isMedia ? __( 'Uploaded between', 'migrateplus' ) : __( 'Published between', 'migrateplus' ) ),
 					createElement( 'div', { className: 'migrateplus-date-range' },
-						createElement( 'input', { type: 'date', 'aria-label': 'From', value: x.after, onChange: ( e ) => setArg( 'after', e.target.value ) } ),
-						createElement( 'span', { className: 'migrateplus-muted' }, 'and' ),
-						createElement( 'input', { type: 'date', 'aria-label': 'To', value: x.before, onChange: ( e ) => setArg( 'before', e.target.value ) } ) ),
-					createElement( 'span', { className: 'migrateplus-help' }, 'Leave empty to export everything.' )
+						createElement( DateInput, { label: __( 'From', 'migrateplus' ), value: x.after, onChange: ( v ) => setArg( 'after', v ) } ),
+						createElement( 'span', { className: 'migrateplus-muted' }, __( 'and', 'migrateplus' ) ),
+						createElement( DateInput, { label: __( 'To', 'migrateplus' ), value: x.before, onChange: ( v ) => setArg( 'before', v ) } ) ),
+					createElement( 'span', { className: 'migrateplus-help' }, __( 'Leave empty to export everything.', 'migrateplus' ) )
 				)
 		);
 		// What travels with a card's content: the post fields with Posts, pages and media (and any other post
 		// type), product data with products, the options pages with the site settings.
 		// The first card with a post type ticked carries the post field toggles: normally Posts, pages and media.
 		const postCard = features.find( ( o ) => o.items.some( ( i ) => 'type' === i.kind && i.on ) ) || null;
-		const cardToggles = ( f ) => {
-			if ( f === postCard ) {
-				// Only what the ticked types can carry: no terms toggle for types without taxonomies, no
-				// featured images or comments for types that don't support them, no ACF toggle without ACF fields.
-				const picked = x.post_types.map( postType );
-				const can = ( key ) => picked.some( ( p ) => ! p.supports || p.supports[ key ] );
-				const hasTerms = picked.some( ( p ) => ( p.taxonomies || [] ).length > 0 );
-				return [
-					hasTerms ? toggle( 'include_terms', 'Categories, tags and terms', 'Hierarchy is kept as "Parent > Child".' ) : null,
-					hasTerms ? toggle( 'include_term_data', 'Term data', 'The terms of these content types as their own section: descriptions, custom fields, ACF fields, category images and terms nothing uses yet.' ) : null,
-					! isMedia && can( 'thumbnail' ) ? toggle( 'include_image', 'Featured images', 'Exported as URLs; the importing site downloads them.' ) : null,
-					toggle( 'include_meta', 'Custom fields', 'Public post meta. Private keys starting with "_" and keys listed in Settings are left out.' ),
-					D.acf && D.acf.active && acfCount ? toggle( 'include_acf', 'ACF fields', acfCount + ' field' + ( acfCount === 1 ? '' : 's' ) + ' on these content types. Images become URLs, related posts become references.' ) : null,
-					D.acf && D.acf.active ? toggle( 'include_acf_definitions', 'ACF definitions', 'Field groups, post types, taxonomies and options pages, as ACF\'s own export writes them.' ) : null,
-					can( 'comments' ) ? toggle( 'include_comments', 'Comments', 'Approved comments and replies, with their public comment fields. Pending, spam and trashed comments are left out.' ) : null,
-					D.sides && D.sides.yoast ? toggle( 'include_yoast', 'Yoast SEO', 'Titles, descriptions, keyphrases, social images and primary categories of posts and terms.' ) : null,
-				];
-			}
-			if ( 'woo' === f.key && D.woo && D.woo.active && x.post_types.includes( 'product' ) ) {
-				return [ toggle( 'include_woo', 'Product data', 'Prices, stock, attributes, downloads and variations. Images become URLs; related products link up by ID or SKU.' ) ];
-			}
-			if ( 'site' === f.key && D.acf && D.acf.active ) {
-				return [ toggle( 'include_acf_options', 'ACF options pages', 'The values of every options page. Images become URLs, related posts become references.' ) ];
-			}
-			return [];
-		};
+		const shown = shownCardToggles();
+		const cardToggles = ( f ) => ( f === postCard ? shown.post : [] ).concat( shown[ f.key ] || [] ).map( ( k ) => {
+			const [ label, help ] = EXPORT_CARD_TOGGLES[ k ];
+			return toggle( k, label, typeof help === 'function' ? help() : help );
+		} );
 		const featureCard = ( f ) => {
 			const picked = f.items.filter( ( i ) => i.on ).length;
 			const id = 'migrateplus-export-feature-' + f.key;
@@ -2530,7 +3220,8 @@
 						onChange: ( e ) => apply( f.items, e.target.checked ),
 					} ),
 					createElement( 'span', { className: 'migrateplus-export-card-title' }, f.label ),
-					! f.single ? createElement( 'span', { className: 'migrateplus-export-card-count' }, picked ? picked + ' of ' + f.items.length : f.items.length + ( 1 === f.items.length ? ' type' : ' types' ) ) : null,
+					/* translators: 1: parts ticked, 2: parts of the card. Or: %s: number of content types */
+					! f.single ? createElement( 'span', { className: 'migrateplus-export-card-count' }, picked ? sprintf( __( '%1$s of %2$s', 'migrateplus' ), picked, f.items.length ) : sprintf( _n( '%s type', '%s types', f.items.length, 'migrateplus' ), f.items.length ) ) : null,
 					createElement( 'span', { className: 'migrateplus-help' }, f.help ) ),
 				picked && ! f.single ? createElement( 'div', { className: 'migrateplus-export-parts' },
 					createElement( 'div', { className: 'migrateplus-chips' }, f.items.map( ( i ) => {
@@ -2543,21 +3234,24 @@
 					cardToggles( f ).filter( Boolean ).length ? createElement( 'div', { className: 'migrateplus-toggles migrateplus-card-toggles' }, cardToggles( f ) ) : null ) : null,
 				picked && 'site' === f.key ? createElement( 'div', { className: 'migrateplus-export-parts' },
 					createElement( 'div', { className: 'migrateplus-table-tools' },
-						createElement( 'span', { className: 'migrateplus-help' }, pickedSections.length + ' of ' + siteSections.length + ' sections' ),
-						createElement( 'button', { type: 'button', className: 'button-link', onClick: () => setSections( siteSections.map( ( s ) => s.key ) ) }, 'All' ),
-						createElement( 'button', { type: 'button', className: 'button-link', onClick: () => setSections( [] ) }, 'None' ) ),
+						/* translators: 1: sections ticked, 2: sections there are */
+						createElement( 'span', { className: 'migrateplus-help' }, sprintf( __( '%1$s of %2$s sections', 'migrateplus' ), pickedSections.length, siteSections.length ) ),
+						createElement( 'button', { type: 'button', className: 'button-link', onClick: () => setSections( siteSections.map( ( s ) => s.key ) ) }, __( 'All', 'migrateplus' ) ),
+						createElement( 'button', { type: 'button', className: 'button-link', onClick: () => setSections( [] ) }, __( 'None', 'migrateplus' ) ) ),
 					createElement( 'div', { className: 'migrateplus-chips' }, siteSections.map( ( s ) => {
 						const sid = 'migrateplus-export-site-' + s.key;
 						return createElement( 'label', { key: s.key, className: 'migrateplus-check-chip', htmlFor: sid, title: s.help },
 							createElement( 'input', { type: 'checkbox', id: sid, value: s.key, checked: pickedSections.includes( s.key ), onChange: ( e ) => setSections( e.target.checked ? pickedSections.concat( s.key ) : pickedSections.filter( ( k ) => k !== s.key ) ) } ),
 							createElement( 'span', null, s.label ) );
 					} ) ),
-					! pickedSections.length ? createElement( 'p', { className: 'migrateplus-help is-warn' }, 'Pick at least one section, or untick Site settings.' ) : null,
+					! pickedSections.length ? createElement( 'p', { className: 'migrateplus-help is-warn' }, __( 'Pick at least one section, or untick Site settings.', 'migrateplus' ) ) : null,
 					cardToggles( f ).length ? createElement( 'div', { className: 'migrateplus-toggles migrateplus-card-toggles' }, cardToggles( f ) ) : null ) : null );
 		};
 		const le = state.lastExport;
 
 		const file = state.exportCount;
+		// The server would read no sections as all of them.
+		const noSections = !! site && !! Number( x.include_site_settings ) && ! pickedSections.length;
 		return createElement( Fragment, null,
 			createElement( 'form', { className: 'migrateplus-panel migrateplus-export', onSubmit: ( e ) => {
 				e.preventDefault();
@@ -2565,25 +3259,26 @@
 			} },
 				createElement( 'div', { className: 'migrateplus-export-layout' },
 					createElement( 'section', { className: 'migrateplus-export-manifest' },
-						createElement( 'h2', null, 'What to export' ),
-						createElement( 'div', { className: 'migrateplus-export-cards', role: 'group', 'aria-label': 'What to export' }, features.map( featureCard ) ) ),
+						createElement( 'h2', null, __( 'What to export', 'migrateplus' ) ),
+						createElement( 'div', { className: 'migrateplus-export-cards', role: 'group', 'aria-label': __( 'What to export', 'migrateplus' ) }, features.map( featureCard ) ) ),
 					// The file being built: what is in it so far, and the button that writes it.
-					createElement( 'aside', { className: 'migrateplus-export-file', 'aria-label': 'Your file' },
-						createElement( 'h2', null, 'Your file' ),
+					createElement( 'aside', { className: 'migrateplus-export-file', 'aria-label': __( 'Your file', 'migrateplus' ) },
+						createElement( 'h2', null, __( 'Your file', 'migrateplus' ) ),
 						createElement( 'p', { className: 'migrateplus-export-count' + ( file.warn ? ' is-warn' : '' ), 'aria-live': 'polite' }, file.text ),
 						file.lines && file.lines.length ? createElement( 'ul', { className: 'migrateplus-file-lines' }, file.lines.map( ( line ) => createElement( 'li', { key: line }, line ) ) ) : null,
-						pickedCount > 1 ? createElement( 'p', { className: 'migrateplus-help' }, 'Imported in this order on the other site: users first, then media, then the rest as listed, and orders last.' ) : null,
+						pickedCount > 1 ? createElement( 'p', { className: 'migrateplus-help' }, __( 'Imported in this order on the other site: media first, then the rest as listed, and orders last.', 'migrateplus' ) ) : null,
 						D.zlib ? createElement( 'div', { className: 'migrateplus-toggles migrateplus-file-options' },
-							toggle( 'gzip', 'Compress the file (.json.gz)', 'Much smaller, for a site whose upload limit is lower than the export. Migrate Plus imports it as it is.' ) ) : null,
-						createElement( 'button', { type: 'submit', className: 'button button-primary migrateplus-btn-lg migrateplus-file-export', disabled: file.empty }, 'Export' ) )
+							toggle( 'gzip', __( 'Compress the file (.json.gz)', 'migrateplus' ), __( 'Much smaller, for a site whose upload limit is lower than the export. Migrate Plus imports it as it is.', 'migrateplus' ) ) ) : null,
+						createElement( 'button', { type: 'submit', className: 'button button-primary migrateplus-btn-lg migrateplus-file-export', disabled: file.empty || noSections }, __( 'Export', 'migrateplus' ) ) )
 				)
 			),
 			le ? createElement( 'section', { className: 'migrateplus-summary' },
 				createElement( 'span', { className: 'migrateplus-source-icon migrateplus-icon-json', 'aria-hidden': 'true' } ),
 				createElement( 'div', { className: 'migrateplus-summary-text' },
 					createElement( 'strong', null, le.filename ),
-					createElement( 'span', null, le.done.toLocaleString() + ' items, ' + le.size + '. The download link works for 24 hours.' ) ),
-				createElement( 'a', { className: 'button button-primary', href: safeUrl( le.url ) }, 'Download' )
+					/* translators: 1: number of items, 2: file size */
+					createElement( 'span', null, sprintf( _n( '%1$s item, %2$s. The download link works for 24 hours.', '%1$s items, %2$s. The download link works for 24 hours.', le.done, 'migrateplus' ), le.done.toLocaleString(), le.size ) ) ),
+				createElement( 'a', { className: 'button button-primary', href: safeUrl( le.url ) }, __( 'Download', 'migrateplus' ) )
 			) : null
 		);
 	}
@@ -2595,25 +3290,30 @@
 
 	function runExport() {
 		const x = state.exportArgs;
-		modal.open( {
-			kind: 'export',
-			title: 'Exporting ' + ( 1 === x.post_types.length ? postType( x.post_types[ 0 ] ).label.toLowerCase() + ' ' : '' ) + 'content',
-			message: 'Writing a JSON file. Keep this tab open.',
-			percent: null,
-			detail: 'Counting…',
+		const working = {
+			/* translators: %s: a post type, e.g. post */
+			title: 1 === x.post_types.length ? sprintf( __( 'Exporting %s content', 'migrateplus' ), postType( x.post_types[ 0 ] ).label.toLowerCase() ) : __( 'Exporting content', 'migrateplus' ),
+			message: __( 'Writing a JSON file. Keep this tab open.', 'migrateplus' ),
+			tone: '',
+			note: '',
 			actions: [],
 			dismissible: false,
-		} );
-		const showFailure = ( err ) => modal.update( {
-			title: 'Export stopped',
+		};
+		modal.open( Object.assign( { kind: 'export', percent: null, detail: __( 'Counting…', 'migrateplus' ) }, working ) );
+		// A request that failed can be sent again: the next batch, or the start when there is no export yet.
+		const showFailure = ( err, retry ) => modal.update( {
+			title: __( 'Export stopped', 'migrateplus' ),
 			message: '',
 			tone: 'error',
 			detail: '',
 			note: err.message,
 			dismissible: true,
-			actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
+			actions: ( retry ? [ { label: __( 'Try again', 'migrateplus' ), primary: true, onClick: () => {
+				modal.update( working );
+				retry();
+			} } ] : [] ).concat( { label: __( 'Close', 'migrateplus' ), primary: ! retry, onClick: () => modal.close() } ),
 		} );
-		const nextBatch = ( id ) => api( 'export_run', { export: id } ).then( ( d ) => {
+		const nextBatch = ( id ) => apiWithRetry( 'export_run', { export: id } ).then( ( d ) => {
 			if ( d.error ) {
 				showFailure( { message: d.error } );
 				return;
@@ -2622,37 +3322,51 @@
 				state.lastExport = d;
 				const extras = [];
 				if ( d.acf ) {
-					extras.push( d.acf + ' ACF field' + ( d.acf === 1 ? '' : 's' ) );
+					/* translators: %s: number of ACF fields */
+					extras.push( sprintf( _n( '%s ACF field', '%s ACF fields', d.acf, 'migrateplus' ), d.acf ) );
 				}
 				if ( d.meta ) {
-					extras.push( d.meta + ' custom field' + ( d.meta === 1 ? '' : 's' ) );
+					/* translators: %s: number of custom fields */
+					extras.push( sprintf( _n( '%s custom field', '%s custom fields', d.meta, 'migrateplus' ), d.meta ) );
 				}
 				extras.push( ...sidesList( d.sides || { terms: d.terms, menus: d.menus } ) );
+				/* translators: %s: number of items */
+				let detail = sprintf( _n( '%s item', '%s items', d.done, 'migrateplus' ), d.done.toLocaleString() );
+				if ( extras.length ) {
+					/* translators: 1: the items, 2: what else is in the file, e.g. "3 ACF fields and 2 menus" */
+					detail = sprintf( __( '%1$s with %2$s', 'migrateplus' ), detail, joinAnd( extras ) );
+				}
 				modal.update( {
-					title: 'Export ready',
-					message: 'Import it on the other site with Migrate Plus → Import. The fields map themselves.',
+					title: __( 'Export ready', 'migrateplus' ),
+					message: __( 'Import it on the other site with Migrate Plus → Import. The fields map themselves.', 'migrateplus' ),
 					percent: 100,
 					tone: 'success',
-					detail: d.done.toLocaleString() + ' items' + ( extras.length ? ' with ' + joinAnd( extras ) : '' ) + ', ' + d.size,
+					/* translators: 1: what is in the file, 2: file size */
+					detail: sprintf( __( '%1$s, %2$s', 'migrateplus' ), detail, d.size ),
 					dismissible: true,
 					onDismiss: null,
 					actions: [
-						{ label: 'Download ' + ( /\.json\.gz$/.test( d.filename ) ? '.json.gz' : 'JSON' ), primary: true, href: d.url },
-						{ label: 'Close', onClick: () => modal.close() },
+						/* translators: %s: the file type, .json.gz or JSON */
+						{ label: sprintf( __( 'Download %s', 'migrateplus' ), /\.json\.gz$/.test( d.filename ) ? '.json.gz' : 'JSON' ), primary: true, href: d.url },
+						{ label: __( 'Close', 'migrateplus' ), onClick: () => modal.close() },
 					],
 				} );
 				return;
 			}
 			modal.update( {
 				percent: d.total ? ( d.done / d.total ) * 100 : null,
-				detail: d.done.toLocaleString() + ' of ' + d.total.toLocaleString() + ' items' + ( d.section ? ', now ' + d.section.toLowerCase() : '' ),
+				detail: d.section
+					/* translators: 1: items written, 2: items to write, 3: the part being written, e.g. pages */
+					? sprintf( __( '%1$s of %2$s items, now %3$s', 'migrateplus' ), d.done.toLocaleString(), d.total.toLocaleString(), d.section.toLowerCase() )
+					/* translators: 1: items written, 2: items to write */
+					: sprintf( __( '%1$s of %2$s items', 'migrateplus' ), d.done.toLocaleString(), d.total.toLocaleString() ),
 			} );
 			return nextBatch( id );
-		} );
-		api( 'export_start', { args: x } ).then( ( d ) => {
-			modal.update( { percent: 0, detail: '0 of ' + d.total.toLocaleString() + ' items' } );
+		}, ( err ) => showFailure( err, () => nextBatch( id ) ) );
+		apiWithRetry( 'export_start', { args: exportArgsToSend() } ).then( ( d ) => {
+			modal.update( { percent: 0, detail: sprintf( __( '%1$s of %2$s items', 'migrateplus' ), 0, d.total.toLocaleString() ) } );
 			return nextBatch( d.id );
-		} ).catch( showFailure );
+		}, ( err ) => showFailure( err, runExport ) ).catch( ( err ) => showFailure( err ) );
 	}
 
 	// Find & Replace
@@ -2685,7 +3399,7 @@
 		return createElement( Fragment, null,
 			createElement( 'form', { className: 'migrateplus-panel migrateplus-export migrateplus-replace', onSubmit: ( e ) => {
 				e.preventDefault();
-				r.problem = ! r.search ? 'Enter the text to search for.' : ( ! r.tables.length ? 'No database tables are selected. Please select at least one.' : '' );
+				r.problem = ! r.search ? __( 'Enter the text to search for.', 'migrateplus' ) : ( ! r.tables.length ? __( 'No database tables are selected. Please select at least one.', 'migrateplus' ) : '' );
 				render();
 				if ( ! r.problem ) {
 					runReplace();
@@ -2694,22 +3408,23 @@
 				createElement( 'div', { 'aria-live': 'assertive' }, r.problem ? createElement( Notice, { type: 'error', message: r.problem } ) : null ),
 				createElement( 'div', { className: 'migrateplus-export-grid' },
 					createElement( 'section', null,
-						createElement( 'h2', null, 'Find and replace' ),
-						textInput( 'search', 'Search for', 'http://old-site.test' ),
-						textInput( 'replace', 'Replace with', 'https://new-site.com' ),
+						createElement( 'h2', null, __( 'Find and replace', 'migrateplus' ) ),
+						textInput( 'search', __( 'Search for', 'migrateplus' ), 'http://old-site.test' ),
+						textInput( 'replace', __( 'Replace with', 'migrateplus' ), 'https://new-site.com' ),
 						createElement( 'div', { className: 'migrateplus-toggles is-flush' },
-							toggle( 'dry_run', 'Dry run', 'Count and preview the changes without saving anything.' ),
-							toggle( 'whole_urls', 'Whole URLs only', 'When you search for a web address or domain, only that exact site matches: http://old.test is not changed inside http://old.test.example.com or http://old.testing.com, and old.test is not changed inside sub.old.test.' ),
-							toggle( 'case_insensitive', 'Ignore case', 'Match "Example" and "example" alike.' ),
-							toggle( 'guids', 'Replace GUIDs', 'Post GUIDs are permanent IDs that feed readers rely on. Leave this off unless you know you need it.' ) ),
-						createElement( 'p', { className: 'migrateplus-help' }, 'Migrate Plus\'s own history and tracking data are left alone, so later imports still recognise content they brought in.' )
+							toggle( 'dry_run', __( 'Dry run', 'migrateplus' ), __( 'Count and preview the changes without saving anything.', 'migrateplus' ) ),
+							toggle( 'whole_urls', __( 'Whole URLs only', 'migrateplus' ), __( 'When you search for a web address or domain, only that exact site matches: http://old.test is not changed inside http://old.test.example.com or http://old.testing.com, and old.test is not changed inside sub.old.test.', 'migrateplus' ) ),
+							toggle( 'case_insensitive', __( 'Ignore case', 'migrateplus' ), __( 'Match "Example" and "example" alike.', 'migrateplus' ) ),
+							toggle( 'guids', __( 'Replace GUIDs', 'migrateplus' ), __( 'Post GUIDs are permanent IDs that feed readers rely on. Leave this off unless you know you need it.', 'migrateplus' ) ) ),
+						createElement( 'p', { className: 'migrateplus-help' }, __( 'Migrate Plus\'s own history and tracking data are left alone, so later imports still recognise content they brought in.', 'migrateplus' ) )
 					),
 					createElement( 'section', null,
-						createElement( 'h2', null, 'Tables' ),
+						createElement( 'h2', null, __( 'Tables', 'migrateplus' ) ),
 						createElement( 'div', { className: 'migrateplus-table-tools' },
-							createElement( 'span', { className: 'migrateplus-help' }, r.tables.length + ' of ' + all.length + ' tables selected' ),
-							createElement( 'button', { type: 'button', className: 'button-link', onClick: () => selectAll( true ) }, 'All' ),
-							createElement( 'button', { type: 'button', className: 'button-link', onClick: () => selectAll( false ) }, 'None' ) ),
+							/* translators: 1: tables selected, 2: tables there are */
+							createElement( 'span', { className: 'migrateplus-help' }, sprintf( __( '%1$s of %2$s tables selected', 'migrateplus' ), r.tables.length, all.length ) ),
+							createElement( 'button', { type: 'button', className: 'button-link', onClick: () => selectAll( true ) }, __( 'All', 'migrateplus' ) ),
+							createElement( 'button', { type: 'button', className: 'button-link', onClick: () => selectAll( false ) }, __( 'None', 'migrateplus' ) ) ),
 						createElement( 'div', { className: 'migrateplus-table-list' }, all.map( ( t ) => {
 							const id = 'migrateplus-table-' + t.name;
 							return createElement( 'label', { key: t.name, className: 'migrateplus-table-option', htmlFor: id },
@@ -2718,13 +3433,14 @@
 									changed();
 								} } ),
 								createElement( 'code', null, t.name ),
-								createElement( 'span', { className: 'migrateplus-help' }, '~' + t.rows.toLocaleString() + ' rows, ' + formatBytes( t.size ) ) );
+								/* translators: 1: approximate number of rows, 2: table size */
+								createElement( 'span', { className: 'migrateplus-help' }, sprintf( __( '~%1$s rows, %2$s', 'migrateplus' ), t.rows.toLocaleString(), formatBytes( t.size ) ) ) );
 						} ) )
 					)
 				),
 				createElement( 'footer', { className: 'migrateplus-panel-foot' },
-					createElement( 'span', { className: 'migrateplus-help' }, 'Real runs keep the original values so they can be rolled back. A database backup is still the safest net.' ),
-					createElement( 'button', { type: 'submit', className: 'button button-primary migrateplus-btn-lg' }, r.dry_run ? 'Run dry run' : 'Replace' ) )
+					createElement( 'span', { className: 'migrateplus-help' }, __( 'Real runs keep the original values so they can be rolled back. A database backup is still the safest net.', 'migrateplus' ) ),
+					createElement( 'button', { type: 'submit', className: 'button button-primary migrateplus-btn-lg' }, r.dry_run ? __( 'Run dry run', 'migrateplus' ) : __( 'Replace', 'migrateplus' ) ) )
 			),
 			r.result ? createElement( ReplaceResult, { d: r.result } ) : null,
 			createElement( ReplaceRuns )
@@ -2744,7 +3460,7 @@
 		} );
 	}
 
-	const REPLACE_STATUS_LABELS = { running: 'Running', complete: 'Complete', stopped: 'Stopped', failed: 'Failed', rolling_back: 'Rolling back', rollback_failed: 'Rollback incomplete', rolled_back: 'Rolled back' };
+	const REPLACE_STATUS_LABELS = { running: __( 'Running', 'migrateplus' ), complete: __( 'Complete', 'migrateplus' ), stopped: __( 'Stopped', 'migrateplus' ), failed: __( 'Failed', 'migrateplus' ), rolling_back: __( 'Rolling back', 'migrateplus' ), rollback_failed: __( 'Rollback incomplete', 'migrateplus' ), rolled_back: __( 'Rolled back', 'migrateplus' ) };
 
 	/** Real runs, with rollback. Dry runs change nothing, so they are not listed. */
 	function ReplaceRuns() {
@@ -2754,33 +3470,47 @@
 		}
 		const runs = state.replaceRuns;
 		if ( ! runs ) {
-			return createElement( 'section', { className }, createElement( 'p', { className: 'migrateplus-muted migrateplus-loading' }, 'Loading past replacements…' ) );
+			return createElement( 'section', { className }, createElement( 'p', { className: 'migrateplus-muted migrateplus-loading' }, __( 'Loading past replacements…', 'migrateplus' ) ) );
 		}
 		return createElement( 'section', { className },
 			createElement( 'header', { className: 'migrateplus-history-head' },
-				createElement( 'h2', { className: 'migrateplus-history-title' }, 'Past replacements' ),
-				createElement( 'span', { className: 'migrateplus-muted' }, runs.length ? runs.length + ' run' + ( runs.length === 1 ? '' : 's' ) : '' ) ),
+				createElement( 'h2', { className: 'migrateplus-history-title' }, __( 'Past replacements', 'migrateplus' ) ),
+				/* translators: %s: number of runs */
+				createElement( 'span', { className: 'migrateplus-muted' }, runs.length ? sprintf( _n( '%s run', '%s runs', runs.length, 'migrateplus' ), runs.length ) : '' ) ),
 			runs.length ? createElement( 'div', { className: 'migrateplus-table-scroll' }, createElement( 'table', { className: 'migrateplus-history' },
-				createElement( 'thead', null, createElement( 'tr', null, [ 'Replacement', 'Status', 'Result', '' ].map( ( th, i ) => createElement( 'th', { key: i, scope: 'col' }, th ) ) ) ),
+				createElement( 'thead', null, createElement( 'tr', null, [ __( 'Replacement', 'migrateplus' ), __( 'Status', 'migrateplus' ), __( 'Result', 'migrateplus' ), '' ].map( ( th, i ) => createElement( 'th', { key: i, scope: 'col' }, th ) ) ) ),
 				createElement( 'tbody', null, runs.map( ( run ) => createElement( ReplaceRunRow, { key: run.id, run } ) ) )
-			) ) : createElement( 'p', { className: 'migrateplus-muted migrateplus-loading' }, 'Replacements you run for real show up here, and can be rolled back.' )
+			) ) : createElement( 'p', { className: 'migrateplus-muted migrateplus-loading' }, __( 'Replacements you run for real show up here, and can be rolled back.', 'migrateplus' ) )
 		);
 	}
 
+	/** "340 replacements in 120 rows". */
+	function replacementsText( changes, rows ) {
+		/* translators: %s: number of replacements */
+		const what = sprintf( _n( '%s replacement', '%s replacements', changes, 'migrateplus' ), changes.toLocaleString() );
+		/* translators: 1: the replacements, 2: number of rows */
+		return sprintf( _n( '%1$s in %2$s row', '%1$s in %2$s rows', rows, 'migrateplus' ), what, rows.toLocaleString() );
+	}
+
 	function ReplaceRunRow( { run } ) {
-		let result = run.changes.toLocaleString() + ' replacement' + ( run.changes === 1 ? '' : 's' ) + ' in ' + run.rows.toLocaleString() + ' row' + ( run.rows === 1 ? '' : 's' );
+		let result = replacementsText( run.changes, run.rows );
 		if ( run.status === 'rolled_back' ) {
-			result = run.restored.toLocaleString() + ' value' + ( run.restored === 1 ? '' : 's' ) + ' restored' + ( run.kept ? ', ' + run.kept.toLocaleString() + ' kept because they were edited since' : '' );
+			/* translators: %s: number of values put back */
+			result = sprintf( _n( '%s value restored', '%s values restored', run.restored, 'migrateplus' ), run.restored.toLocaleString() );
+			if ( run.kept ) {
+				/* translators: 1: values restored, 2: values left as they are */
+				result = sprintf( __( '%1$s, %2$s kept because they were edited since', 'migrateplus' ), result, run.kept.toLocaleString() );
+			}
 		}
 		const forget = () => ask( {
-			title: 'Delete this run?',
-			message: run.status === 'rolled_back' ? 'Remove this run from the list?' : 'Remove this run from the list? Its changes stay in the database, but can no longer be rolled back.',
-			label: 'Delete',
+			title: __( 'Delete this run?', 'migrateplus' ),
+			message: run.status === 'rolled_back' ? __( 'Remove this run from the list?', 'migrateplus' ) : __( 'Remove this run from the list? Its changes stay in the database, but can no longer be rolled back.', 'migrateplus' ),
+			label: __( 'Delete', 'migrateplus' ),
 			danger: true,
 			onConfirm: () => api( 'replace_forget', { run: run.id } ).then( () => {
 				state.replaceRuns = state.replaceRuns.filter( ( x ) => x.id !== run.id );
 				modal.close();
-			} ).catch( ( err ) => modalError( 'Could not delete', err ) ),
+			} ).catch( ( err ) => modalError( __( 'Could not delete', 'migrateplus' ), err ) ),
 		} );
 		return createElement( 'tr', null,
 			createElement( 'td', null,
@@ -2791,12 +3521,12 @@
 			createElement( 'td', null, createElement( 'span', { className: 'migrateplus-badge migrateplus-badge-' + run.status }, REPLACE_STATUS_LABELS[ run.status ] || run.status ) ),
 			createElement( 'td', { className: 'migrateplus-h-result' }, createElement( 'span', { className: 'migrateplus-help' }, result ) ),
 			createElement( 'td', null, createElement( 'div', { className: 'migrateplus-row-actions' },
-				run.can_resume ? createElement( 'button', { type: 'button', className: 'button button-small button-primary', onClick: () => runReplace( run ) }, 'Resume' ) : null,
+				run.can_resume ? createElement( 'button', { type: 'button', className: 'button button-small button-primary', onClick: () => runReplace( run ) }, __( 'Resume', 'migrateplus' ) ) : null,
 				run.can_undo
-					? createElement( 'button', { type: 'button', className: 'button button-small migrateplus-danger', onClick: () => rollbackReplace( run ) }, { rolling_back: 'Finish rollback', rollback_failed: 'Retry rollback' }[ run.status ] || 'Roll back' )
+					? createElement( 'button', { type: 'button', className: 'button button-small migrateplus-danger', onClick: () => rollbackReplace( run ) }, { rolling_back: __( 'Finish rollback', 'migrateplus' ), rollback_failed: __( 'Retry rollback', 'migrateplus' ) }[ run.status ] || __( 'Roll back', 'migrateplus' ) )
 					// Say why Roll back is gone rather than drop it silently.
 					: ( run.undo_note ? createElement( 'span', { className: 'migrateplus-help migrateplus-undo-note' }, run.undo_note ) : null ),
-				createElement( 'button', { type: 'button', className: 'migrateplus-link-danger', title: 'Remove from this list. The changes stay, but can no longer be rolled back.', onClick: forget }, 'Delete' )
+				createElement( 'button', { type: 'button', className: 'migrateplus-link-danger', title: __( 'Remove from this list. The changes stay, but can no longer be rolled back.', 'migrateplus' ), onClick: forget }, __( 'Delete', 'migrateplus' ) )
 			) )
 		);
 	}
@@ -2804,9 +3534,10 @@
 	function rollbackReplace( run, confirmed ) {
 		if ( ! confirmed ) {
 			ask( {
-				title: 'Roll back this replacement?',
-				message: 'Roll back "' + run.search + '" → "' + run.replace + '"? Original values are put back. Anything edited since the replacement is kept as it is.',
-				label: 'Roll back',
+				title: __( 'Roll back this replacement?', 'migrateplus' ),
+				/* translators: 1: the text that was searched for, 2: what it was replaced with */
+				message: sprintf( __( 'Roll back "%1$s" → "%2$s"? Original values are put back. Anything edited since the replacement is kept as it is.', 'migrateplus' ), run.search, run.replace ),
+				label: __( 'Roll back', 'migrateplus' ),
 				danger: true,
 				onConfirm: () => rollbackReplace( run, true ),
 			} );
@@ -2814,41 +3545,46 @@
 		}
 		modal.open( {
 			kind: 'replace',
-			title: 'Rolling back',
-			message: 'Keep this tab open.',
+			title: __( 'Rolling back', 'migrateplus' ),
+			message: __( 'Keep this tab open.', 'migrateplus' ),
 			percent: null,
-			detail: 'Starting…',
+			detail: __( 'Starting…', 'migrateplus' ),
 			actions: [],
 			dismissible: false,
 		} );
+		/* translators: %s: number of values put back */
+		const restoredText = ( n ) => sprintf( _n( '%s value restored', '%s values restored', n, 'migrateplus' ), n.toLocaleString() );
 		const nextBatch = () => api( 'replace_rollback', { run: run.id } ).then( ( d ) => {
 			if ( d.status !== 'rolled_back' ) {
 				modal.update( {
 					percent: d.size ? ( d.undo_offset / d.size ) * 100 : null,
-					detail: d.restored.toLocaleString() + ' values restored',
+					detail: restoredText( d.restored ),
 				} );
 				return nextBatch();
 			}
 			modal.update( {
-				title: 'Rolled back',
-				message: d.kept ? d.kept.toLocaleString() + ' value' + ( d.kept === 1 ? ' was' : 's were' ) + ' edited after the replacement, so ' + ( d.kept === 1 ? 'it was' : 'they were' ) + ' left as ' + ( d.kept === 1 ? 'it is' : 'they are' ) + '.' : 'Every replaced value is back to what it was.',
+				title: __( 'Rolled back', 'migrateplus' ),
+				message: d.kept
+					/* translators: %s: number of values edited after the replacement */
+					? sprintf( _n( '%s value was edited after the replacement, so it was left as it is.', '%s values were edited after the replacement, so they were left as they are.', d.kept, 'migrateplus' ), d.kept.toLocaleString() )
+					: __( 'Every replaced value is back to what it was.', 'migrateplus' ),
 				percent: 100,
 				tone: 'success',
-				detail: d.restored.toLocaleString() + ' value' + ( d.restored === 1 ? '' : 's' ) + ' restored',
+				detail: restoredText( d.restored ),
 				dismissible: true,
 				onDismiss: null,
-				actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
+				actions: [ { label: __( 'Close', 'migrateplus' ), primary: true, onClick: () => modal.close() } ],
 			} );
 			loadReplaceRuns();
 		} );
 		nextBatch().catch( ( err ) => {
 			modal.update( {
-				title: 'Rollback stopped',
-				message: 'Run it again to continue where it stopped.',
+				title: __( 'Rollback stopped', 'migrateplus' ),
+				message: __( 'Run it again to continue where it stopped.', 'migrateplus' ),
 				tone: 'error',
 				note: err.message,
 				dismissible: true,
-				actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
+				actions: [ { label: __( 'Close', 'migrateplus' ), primary: true, onClick: () => modal.close() } ],
 			} );
 			loadReplaceRuns();
 		} );
@@ -2857,14 +3593,19 @@
 	/** Start a run from the form, or pick up a stopped one (`resumeRun`, from Past replacements). */
 	function runReplace( resumeRun, confirmed ) {
 		const r = state.replace;
-		const question = resumeRun
-			? 'Resume replacing "' + resumeRun.search + '" with "' + resumeRun.replace + '"? It picks up where it stopped.'
-			: ( r.dry_run ? '' : 'Replace "' + r.search + '" with "' + r.replace + '" in ' + r.tables.length + ' tables? This changes the database. You can roll it back afterwards from Past replacements.' );
+		let question = '';
+		if ( resumeRun ) {
+			/* translators: 1: the text searched for, 2: what it is replaced with */
+			question = sprintf( __( 'Resume replacing "%1$s" with "%2$s"? It picks up where it stopped.', 'migrateplus' ), resumeRun.search, resumeRun.replace );
+		} else if ( ! r.dry_run ) {
+			/* translators: 1: the text searched for, 2: what it is replaced with, 3: number of tables */
+			question = sprintf( _n( 'Replace "%1$s" with "%2$s" in %3$s table? This changes the database. You can roll it back afterwards from Past replacements.', 'Replace "%1$s" with "%2$s" in %3$s tables? This changes the database. You can roll it back afterwards from Past replacements.', r.tables.length, 'migrateplus' ), r.search, r.replace, r.tables.length );
+		}
 		if ( question && ! confirmed ) {
 			ask( {
-				title: resumeRun ? 'Resume this replacement?' : 'Replace in the database?',
+				title: resumeRun ? __( 'Resume this replacement?', 'migrateplus' ) : __( 'Replace in the database?', 'migrateplus' ),
 				message: question,
-				label: resumeRun ? 'Resume' : 'Replace',
+				label: resumeRun ? __( 'Resume', 'migrateplus' ) : __( 'Replace', 'migrateplus' ),
 				onConfirm: () => runReplace( resumeRun, true ),
 			} );
 			return;
@@ -2872,42 +3613,54 @@
 		const args = resumeRun
 			? { search: resumeRun.search, replace: resumeRun.replace, dry_run: 0 }
 			: { search: r.search, replace: r.replace, tables: r.tables, case_insensitive: r.case_insensitive, whole_urls: r.whole_urls, guids: r.guids, dry_run: r.dry_run };
-		modal.open( {
-			kind: 'replace',
-			title: args.dry_run ? 'Dry run' : 'Replacing',
-			message: 'Keep this tab open.',
-			percent: null,
-			detail: 'Starting…',
+		const working = {
+			title: args.dry_run ? __( 'Dry run', 'migrateplus' ) : __( 'Replacing', 'migrateplus' ),
+			message: __( 'Keep this tab open.', 'migrateplus' ),
+			tone: '',
+			note: '',
 			actions: [],
 			dismissible: false,
-		} );
-		const showFailure = ( err ) => modal.update( {
-			title: 'Find and replace stopped',
+		};
+		modal.open( Object.assign( { kind: 'replace', percent: null, detail: __( 'Starting…', 'migrateplus' ) }, working ) );
+		// A request that failed can be sent again: the next batch, or the whole run when it never started.
+		const showFailure = ( err, retry ) => modal.update( {
+			title: __( 'Find and replace stopped', 'migrateplus' ),
 			message: '',
 			tone: 'error',
 			note: err.message,
 			dismissible: true,
-			actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
+			actions: ( retry ? [ { label: __( 'Try again', 'migrateplus' ), primary: true, onClick: () => {
+				modal.update( working );
+				retry();
+			} } ] : [] ).concat( { label: __( 'Close', 'migrateplus' ), primary: ! retry, onClick: () => modal.close() } ),
 		} );
-		const nextBatch = ( id ) => api( 'replace_run', { run: id } ).then( ( d ) => {
+		const nextBatch = ( id ) => apiWithRetry( 'replace_run', { run: id } ).then( ( d ) => {
 			if ( ! d.complete ) {
 				modal.update( {
 					percent: d.total ? Math.min( 99, ( d.done / d.total ) * 100 ) : null,
-					detail: d.table + ': ' + d.done.toLocaleString() + ' of about ' + d.total.toLocaleString() + ' rows',
+					/* translators: 1: table name, 2: rows done, 3: rows in the table, roughly */
+					detail: sprintf( __( '%1$s: %2$s of about %3$s rows', 'migrateplus' ), d.table, d.done.toLocaleString(), d.total.toLocaleString() ),
 				} );
 				return nextBatch( id );
 			}
 			const sum = d.tables.reduce( ( a, t ) => ( { rows: a.rows + t.rows, changes: a.changes + t.changes } ), { rows: 0, changes: 0 } );
 			r.result = Object.assign( d, { args } );
+			let title = d.dry_run ? __( 'Dry run finished', 'migrateplus' ) : __( 'Replace finished', 'migrateplus' );
+			let message = d.dry_run ? __( 'Nothing was saved. Check the changes below, then turn off Dry run to replace for real.', 'migrateplus' ) : __( 'The database has been updated. You can roll it back from Past replacements.', 'migrateplus' );
+			if ( d.error ) {
+				title = __( 'Find and replace stopped', 'migrateplus' );
+				// A dry run changed nothing, so there is nothing to roll back.
+				message = d.dry_run ? d.error : d.error + ' ' + __( 'What was replaced so far can be rolled back.', 'migrateplus' );
+			}
 			modal.update( {
-				title: d.error ? 'Find and replace stopped' : ( d.dry_run ? 'Dry run finished' : 'Replace finished' ),
-				message: d.error ? d.error + ' What was replaced so far can be rolled back.' : ( d.dry_run ? 'Nothing was saved. Check the changes below, then turn off Dry run to replace for real.' : 'The database has been updated. You can roll it back from Past replacements.' ),
+				title,
+				message,
 				percent: 100,
 				tone: d.error ? 'error' : 'success',
-				detail: sum.changes.toLocaleString() + ' replacement' + ( sum.changes === 1 ? '' : 's' ) + ' in ' + sum.rows.toLocaleString() + ' row' + ( sum.rows === 1 ? '' : 's' ),
+				detail: replacementsText( sum.changes, sum.rows ),
 				dismissible: true,
 				onDismiss: null,
-				actions: [ { label: 'See details', primary: true, onClick: () => {
+				actions: [ { label: __( 'See details', 'migrateplus' ), primary: true, onClick: () => {
 					modal.close();
 					const res = mount.querySelector( '.migrateplus-replace-results' );
 					if ( res ) {
@@ -2918,8 +3671,11 @@
 			if ( ! d.dry_run ) {
 				loadReplaceRuns(); // Refresh the list of past runs.
 			}
-		} );
-		( resumeRun ? nextBatch( resumeRun.id ) : api( 'replace_start', { args } ).then( ( d ) => nextBatch( d.id ) ) ).catch( showFailure );
+		}, ( err ) => showFailure( err, () => nextBatch( id ) ) );
+		const begin = resumeRun
+			? Promise.resolve( { id: resumeRun.id } )
+			: apiWithRetry( 'replace_start', { args } );
+		begin.then( ( d ) => nextBatch( d.id ), ( err ) => showFailure( err, () => runReplace( resumeRun, true ) ) ).catch( ( err ) => showFailure( err ) );
 	}
 
 	function ReplaceResult( { d } ) {
@@ -2929,16 +3685,19 @@
 		const unsafe = d.tables.filter( ( t ) => t.unsafe );
 		return createElement( 'section', { className: 'migrateplus-panel migrateplus-history-panel migrateplus-replace-results' },
 			createElement( 'header', { className: 'migrateplus-history-head' },
-				createElement( 'h2', { className: 'migrateplus-history-title' }, d.dry_run ? 'Dry run results' : 'Results' ),
+				createElement( 'h2', { className: 'migrateplus-history-title' }, d.dry_run ? __( 'Dry run results', 'migrateplus' ) : __( 'Results', 'migrateplus' ) ),
 				createElement( 'span', { className: 'migrateplus-muted' }, '"' + a.search + '" → "' + a.replace + '"' ) ),
 			createElement( 'div', { className: 'migrateplus-table-scroll' }, createElement( 'table', { className: 'migrateplus-history' },
-				createElement( 'thead', null, createElement( 'tr', null, [ 'Table', d.dry_run ? 'Rows to change' : 'Rows changed', 'Replacements', '' ].map( ( th, i ) => createElement( 'th', { key: i, scope: 'col' }, th ) ) ) ),
+				createElement( 'thead', null, createElement( 'tr', null, [ __( 'Table', 'migrateplus' ), d.dry_run ? __( 'Rows to change', 'migrateplus' ) : __( 'Rows changed', 'migrateplus' ), __( 'Replacements', 'migrateplus' ), '' ].map( ( th, i ) => createElement( 'th', { key: i, scope: 'col' }, th ) ) ) ),
 				createElement( 'tbody', null, changed.length
 					? changed.map( ( t ) => createElement( ReplaceTableRows, { key: t.name, t } ) )
-					: createElement( 'tr', null, createElement( 'td', { colSpan: 4, className: 'migrateplus-muted migrateplus-no-match' }, 'No matches for "' + a.search + '" in the selected tables.' ) ) )
+					/* translators: %s: the text searched for */
+					: createElement( 'tr', null, createElement( 'td', { colSpan: 4, className: 'migrateplus-muted migrateplus-no-match' }, sprintf( __( 'No matches for "%s" in the selected tables.', 'migrateplus' ), a.search ) ) ) )
 			) ),
-			skipped.length ? createElement( 'p', { className: 'migrateplus-help migrateplus-loading' }, 'Skipped: ' + skipped.map( ( t ) => t.name + ' (' + t.skipped + ')' ).join( '; ' ) ) : null,
-			unsafe.length ? createElement( 'p', { className: 'migrateplus-help migrateplus-loading' }, 'Values left as they are because they contain objects that can’t be safely edited: ' + unsafe.map( ( t ) => t.name + ' (' + t.unsafe + ')' ).join( '; ' ) ) : null
+			/* translators: %s: tables and why they were skipped */
+			skipped.length ? createElement( 'p', { className: 'migrateplus-help migrateplus-loading' }, sprintf( __( 'Skipped: %s', 'migrateplus' ), skipped.map( ( t ) => t.name + ' (' + t.skipped + ')' ).join( '; ' ) ) ) : null,
+			/* translators: %s: tables and how many values were left */
+			unsafe.length ? createElement( 'p', { className: 'migrateplus-help migrateplus-loading' }, sprintf( __( 'Values left as they are because they contain objects that can’t be safely edited: %s', 'migrateplus' ), unsafe.map( ( t ) => t.name + ' (' + t.unsafe + ')' ).join( '; ' ) ) ) : null
 		);
 	}
 
@@ -2951,11 +3710,12 @@
 				createElement( 'td', null, t.rows.toLocaleString() ),
 				createElement( 'td', null, t.changes.toLocaleString() ),
 				createElement( 'td', null, createElement( 'div', { className: 'migrateplus-row-actions' },
-					createElement( 'button', { type: 'button', className: 'button button-small', 'aria-expanded': open ? 'true' : 'false', onClick: () => setOpen( ! open ) }, open ? 'Hide changes' : 'Show changes' ) ) )
+					createElement( 'button', { type: 'button', className: 'button button-small', 'aria-expanded': open ? 'true' : 'false', onClick: () => setOpen( ! open ) }, open ? __( 'Hide changes', 'migrateplus' ) : __( 'Show changes', 'migrateplus' ) ) ) )
 			),
 			createElement( 'tr', { className: 'migrateplus-export-log-row', hidden: ! open }, createElement( 'td', { colSpan: 4, className: 'migrateplus-export-log' },
 				createElement( 'ol', { className: 'migrateplus-log migrateplus-replace-samples' }, t.samples.map( ( s, i ) => createElement( 'li', { key: i },
-					createElement( 'span', { className: 'migrateplus-help' }, s.column + ' (row ' + s.row + ')' ),
+					/* translators: 1: column name, 2: row number */
+					createElement( 'span', { className: 'migrateplus-help' }, sprintf( __( '%1$s (row %2$s)', 'migrateplus' ), s.column, s.row ) ),
 					createElement( 'del', null, ( s.cut[ 0 ] ? '…' : '' ) + s.before + ( s.cut[ 1 ] ? '…' : '' ) ),
 					createElement( 'ins', null, ( s.cut[ 0 ] ? '…' : '' ) + s.after + ( s.cut[ 1 ] ? '…' : '' ) ) ) ) )
 			) )
@@ -3002,22 +3762,24 @@
 		if ( ! jobs ) {
 			return createElement( 'section', { className, 'aria-busy': 'true' }, state.historyError
 				? createElement( Notice, { type: 'error', message: state.historyError } )
-				: createElement( 'p', { className: 'migrateplus-muted migrateplus-loading' }, 'Loading history…' ) );
+				: createElement( 'p', { className: 'migrateplus-muted migrateplus-loading' }, __( 'Loading history…', 'migrateplus' ) ) );
 		}
 		if ( ! jobs.length ) {
 			return createElement( 'section', { className }, createElement( 'div', { className: 'migrateplus-empty' },
-				createElement( 'h2', null, 'No imports yet' ),
-				createElement( 'p', { className: 'migrateplus-muted' }, 'Every import you run shows up here, so you can resume it, run it again or roll it back.' ),
-				createElement( 'a', { className: 'button button-primary', href: D.importUrl }, 'Start an import' ) ) );
+				createElement( 'h2', null, __( 'No imports yet', 'migrateplus' ) ),
+				createElement( 'p', { className: 'migrateplus-muted' }, __( 'Every import you run shows up here, so you can resume it, run it again or roll it back.', 'migrateplus' ) ),
+				createElement( 'a', { className: 'button button-primary', href: D.importUrl }, __( 'Start an import', 'migrateplus' ) ) ) );
 		}
 		const shown = shownJobs();
-		const pick = bulkSelection( 'job', 'import', 'Imported content is not deleted, but deleted entries can no longer be rolled back.', shown.map( ( job ) => ( { id: job.id, name: job.settings.file_name || job.label } ) ), ( d ) => {
+		/* translators: %s: number of imports */
+		const question = ( n ) => sprintf( _n( 'Remove this import from history?', 'Remove these %s imports from history?', n, 'migrateplus' ), n );
+		const pick = bulkSelection( 'job', question, __( 'Imported content is not deleted, but deleted entries can no longer be rolled back.', 'migrateplus' ), shown.map( ( job ) => ( { id: job.id, name: job.settings.file_name || job.label } ) ), ( d ) => {
 			const gone = new Set( d.deleted.map( ( e ) => e.id ) );
 			state.historyJobs = state.historyJobs.filter( ( j ) => ! gone.has( j.id ) );
 		} );
 		return createElement( 'section', { className },
 			createElement( 'header', { className: 'migrateplus-history-head' },
-				createElement( 'input', { type: 'search', id: 'migrateplus-history-search', className: 'migrateplus-search', placeholder: 'Search by source, site or status', 'aria-label': 'Search history', value: state.historyQuery, onChange: ( e ) => {
+				createElement( 'input', { type: 'search', id: 'migrateplus-history-search', className: 'migrateplus-search', placeholder: __( 'Search by source, site or status', 'migrateplus' ), 'aria-label': __( 'Search history', 'migrateplus' ), value: state.historyQuery, onChange: ( e ) => {
 					state.historyQuery = e.target.value;
 					// Rows hidden by the search leave the selection, so nothing out of sight is deleted.
 					const ids = new Set( shownJobs().map( ( job ) => job.id ) );
@@ -3025,19 +3787,24 @@
 					render();
 				} } ),
 				pick.button,
-				createElement( 'span', { className: 'migrateplus-muted', 'aria-live': 'polite' }, shown.length === jobs.length ? jobs.length + ' import' + ( jobs.length === 1 ? '' : 's' ) : shown.length + ' of ' + jobs.length ),
-				createElement( 'a', { className: 'button button-primary migrateplus-push', href: D.importUrl }, 'Import' )
+				createElement( 'span', { className: 'migrateplus-muted', 'aria-live': 'polite' }, shown.length === jobs.length
+					/* translators: %s: number of imports */
+					? sprintf( _n( '%s import', '%s imports', jobs.length, 'migrateplus' ), jobs.length )
+					/* translators: 1: imports shown, 2: imports there are */
+					: sprintf( __( '%1$s of %2$s', 'migrateplus' ), shown.length, jobs.length ) ),
+				createElement( 'a', { className: 'button button-primary migrateplus-push', href: D.importUrl }, __( 'Import', 'migrateplus' ) )
 			),
 			createElement( 'div', { className: 'migrateplus-table-scroll' }, createElement( 'table', { className: 'migrateplus-history' },
-				createElement( 'thead', null, createElement( 'tr', null, pick.head, [ 'Import', 'Status', 'Result', '' ].map( ( th, i ) => createElement( 'th', { key: i, scope: 'col' }, th ) ) ) ),
+				createElement( 'thead', null, createElement( 'tr', null, pick.head, [ __( 'Import', 'migrateplus' ), __( 'Status', 'migrateplus' ), __( 'Result', 'migrateplus' ), '' ].map( ( th, i ) => createElement( 'th', { key: i, scope: 'col' }, th ) ) ) ),
 				createElement( 'tbody', null, shown.length
 					? shown.map( ( job ) => createElement( HistoryRow, { key: job.id, job, check: pick.cell( job.id, job.settings.file_name || job.label ) } ) )
-					: createElement( 'tr', null, createElement( 'td', { colSpan: 5, className: 'migrateplus-muted migrateplus-no-match' }, 'No imports match "' + state.historyQuery + '".' ) ) )
+					/* translators: %s: what was searched for */
+					: createElement( 'tr', null, createElement( 'td', { colSpan: 5, className: 'migrateplus-muted migrateplus-no-match' }, sprintf( __( 'No imports match "%s".', 'migrateplus' ), state.historyQuery ) ) ) )
 			) )
 		);
 	}
 
-	const EXPORT_STATUS_LABELS = { running: 'Running', complete: 'Complete', stopped: 'Stopped' };
+	const EXPORT_STATUS_LABELS = { running: __( 'Running', 'migrateplus' ), complete: __( 'Complete', 'migrateplus' ), stopped: __( 'Stopped', 'migrateplus' ) };
 
 	function ExportsPanel() {
 		const className = 'migrateplus-panel migrateplus-history-panel migrateplus-exports-panel';
@@ -3045,32 +3812,35 @@
 		if ( ! exports ) {
 			return createElement( 'section', { className, 'aria-busy': 'true' }, state.exportsError
 				? createElement( Notice, { type: 'error', message: state.exportsError } )
-				: createElement( 'p', { className: 'migrateplus-muted migrateplus-loading' }, 'Loading exports…' ) );
+				: createElement( 'p', { className: 'migrateplus-muted migrateplus-loading' }, __( 'Loading exports…', 'migrateplus' ) ) );
 		}
-		const pick = exports.length ? bulkSelection( 'export', 'export', 'Their files are deleted too, if they are still kept.', exports.map( ( x ) => ( { id: x.id, name: x.label } ) ), ( d ) => {
+		/* translators: %s: number of exports */
+		const question = ( n ) => sprintf( _n( 'Remove this export from history?', 'Remove these %s exports from history?', n, 'migrateplus' ), n );
+		const pick = exports.length ? bulkSelection( 'export', question, __( 'Their files are deleted too, if they are still kept.', 'migrateplus' ), exports.map( ( x ) => ( { id: x.id, name: x.label } ) ), ( d ) => {
 			const gone = new Set( d.deleted.map( ( e ) => e.id ) );
 			state.historyExports = state.historyExports.filter( ( e ) => ! gone.has( e.id ) );
 		} ) : null;
 		return createElement( 'section', { className },
 			createElement( 'header', { className: 'migrateplus-history-head' },
-				createElement( 'h2', { className: 'migrateplus-history-title' }, 'Exports' ),
-				createElement( 'span', { className: 'migrateplus-muted' }, exports.length ? exports.length + ' export' + ( exports.length === 1 ? '' : 's' ) : '' ),
+				createElement( 'h2', { className: 'migrateplus-history-title' }, __( 'Exports', 'migrateplus' ) ),
+				/* translators: %s: number of exports */
+				createElement( 'span', { className: 'migrateplus-muted' }, exports.length ? sprintf( _n( '%s export', '%s exports', exports.length, 'migrateplus' ), exports.length ) : '' ),
 				pick ? pick.button : null,
-				createElement( 'a', { className: 'button migrateplus-push', href: D.exportUrl }, 'Export' )
+				createElement( 'a', { className: 'button migrateplus-push', href: D.exportUrl }, __( 'Export', 'migrateplus' ) )
 			),
 			exports.length ? createElement( 'div', { className: 'migrateplus-table-scroll' }, createElement( 'table', { className: 'migrateplus-history' },
-				createElement( 'thead', null, createElement( 'tr', null, pick.head, [ 'Export', 'Status', 'Result', '' ].map( ( th, i ) => createElement( 'th', { key: i, scope: 'col' }, th ) ) ) ),
+				createElement( 'thead', null, createElement( 'tr', null, pick.head, [ __( 'Export', 'migrateplus' ), __( 'Status', 'migrateplus' ), __( 'Result', 'migrateplus' ), '' ].map( ( th, i ) => createElement( 'th', { key: i, scope: 'col' }, th ) ) ) ),
 				createElement( 'tbody', null, exports.map( ( x ) => createElement( ExportRows, { key: x.id, x, check: pick.cell( x.id, x.label ) } ) ) )
-			) ) : createElement( 'p', { className: 'migrateplus-muted migrateplus-loading' }, 'Exports you run show up here with a log of what went into the file.' )
+			) ) : createElement( 'p', { className: 'migrateplus-muted migrateplus-loading' }, __( 'Exports you run show up here with a log of what went into the file.', 'migrateplus' ) )
 		);
 	}
 
 	/**
 	 * Row checkboxes, a select-all and a "Delete selected" button for one History table.
-	 * kind goes to the server with each id; warning is added to the confirmation.
+	 * kind goes to the server with each id; question( n ) and warning make the confirmation.
 	 * rows are the { id, name } on screen; only those count as selected.
 	 */
-	function bulkSelection( kind, noun, warning, rows, onDone ) {
+	function bulkSelection( kind, question, warning, rows, onDone ) {
 		const picked = state.picked[ kind ];
 		const ids = rows.filter( ( row ) => picked.has( row.id ) ).map( ( row ) => row.id );
 		const n = ids.length;
@@ -3080,8 +3850,9 @@
 			onDone( d );
 		};
 		return {
-			button: createElement( 'button', { type: 'button', className: 'button migrateplus-danger', disabled: ! n, onClick: () => confirmBulkDelete( kind, noun, warning, ids, names, done ) },
-				n ? 'Delete ' + n + ' ' + ( n === 1 ? 'entry' : 'entries' ) : 'Delete selected' ),
+			button: createElement( 'button', { type: 'button', className: 'button migrateplus-danger', disabled: ! n, onClick: () => confirmBulkDelete( kind, question, warning, ids, names, done ) },
+				/* translators: %s: number of History entries ticked */
+				n ? sprintf( _n( 'Delete %s entry', 'Delete %s entries', n, 'migrateplus' ), n ) : __( 'Delete selected', 'migrateplus' ) ),
 			head: createElement( 'td', { className: 'migrateplus-check-column' }, createElement( SelectAll, {
 				checked: rows.length > 0 && n === rows.length,
 				indeterminate: n > 0 && n < rows.length,
@@ -3092,7 +3863,8 @@
 				},
 			} ) ),
 			cell: ( id, name ) => createElement( 'th', { scope: 'row', className: 'migrateplus-check-column' },
-				createElement( 'input', { type: 'checkbox', checked: picked.has( id ), 'aria-label': 'Select ' + name, onChange: ( e ) => {
+				/* translators: %s: the name of a History entry */
+				createElement( 'input', { type: 'checkbox', checked: picked.has( id ), 'aria-label': sprintf( __( 'Select %s', 'migrateplus' ), name ), onChange: ( e ) => {
 					if ( e.target.checked ) {
 						picked.add( id );
 					} else {
@@ -3109,13 +3881,12 @@
 		useLayoutEffect( () => {
 			box.current.indeterminate = indeterminate;
 		} );
-		return createElement( 'input', { ref: box, type: 'checkbox', 'aria-label': 'Select all', checked, disabled, onChange } );
+		return createElement( 'input', { ref: box, type: 'checkbox', 'aria-label': __( 'Select all', 'migrateplus' ), checked, disabled, onChange } );
 	}
 
 	/** Ask once, delete the chosen History entries in one request, and say what was deleted and what was skipped. */
-	function confirmBulkDelete( kind, noun, warning, ids, names, onDone ) {
+	function confirmBulkDelete( kind, question, warning, ids, names, onDone ) {
 		const n = ids.length;
-		const plural = ( c, word ) => c + ' ' + word + ( c === 1 ? '' : 's' );
 		const run = () => {
 			api( 'history_delete', { items: ids.map( ( id ) => ( { kind, id } ) ) } ).then( ( d ) => {
 				const reasons = {};
@@ -3123,27 +3894,31 @@
 					reasons[ s.reason ] = ( reasons[ s.reason ] || 0 ) + 1;
 				} );
 				const keys = Object.keys( reasons );
-				let summary = 'Deleted ' + d.deleted.length;
-				if ( keys.length === 1 ) {
-					summary += ', skipped ' + d.skipped.length + ' (' + keys[ 0 ] + ')';
-				} else if ( keys.length ) {
-					summary += ', skipped ' + d.skipped.length + ' (' + keys.map( ( r ) => reasons[ r ] + ' ' + r ).join( ', ' ) + ')';
+				/* translators: %s: number of entries deleted */
+				let summary = sprintf( __( 'Deleted %s.', 'migrateplus' ), d.deleted.length );
+				if ( keys.length ) {
+					/* translators: a number of skipped entries and why. 1: the number, 2: the reason, e.g. still running */
+					const why = 1 === keys.length ? keys[ 0 ] : keys.map( ( r ) => sprintf( __( '%1$s %2$s', 'migrateplus' ), reasons[ r ], r ) ).join( ', ' );
+					/* translators: 1: entries deleted, 2: entries skipped, 3: why they were skipped */
+					summary = sprintf( __( 'Deleted %1$s, skipped %2$s (%3$s).', 'migrateplus' ), d.deleted.length, d.skipped.length, why );
 				}
 				onDone( d );
 				modal.update( {
-					title: summary + '.',
+					title: summary,
 					message: '',
 					tone: d.deleted.length ? 'success' : 'error',
-					note: d.skipped.length ? 'Skipped: ' + d.skipped.map( ( s ) => '“' + ( names.get( s.id ) || s.id ) + '” (' + s.reason + ')' ).join( '; ' ) : '',
+					/* translators: 1: the name of a History entry, 2: why it was skipped. Then: %s: those entries, separated by semicolons */
+					note: d.skipped.length ? sprintf( __( 'Skipped: %s', 'migrateplus' ), d.skipped.map( ( s ) => sprintf( __( '“%1$s” (%2$s)', 'migrateplus' ), names.get( s.id ) || s.id, s.reason ) ).join( '; ' ) ) : '',
 					dismissible: true,
-					actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
+					actions: [ { label: __( 'Close', 'migrateplus' ), primary: true, onClick: () => modal.close() } ],
 				} );
-			} ).catch( ( err ) => modalError( 'Could not delete', err ) );
+			} ).catch( ( err ) => modalError( __( 'Could not delete', 'migrateplus' ), err ) );
 		};
 		ask( {
-			title: 'Delete ' + n + ' ' + ( n === 1 ? 'entry' : 'entries' ) + '?',
-			message: ( n === 1 ? 'Remove this ' + noun : 'Remove these ' + plural( n, noun ) ) + ' from history? ' + warning,
-			label: 'Delete',
+			/* translators: %s: number of History entries */
+			title: sprintf( _n( 'Delete %s entry?', 'Delete %s entries?', n, 'migrateplus' ), n ),
+			message: question( n ) + ' ' + warning,
+			label: __( 'Delete', 'migrateplus' ),
 			danger: true,
 			onConfirm: run,
 		} );
@@ -3156,26 +3931,37 @@
 		const view = () => {
 			setOpen( ! open );
 			if ( ! open && null === log ) {
-				setLog( 'Loading…' );
+				setLog( __( 'Loading…', 'migrateplus' ) );
 				api( 'export_log', { export: x.id } ).then( ( d ) => setLog( d.log ) ).catch( ( err ) => setLog( err.message ) );
 			}
 		};
 		const forget = () => ask( {
-			title: 'Delete this export?',
-			message: 'Remove this export from history?',
-			label: 'Delete',
+			title: __( 'Delete this export?', 'migrateplus' ),
+			message: __( 'Remove this export from history?', 'migrateplus' ),
+			label: __( 'Delete', 'migrateplus' ),
 			danger: true,
 			onConfirm: () => api( 'export_forget', { export: x.id } ).then( () => {
 				state.historyExports = state.historyExports.filter( ( e ) => e.id !== x.id );
-				state.picked.export.clear();
+				state.picked.export.delete( x.id ); // The rest of the selection stays.
 				modal.close();
-			} ).catch( ( err ) => modalError( 'Could not delete', err ) ),
+			} ).catch( ( err ) => modalError( __( 'Could not delete', 'migrateplus' ), err ) ),
 		} );
 
-		const who = [ x.user, x.via === 'cli' ? 'WP-CLI' : '' ].filter( Boolean ).join( ' via ' );
-		let result = x.done.toLocaleString() + ' of ' + x.total.toLocaleString() + ' items';
+		/* translators: 1: user name, 2: WP-CLI */
+		const who = x.user && 'cli' === x.via ? sprintf( __( '%1$s via %2$s', 'migrateplus' ), x.user, 'WP-CLI' ) : x.user || ( 'cli' === x.via ? 'WP-CLI' : '' );
+		/* translators: 1: items written, 2: items to write */
+		let result = sprintf( __( '%1$s of %2$s items', 'migrateplus' ), x.done.toLocaleString(), x.total.toLocaleString() );
 		if ( x.status === 'complete' ) {
-			result = x.done.toLocaleString() + ' item' + ( x.done === 1 ? '' : 's' ) + ( x.size ? ', ' + x.size : '' ) + ( x.url ? '' : '. File no longer kept' );
+			/* translators: %s: number of items */
+			result = sprintf( _n( '%s item', '%s items', x.done, 'migrateplus' ), x.done.toLocaleString() );
+			if ( x.size ) {
+				/* translators: 1: number of items, 2: file size */
+				result = sprintf( __( '%1$s, %2$s', 'migrateplus' ), result, x.size );
+			}
+			if ( ! x.url ) {
+				/* translators: %s: what the export held */
+				result = sprintf( __( '%s. File no longer kept', 'migrateplus' ), result );
+			}
 		}
 		return createElement( Fragment, null,
 			createElement( 'tr', null,
@@ -3190,9 +3976,9 @@
 				createElement( 'td', null, createElement( 'span', { className: 'migrateplus-badge migrateplus-badge-' + x.status }, EXPORT_STATUS_LABELS[ x.status ] || x.status ) ),
 				createElement( 'td', { className: 'migrateplus-h-result' }, createElement( 'span', { className: 'migrateplus-help' }, result ) ),
 				createElement( 'td', null, createElement( 'div', { className: 'migrateplus-row-actions' },
-					x.url ? createElement( 'a', { className: 'button button-small button-primary', href: safeUrl( x.url ) }, 'Download' ) : null,
-					createElement( 'button', { type: 'button', className: 'button button-small migrateplus-view', 'aria-expanded': open ? 'true' : 'false', onClick: view }, open ? 'Hide log' : 'View log' ),
-					createElement( 'button', { type: 'button', className: 'migrateplus-link-danger', title: 'Remove from history, with its file if it is still kept.', onClick: forget }, 'Delete' ) ) )
+					x.url ? createElement( 'a', { className: 'button button-small button-primary', href: safeUrl( x.url ) }, __( 'Download', 'migrateplus' ) ) : null,
+					createElement( 'button', { type: 'button', className: 'button button-small migrateplus-view', 'aria-expanded': open ? 'true' : 'false', onClick: view }, open ? __( 'Hide log', 'migrateplus' ) : __( 'View log', 'migrateplus' ) ),
+					createElement( 'button', { type: 'button', className: 'migrateplus-link-danger', title: __( 'Remove from history, with its file if it is still kept.', 'migrateplus' ), onClick: forget }, __( 'Delete', 'migrateplus' ) ) ) )
 			),
 			createElement( 'tr', { className: 'migrateplus-export-log-row', hidden: ! open }, createElement( 'td', { colSpan: 5, className: 'migrateplus-export-log' }, Array.isArray( log )
 				? createElement( 'ol', { className: 'migrateplus-log' }, log.map( ( e, i ) => createElement( 'li', { key: i, className: 'migrateplus-log-' + e.l },
@@ -3206,20 +3992,21 @@
 		const remote = job.settings.file_url || job.settings.url || '';
 		modal.open( {
 			kind: 'restart',
-			title: 'Preparing to run again',
-			message: remote ? 'Fetching a fresh copy from ' + hostOf( remote ) + '…' : 'Resetting the job…',
+			title: __( 'Preparing to run again', 'migrateplus' ),
+			/* translators: %s: the host the file is downloaded from */
+			message: remote ? sprintf( __( 'Fetching a fresh copy from %s…', 'migrateplus' ), hostOf( remote ) ) : __( 'Resetting the job…', 'migrateplus' ),
 			percent: null,
 			actions: [],
 		} );
 		api( 'restart', { job: job.id } ).then( () => openJob( job.id, true ) ).catch( ( e ) => {
 			modal.update( {
-				title: 'Could not run again',
+				title: __( 'Could not run again', 'migrateplus' ),
 				message: '',
 				tone: 'error',
 				percent: 100,
 				note: e.message,
 				dismissible: true,
-				actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
+				actions: [ { label: __( 'Close', 'migrateplus' ), primary: true, onClick: () => modal.close() } ],
 			} );
 		} );
 	}
@@ -3228,19 +4015,21 @@
 		const s = job.stats;
 		const dry = Number( job.options.dry_run ) === 1;
 		const where = job.settings.site_url || job.settings.url || job.settings.file_url || '';
+		const types = isMultiType( job ) ? job.settings.migrateplus_post_types.split( ',' ).join( ', ' ) : job.options.post_type;
 		const actionButton = ( label, fn, cls ) => createElement( 'button', { type: 'button', className: 'button button-small ' + ( cls || '' ), onClick: fn }, label );
 		const forget = () => ask( {
-			title: 'Delete this import?',
-			message: 'Remove this import from history? Imported content is not deleted, but it can no longer be rolled back.',
-			label: 'Delete',
+			title: __( 'Delete this import?', 'migrateplus' ),
+			message: __( 'Remove this import from history? Imported content is not deleted, but it can no longer be rolled back.', 'migrateplus' ),
+			label: __( 'Delete', 'migrateplus' ),
 			danger: true,
 			onConfirm: () => api( 'delete', { job: job.id } ).then( () => {
 				state.historyJobs = ( state.historyJobs || [] ).filter( ( j ) => j.id !== job.id );
-				state.picked.job.clear();
+				state.picked.job.delete( job.id ); // The rest of the selection stays.
 				modal.close();
-			} ).catch( ( err ) => modalError( 'Could not delete', err ) ),
+			} ).catch( ( err ) => modalError( __( 'Could not delete', 'migrateplus' ), err ) ),
 		} );
-		const parts = OUTCOMES.filter( ( [ k ] ) => Number( s[ k ] ) > 0 ).map( ( [ k, label, dryLabel ] ) => Number( s[ k ] ).toLocaleString() + ' ' + ( dry ? dryLabel : label ).toLowerCase() );
+		/* translators: a count of one outcome. 1: the number, 2: the outcome, e.g. created */
+		const parts = OUTCOMES.filter( ( [ k ] ) => Number( s[ k ] ) > 0 ).map( ( [ k, label, dryLabel ] ) => sprintf( __( '%1$s %2$s', 'migrateplus' ), Number( s[ k ] ).toLocaleString(), ( dry ? dryLabel : label ).toLowerCase() ) );
 
 		return createElement( 'tr', null,
 			check,
@@ -3249,21 +4038,23 @@
 				createElement( 'div', null,
 					createElement( 'strong', null, job.settings.file_name || job.label ),
 					createElement( 'span', { className: 'migrateplus-help' },
-						where ? hostOf( where ) + ' to ' : 'To ',
-						( isMultiType( job ) ? job.settings.migrateplus_post_types.split( ',' ).join( ', ' ) : job.options.post_type ) + ', ',
+						/* translators: 1: the site imported from, 2: the post types imported into */
+						where ? sprintf( __( '%1$s to %2$s', 'migrateplus' ), hostOf( where ), types ) : sprintf( __( 'To %s', 'migrateplus' ), types ),
+						', ',
 						createElement( 'time', { dateTime: new Date( job.created * 1000 ).toISOString(), title: formatDate( job.created ) }, relativeTime( job.created ) ) ) ) ),
 			createElement( 'td', null,
 				createElement( 'span', { className: 'migrateplus-badge migrateplus-badge-' + job.status }, STATUS_LABELS[ job.status ] || job.status ),
-				dry ? createElement( 'span', { className: 'migrateplus-badge migrateplus-badge-dry' }, 'Dry run' ) : null ),
+				dry ? createElement( 'span', { className: 'migrateplus-badge migrateplus-badge-dry' }, __( 'Dry run', 'migrateplus' ) ) : null ),
 			createElement( 'td', { className: 'migrateplus-h-result' },
-				createElement( OutcomeBar, { stats: s, total: job.total, size: 'sm', label: 'Result' } ),
-				createElement( 'span', { className: 'migrateplus-help' }, parts.length ? parts.join( ', ' ) : 'Nothing processed yet' ) ),
+				createElement( OutcomeBar, { stats: s, total: job.total, size: 'sm', label: __( 'Result', 'migrateplus' ) } ),
+				createElement( 'span', { className: 'migrateplus-help' }, parts.length ? parts.join( ', ' ) : __( 'Nothing processed yet', 'migrateplus' ) ) ),
 			createElement( 'td', null, createElement( 'div', { className: 'migrateplus-row-actions' },
-				[ 'running', 'ready', 'failed' ].includes( job.status ) ? actionButton( 'Resume', () => openJob( job.id, true ), 'button-primary' ) : null,
-				actionButton( 'View log', () => openJob( job.id, false ), 'migrateplus-view' ),
-				[ 'complete', 'rolled_back', 'failed' ].includes( job.status ) ? actionButton( 'Run again', () => restartJob( job ), 'migrateplus-run-again' ) : null,
-				! dry && ! [ 'rolled_back', 'running' ].includes( job.status ) && importedCount( job ) > 0 ? actionButton( 'Roll back', () => rollback( job.id ), 'migrateplus-rollback' ) : null,
-				createElement( 'button', { type: 'button', className: 'migrateplus-link-danger', title: 'Remove from history. Imported content is kept.', onClick: forget }, 'Delete' ) ) )
+				[ 'running', 'ready', 'failed' ].includes( job.status ) ? actionButton( __( 'Resume', 'migrateplus' ), () => openJob( job.id, true ), 'button-primary' ) : null,
+				actionButton( __( 'View log', 'migrateplus' ), () => openJob( job.id, false ), 'migrateplus-view' ),
+				[ 'complete', 'rolled_back', 'failed' ].includes( job.status ) ? actionButton( __( 'Run again', 'migrateplus' ), () => restartJob( job ), 'migrateplus-run-again' ) : null,
+				// Also for a running import: History runs none, so it is paused or abandoned. The server refuses while a batch holds the lock.
+				! dry && 'rolled_back' !== job.status && importedCount( job ) > 0 ? actionButton( __( 'Roll back', 'migrateplus' ), () => rollback( job.id ), 'migrateplus-rollback' ) : null,
+				createElement( 'button', { type: 'button', className: 'migrateplus-link-danger', title: __( 'Remove from history. Imported content is kept.', 'migrateplus' ), onClick: forget }, __( 'Delete', 'migrateplus' ) ) ) )
 		);
 	}
 
@@ -3273,31 +4064,35 @@
 			return;
 		}
 		api( 'job', { job: id } ).then( ( data ) => {
-			// A draft was never started, so its options have not been through the duplicate check.
-			resume = resume && 'draft' !== data.job.status;
+			// A draft was never started: it goes to the mapping step, and its options have not been through the duplicate check.
+			const draft = 'draft' === data.job.status;
+			resume = resume && ! draft;
 			state.job = data.job;
 			state.mapping = normalizeMapping( data.job.mapping );
 			state.options = Object.assign( {}, D.defaults, data.job.options );
+			// PHP sends positions 0, 1, 2… as a list: kept as an object, so a row's override is sent by its position.
+			state.options.authors = Object.assign( {}, state.options.authors );
 			state.fields = ( data.job.fields || [] ).map( String );
 			state.records = data.job.records || [];
-			state.suggested = {};
-			state.step = 'run';
+			// A job that ran was mapped on purpose: suggestions would add back what was left out. A draft gets them as a fresh file does.
+			state.suggested = draft ? {} : { [ state.options.post_type ]: true };
+			state.step = draft ? 'map' : 'run';
+			state.direct = false;
 			state.error = '';
 			state.paused = ! resume;
 			if ( resume && ! [ 'complete', 'rolled_back' ].includes( data.job.status ) ) {
-				state.modalHidden = false;
 				modal.open( { kind: 'run' } );
 			}
 			render();
 			if ( resume ) {
 				runLoop();
 			}
-		} ).catch( ( err ) => modalError( 'Could not open the import', err ) );
+		} ).catch( ( err ) => modalError( __( 'Could not open the import', 'migrateplus' ), err ) );
 	}
 
 	window.addEventListener( 'beforeunload', ( e ) => {
-		// Rollbacks, exports and replacements run from their modal, which can't be dismissed until they stop.
-		const working = modal.isOpen() && [ 'rollback', 'export', 'replace' ].includes( modal.kind() ) && ! modal.dismissible();
+		// Uploads, restarts, rollbacks, exports and replacements run from their modal, which can't be dismissed until they stop.
+		const working = modal.isOpen() && [ 'preview', 'restart', 'rollback', 'export', 'replace' ].includes( modal.kind() ) && ! modal.dismissible();
 		if ( ( state.running && ! state.paused ) || working ) {
 			e.preventDefault();
 			e.returnValue = '';
@@ -3313,6 +4108,7 @@
 	} else if ( 'replace' === state.tab ) {
 		loadReplaceRuns();
 	} else if ( D.openJob ) {
+		dropJobFromUrl(); // Read once: a reload after Pause must not resume, nor one after "Import" reopen this job.
 		openJob( D.openJob, D.resume );
 	}
 }() );

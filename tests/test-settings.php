@@ -23,15 +23,13 @@ class Test_Settings extends WP_UnitTestCase {
 	}
 
 	public function test_sanitize_keeps_valid_values() {
-		$editor = self::factory()->user->create( array( 'role' => 'editor' ) );
-		$out    = MigratePlus_Settings::sanitize(
+		$out = MigratePlus_Settings::sanitize(
 			array(
 				'post_type'           => 'page',
 				'default_status'      => 'draft',
 				'force_status'        => 'private',
 				'duplicate'           => 'update',
 				'capability'          => 'edit_others_posts',
-				'default_author'      => (string) $editor,
 				'batch_size'          => '25',
 				'max_media_size'      => '8',
 				'allow_local_sources' => '1',
@@ -43,7 +41,6 @@ class Test_Settings extends WP_UnitTestCase {
 		$this->assertSame( 'private', $out['force_status'] );
 		$this->assertSame( 'update', $out['duplicate'] );
 		$this->assertSame( 'edit_others_posts', $out['capability'] );
-		$this->assertSame( $editor, $out['default_author'] );
 		$this->assertSame( 25, $out['batch_size'] );
 		$this->assertSame( 8, $out['max_media_size'] );
 		$this->assertSame( 1, $out['allow_local_sources'] );
@@ -72,7 +69,8 @@ class Test_Settings extends WP_UnitTestCase {
 			'batch size 0'          => array( 'batch_size', '0', 1 ),
 			'batch size 1000'       => array( 'batch_size', '1000', 100 ),
 			'empty batch size'      => array( 'batch_size', '', 10 ),
-			'timeout 1'             => array( 'request_timeout', '1', 5 ),
+			'timeout 1'             => array( 'request_timeout', '1', 60 ),
+			'timeout 59'            => array( 'request_timeout', '59', 60 ),
 			'timeout 9999'          => array( 'request_timeout', '9999', 300 ),
 			'remote size 0'         => array( 'max_remote_size', '0', 1 ),
 			'remote size 5000'      => array( 'max_remote_size', '5000', 2048 ),
@@ -84,10 +82,9 @@ class Test_Settings extends WP_UnitTestCase {
 			'force status future'   => array( 'force_status', 'future', '' ),
 			'duplicate merge'       => array( 'duplicate', 'merge', 'skip' ),
 			'capability edit_posts' => array( 'capability', 'edit_posts', 'manage_options' ),
+			'capability as a list'  => array( 'capability', array( 'edit_others_posts' ), 'manage_options' ),
 			'unknown post type'     => array( 'post_type', 'recipe', 'post' ),
 			'post type in caps'     => array( 'post_type', 'Page', 'page' ),
-			'missing author'        => array( 'default_author', 999999, 0 ),
-			'author by name'        => array( 'default_author', 'admin', 0 ),
 			'checkbox on'           => array( 'import_menus', 'on', 1 ),
 			'checkbox 0'            => array( 'create_terms', '0', 0 ),
 			'unticked checkbox'     => array( 'import_comments', null, 0 ),
@@ -141,6 +138,19 @@ class Test_Settings extends WP_UnitTestCase {
 		unregister_setting( MigratePlus_Settings::GROUP, MigratePlus_Settings::OPTION );
 	}
 
+	/**
+	 * @group ms-required
+	 */
+	public function test_only_a_super_admin_changes_local_sources_on_multisite() {
+		if ( ! is_multisite() ) {
+			$this->markTestSkipped( 'Needs multisite.' );
+		}
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$this->assertSame( 0, MigratePlus_Settings::sanitize( array( 'allow_local_sources' => '1' ) )['allow_local_sources'] );
+		grant_super_admin( get_current_user_id() );
+		$this->assertSame( 1, MigratePlus_Settings::sanitize( array( 'allow_local_sources' => '1' ) )['allow_local_sources'] );
+	}
+
 	public function test_settings_capability_is_always_manage_options() {
 		update_option( MigratePlus_Settings::OPTION, array( 'capability' => 'edit_others_posts' ) );
 		MigratePlus_Settings::flush_cache();
@@ -149,26 +159,53 @@ class Test_Settings extends WP_UnitTestCase {
 	}
 
 	public function test_cleanup_with_retention_off_keeps_everything() {
-		$job = MigratePlus_Job::create( 'json', array() );
+		$job                 = MigratePlus_Job::create( 'json', array() );
+		$job->data['status'] = 'complete'; // A draft is purged after a day whatever the retention: see below.
+		$job->save();
 		$this->backdate( 'migrateplus_job_' . $job->data['id'], 'updated', 400 );
 		MigratePlus_Settings::cleanup();
 		$this->assertNotNull( MigratePlus_Job::load( $job->data['id'] ) );
 	}
 
-	public function test_cleanup_skips_running_jobs_and_rollbacks() {
+	public function test_cleanup_purges_imports_never_started_after_a_day() {
+		$file = wp_tempnam( 'migrateplus-test.json' );
+		file_put_contents( $file, '[{"title":"Hello"}]' ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$old   = MigratePlus_Runner::preview( 'json', array( 'file' => $file ) )['job'];
+		$fresh = MigratePlus_Runner::preview( 'json', array( 'file' => $file ) )['job'];
+		wp_delete_file( $file );
+		$this->backdate( 'migrateplus_job_' . $old->data['id'], 'updated', 2 );
+
+		MigratePlus_Settings::cleanup();
+
+		$this->assertNull( MigratePlus_Job::load( $old->data['id'] ) );
+		$this->assertFileDoesNotExist( $old->data['settings']['cache_file'] );
+		$this->assertNotNull( MigratePlus_Job::load( $fresh->data['id'] ) );
+	}
+
+	public function test_cleanup_skips_live_running_jobs_and_rollbacks() {
 		global $wpdb;
 		update_option( MigratePlus_Settings::OPTION, array( 'job_retention_days' => 10 ) );
 		MigratePlus_Settings::flush_cache();
 		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
 		self::factory()->post->create( array( 'post_content' => 'See http://old.test/about' ) );
 
-		$old                     = MigratePlus_Job::create( 'json', array() );
-		$running                 = MigratePlus_Job::create( 'json', array() );
-		$recent                  = MigratePlus_Job::create( 'json', array() );
-		$running->data['status'] = 'running';
-		$running->save();
+		$old     = MigratePlus_Job::create( 'json', array() );
+		$running = MigratePlus_Job::create( 'json', array() );
+		$stalled = MigratePlus_Job::create( 'json', array() );
+		$recent  = MigratePlus_Job::create( 'json', array() );
+		foreach ( array( $old, $recent ) as $job ) {
+			$job->data['status'] = 'complete';
+			$job->save();
+		}
+		// Both last saved 11 days ago; a batch still holds the lock of one, the other's requests died.
+		foreach ( array( $running, $stalled ) as $job ) {
+			$job->data['status'] = 'running';
+			$job->save();
+		}
+		$lock = MigratePlus_Runner::lock( $running );
 		$this->backdate( 'migrateplus_job_' . $old->data['id'], 'updated', 11 );
 		$this->backdate( 'migrateplus_job_' . $running->data['id'], 'updated', 11 );
+		$this->backdate( 'migrateplus_job_' . $stalled->data['id'], 'updated', 11 );
 		$this->backdate( 'migrateplus_job_' . $recent->data['id'], 'updated', 9 );
 
 		$old_export    = MigratePlus_Exporter::start( MigratePlus_Exporter::sanitize_args( array( 'post_type' => 'post' ) ) );
@@ -191,9 +228,11 @@ class Test_Settings extends WP_UnitTestCase {
 		}
 
 		MigratePlus_Settings::cleanup();
+		MigratePlus_Runner::unlock( $running, $lock );
 
 		$this->assertNull( MigratePlus_Job::load( $old->data['id'] ) );
 		$this->assertNotNull( MigratePlus_Job::load( $running->data['id'] ) );
+		$this->assertNull( MigratePlus_Job::load( $stalled->data['id'] ) );
 		$this->assertNotNull( MigratePlus_Job::load( $recent->data['id'] ) );
 		$this->assertNull( MigratePlus_Exporter::history_entry( $old_export['id'] ) );
 		$this->assertFileDoesNotExist( $old_export['work'] );

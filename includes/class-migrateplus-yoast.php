@@ -39,6 +39,22 @@ class MigratePlus_Yoast {
 	const SECRET  = '/token|api_key|oauth|license|secret|^version$|_version|first_activated|previous_version|dismiss|indexing|indexables|site_type|environment|_cache|_sent|_count$|myyoast|siteanalysis|ryte|wincher|semrush/i';
 
 	/**
+	 * Settings that hold an attachment id, and the setting with its URL. The id
+	 * names another site's attachment, so the URL is downloaded and the id set
+	 * to the copy. social-image-id-* / social-image-url-* pairs are matched by
+	 * pattern (see image_pairs()).
+	 *
+	 * @var string[] id key => URL key
+	 */
+	const IMAGE_IDS = array(
+		'company_logo_id'               => 'company_logo',
+		'person_logo_id'                => 'person_logo',
+		'og_default_image_id'           => 'og_default_image',
+		'og_frontpage_image_id'         => 'og_frontpage_image',
+		'open_graph_frontpage_image_id' => 'open_graph_frontpage_image',
+	);
+
+	/**
 	 * Whether Yoast SEO is active.
 	 *
 	 * @return bool
@@ -95,9 +111,15 @@ class MigratePlus_Yoast {
 			if ( 'primary' === $name ) {
 				foreach ( is_array( $value ) ? $value : array() as $taxonomy => $path ) {
 					$taxonomy = sanitize_key( $taxonomy );
-					$ids      = taxonomy_exists( $taxonomy ) ? MigratePlus_Importer::resolve_terms( $taxonomy, array( MigratePlus_Util::stringify( $path ) ), false ) : array();
-					if ( $ids ) {
-						update_post_meta( $post_id, self::META_PREFIX . 'primary_' . $taxonomy, (int) $ids[0] );
+					$term_id  = taxonomy_exists( $taxonomy ) ? MigratePlus_Terms::find_term(
+						array(
+							'taxonomy' => $taxonomy,
+							'path'     => MigratePlus_Util::stringify( $path ),
+						),
+						''
+					) : 0;
+					if ( $term_id ) {
+						update_post_meta( $post_id, self::META_PREFIX . 'primary_' . $taxonomy, $term_id );
 						++$saved;
 					} else {
 						/* translators: %s: term path */
@@ -106,7 +128,8 @@ class MigratePlus_Yoast {
 				}
 				continue;
 			}
-			if ( ! preg_match( '/^[a-z0-9_-]+$/i', $name ) || in_array( $name, self::COMPUTED, true ) ) {
+			// An image id names the old site's attachment: the URL beside it is what travels.
+			if ( ! preg_match( '/^[a-z0-9_-]+$/i', $name ) || in_array( $name, self::COMPUTED, true ) || preg_match( '/-image-id$/', $name ) ) {
 				continue;
 			}
 			if ( preg_match( '/-image$/', $name ) && is_string( $value ) && '' !== $value && ! empty( $opts['import_featured_image'] ) ) {
@@ -119,6 +142,9 @@ class MigratePlus_Yoast {
 					$value = (string) wp_get_attachment_url( $id );
 					update_post_meta( $post_id, self::META_PREFIX . $name . '-id', (int) $id );
 				}
+			}
+			if ( in_array( $name, array( 'canonical', 'redirect' ), true ) && is_string( $value ) && ! empty( $opts['rewrite_links'] ) ) {
+				$value = MigratePlus_Menus::rewrite_url( $value, $base ); // A canonical left on the old site would hand it the post's ranking.
 			}
 			update_post_meta( $post_id, self::META_PREFIX . $name, wp_slash( $value ) );
 			++$saved;
@@ -146,23 +172,48 @@ class MigratePlus_Yoast {
 
 	/**
 	 * Save a term's Yoast fields, keeping the ones the export does not carry.
+	 * Social images are handled as a post's are: the URL is downloaded (when
+	 * the import downloads featured images) and the id set to the copy; the
+	 * old site's id is never saved.
 	 *
-	 * @param int    $term_id  Term id.
-	 * @param string $taxonomy Taxonomy.
-	 * @param array  $data     Exported fields.
+	 * @param int                  $term_id  Term id.
+	 * @param string               $taxonomy Taxonomy.
+	 * @param array                $data     Exported fields.
+	 * @param MigratePlus_Job|null $job      Job: without it, images and links are saved as they are.
+	 * @param array                $opts     Job options.
+	 * @param string[]             $warnings Warnings (by reference).
 	 */
-	public static function import_term( $term_id, $taxonomy, array $data ) {
+	public static function import_term( $term_id, $taxonomy, array $data, $job = null, array $opts = array(), array &$warnings = array() ) {
+		$base   = $job && isset( $job->data['settings']['migrateplus_site'] ) ? (string) $job->data['settings']['migrateplus_site'] : '';
 		$values = array();
 		foreach ( $data as $key => $value ) {
-			if ( preg_match( '/^wpseo_[a-z0-9_-]+$/i', (string) $key ) && is_scalar( $value ) ) {
-				$values[ (string) $key ] = (string) $value;
+			$key = (string) $key;
+			if ( ! preg_match( '/^wpseo_[a-z0-9_-]+$/i', $key ) || ! is_scalar( $value ) || preg_match( '/-image-id$/', $key ) ) {
+				continue;
 			}
+			$value = (string) $value;
+			if ( $job && preg_match( '/-image$/', $key ) && '' !== $value && ! empty( $opts['import_featured_image'] ) ) {
+				$id = MigratePlus_Media::sideload( $value, 0, '', $base, $job->data['id'] );
+				if ( is_wp_error( $id ) ) {
+					/* translators: 1: field, 2: error */
+					$warnings[] = sprintf( __( 'Yoast %1$s image: %2$s', 'migrateplus' ), $key, $id->get_error_message() );
+				} else {
+					$value                  = (string) wp_get_attachment_url( $id );
+					$values[ $key . '-id' ] = (string) $id;
+				}
+			}
+			if ( $job && 'wpseo_canonical' === $key && ! empty( $opts['rewrite_links'] ) ) {
+				$value = MigratePlus_Menus::rewrite_url( $value, $base );
+			}
+			$values[ $key ] = $value;
 		}
 		if ( ! $values ) {
 			return;
 		}
 		if ( class_exists( 'WPSEO_Taxonomy_Meta' ) && method_exists( 'WPSEO_Taxonomy_Meta', 'set_values' ) ) {
-			WPSEO_Taxonomy_Meta::set_values( $term_id, $taxonomy, $values );
+			// set_values() keeps only the fields it is given: start from the ones the term has.
+			$current = method_exists( 'WPSEO_Taxonomy_Meta', 'get_term_meta' ) ? WPSEO_Taxonomy_Meta::get_term_meta( (int) $term_id, $taxonomy ) : array();
+			WPSEO_Taxonomy_Meta::set_values( $term_id, $taxonomy, array_merge( is_array( $current ) ? $current : array(), $values ) );
 			return;
 		}
 		$all = (array) get_option( 'wpseo_taxonomy_meta', array() );
@@ -197,13 +248,17 @@ class MigratePlus_Yoast {
 
 	/**
 	 * Apply exported settings over this site's: keys the export carries are set,
-	 * the rest (tokens, licences) stay as they are here.
+	 * the rest (tokens, licences) stay as they are here. Ids of the old site are
+	 * pointed at this site's copies (logos, social images), or left out (the
+	 * person the site represents, an image that does not download).
 	 *
-	 * @param array $settings From export_settings().
-	 * @param array $prev     Previous values, for rollback (by reference).
+	 * @param array                $settings From export_settings().
+	 * @param array                $prev     Previous values, for rollback (by reference).
+	 * @param MigratePlus_Job|null $job      Job, to download images into.
+	 * @param string[]             $warnings Warnings (by reference).
 	 * @return int Options changed.
 	 */
-	public static function import_settings( array $settings, array &$prev ) {
+	public static function import_settings( array $settings, array &$prev, $job = null, array &$warnings = array() ) {
 		$n = 0;
 		foreach ( $settings as $name => $value ) {
 			if ( ! in_array( $name, self::OPTIONS, true ) || ! is_array( $value ) ) {
@@ -214,6 +269,7 @@ class MigratePlus_Yoast {
 					unset( $value[ $key ] );
 				}
 			}
+			$value   = self::localize_settings( $value, $job, $warnings );
 			$current = get_option( $name );
 			if ( ! array_key_exists( $name, $prev ) ) {
 				$prev[ $name ] = false === $current ? null : $current;
@@ -222,5 +278,65 @@ class MigratePlus_Yoast {
 			++$n;
 		}
 		return $n;
+	}
+
+	/**
+	 * Settings with the old site's ids replaced: each image downloaded and its id
+	 * set to the copy. What cannot be matched (the represented person, an image
+	 * that does not download) is left out, so this site's value stays.
+	 *
+	 * @param array                $value    One option's settings.
+	 * @param MigratePlus_Job|null $job      Job, or null (then every id is left out).
+	 * @param string[]             $warnings Warnings (by reference).
+	 * @return array
+	 */
+	protected static function localize_settings( array $value, $job, array &$warnings ) {
+		$base = $job && isset( $job->data['settings']['migrateplus_site'] ) ? (string) $job->data['settings']['migrateplus_site'] : '';
+		foreach ( self::image_pairs( $value ) as $id_key => $url_key ) {
+			$url = isset( $value[ $url_key ] ) && is_string( $value[ $url_key ] ) ? trim( $value[ $url_key ] ) : '';
+			unset( $value[ $id_key ] );
+			// The logos' cached sizes and URLs ("company_logo_meta") describe the old file too.
+			unset( $value[ $url_key . '_meta' ] );
+			if ( '' === $url ) {
+				continue;
+			}
+			$id = $job ? MigratePlus_Media::sideload( $url, 0, '', $base, $job->data['id'] ) : new WP_Error( 'migrateplus_yoast_image', __( 'not downloaded without an import to add it to.', 'migrateplus' ) );
+			if ( is_wp_error( $id ) ) {
+				unset( $value[ $url_key ] );
+				/* translators: 1: setting, 2: error */
+				$warnings[] = sprintf( __( 'Yoast setting "%1$s" kept this site\'s value: %2$s', 'migrateplus' ), $url_key, $id->get_error_message() );
+				continue;
+			}
+			$value[ $url_key ] = (string) wp_get_attachment_url( $id );
+			$value[ $id_key ]  = (int) $id;
+		}
+		if ( ! empty( $value['company_or_person_user_id'] ) ) {
+			// A user id of the old site: users are not imported, so it names nobody here, or someone else.
+			$warnings[] = __( 'The person Yoast SEO says the site represents is a user of the old site, so this site keeps its choice.', 'migrateplus' );
+		}
+		unset( $value['company_or_person_user_id'] );
+		return $value;
+	}
+
+	/**
+	 * The image settings in one option's values, as id key => URL key.
+	 *
+	 * @param array $value Settings.
+	 * @return string[]
+	 */
+	protected static function image_pairs( array $value ) {
+		$pairs = array();
+		$urls  = array_flip( self::IMAGE_IDS );
+		foreach ( array_keys( $value ) as $key ) {
+			$key = (string) $key;
+			if ( isset( self::IMAGE_IDS[ $key ] ) ) {
+				$pairs[ $key ] = self::IMAGE_IDS[ $key ];
+			} elseif ( isset( $urls[ $key ] ) ) {
+				$pairs[ $urls[ $key ] ] = $key;
+			} elseif ( preg_match( '/^social-image-(id|url)-(.+)$/', $key, $m ) ) {
+				$pairs[ 'social-image-id-' . $m[2] ] = 'social-image-url-' . $m[2];
+			}
+		}
+		return $pairs;
 	}
 }

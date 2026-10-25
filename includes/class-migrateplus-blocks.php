@@ -10,12 +10,18 @@ defined( 'ABSPATH' ) || exit;
 /**
  * Block content names other content by the old site's ids: a synced pattern
  * (<!-- wp:block {"ref":12} -->), a navigation block and its links, the
- * attachment behind an image, cover, video, audio, file or gallery block. After
- * a post is imported, those ids are pointed at the posts imported from them.
+ * attachment behind an image, cover, video, audio, file or gallery block, the
+ * posts and terms a query or latest posts block lists, a WooCommerce block's
+ * products and categories. After a post is imported, those ids are pointed at
+ * the content imported from them. Authors are left as they are: users are not
+ * imported with their old ids.
  *
  * A target imported later in the file is linked when it arrives: the post keeps
- * one _migrateplus_pending_ref row per id it still waits for, and the importer
- * calls link_pending() for every post it saves.
+ * one _migrateplus_pending_ref row per id it still waits for (the id's uid, so
+ * only the same source matches), and the importer calls link_pending() for
+ * every post it saves. The markup is then relinked from the copy kept when the
+ * post was first relinked, with the job that kept it, so an id is never mapped
+ * twice: once mapped, 340 could be mistaken for the old site's #340.
  *
  * Patterns, navigation menus, templates and template parts are posts, so they
  * export and import like any other type; this class is what makes them work
@@ -24,6 +30,14 @@ defined( 'ABSPATH' ) || exit;
 class MigratePlus_Blocks {
 
 	const PENDING_META = '_migrateplus_pending_ref';
+
+	/**
+	 * Post meta keeping a waiting post's markup as the import saved it, with the
+	 * old site's ids: { content, job, media, written }.
+	 *
+	 * @var string
+	 */
+	const SOURCE_META = '_migrateplus_block_source';
 
 	/**
 	 * Post types of the block editor that an export can carry, in import order:
@@ -45,49 +59,98 @@ class MigratePlus_Blocks {
 
 	/**
 	 * Blocks whose attributes name content by id, and the attribute(s) that do.
+	 * An attribute may hold one id or a list (of ids, or of objects with an id).
+	 * A template part's "theme" is a name, and is left alone.
 	 *
-	 * @var array[] block => [ attribute => what it names: post, attachment, navigation or link ]
+	 * @var array[] block => [ attribute => what it names: post, attachment, link,
+	 *              term:<taxonomy>, or query (a query block's query) ]
 	 */
 	const REFS = array(
-		'core/block'               => array( 'ref' => 'post' ),
-		'core/navigation'          => array( 'ref' => 'post' ),
-		'core/navigation-link'     => array( 'id' => 'link' ),
-		'core/navigation-submenu'  => array( 'id' => 'link' ),
-		'core/image'               => array( 'id' => 'attachment' ),
-		'core/cover'               => array( 'id' => 'attachment' ),
-		'core/video'               => array( 'id' => 'attachment' ),
-		'core/audio'               => array( 'id' => 'attachment' ),
-		'core/file'                => array( 'id' => 'attachment' ),
-		'core/media-text'          => array( 'mediaId' => 'attachment' ),
-		'core/gallery'             => array( 'ids' => 'attachment' ),
-		'core/post-featured-image' => array(),
+		'core/block'                       => array( 'ref' => 'post' ),
+		'core/navigation'                  => array( 'ref' => 'post' ),
+		'core/navigation-link'             => array( 'id' => 'link' ),
+		'core/navigation-submenu'          => array( 'id' => 'link' ),
+		'core/image'                       => array( 'id' => 'attachment' ),
+		'core/cover'                       => array( 'id' => 'attachment' ),
+		'core/video'                       => array( 'id' => 'attachment' ),
+		'core/audio'                       => array( 'id' => 'attachment' ),
+		'core/file'                        => array( 'id' => 'attachment' ),
+		'core/media-text'                  => array( 'mediaId' => 'attachment' ),
+		'core/gallery'                     => array( 'ids' => 'attachment' ),
+		'core/post-featured-image'         => array(),
+		'core/query'                       => array( 'query' => 'query' ),
+		'core/latest-posts'                => array( 'categories' => 'term:category' ),
+		'core/page-list'                   => array( 'parentPageID' => 'post' ),
+		'woocommerce/single-product'       => array( 'productId' => 'post' ),
+		'woocommerce/featured-product'     => array( 'productId' => 'post' ),
+		'woocommerce/reviews-by-product'   => array( 'productId' => 'post' ),
+		'woocommerce/handpicked-products'  => array( 'products' => 'post' ),
+		'woocommerce/featured-category'    => array( 'categoryId' => 'term:product_cat' ),
+		'woocommerce/reviews-by-category'  => array( 'categoryIds' => 'term:product_cat' ),
+		'woocommerce/product-category'     => array( 'categories' => 'term:product_cat' ),
+		'woocommerce/product-best-sellers' => array( 'categories' => 'term:product_cat' ),
+		'woocommerce/product-new'          => array( 'categories' => 'term:product_cat' ),
+		'woocommerce/product-on-sale'      => array( 'categories' => 'term:product_cat' ),
+		'woocommerce/product-top-rated'    => array( 'categories' => 'term:product_cat' ),
 	);
 
 	/**
 	 * Point the ids in a post's block markup at the content imported from them.
+	 * The importer calls this once the post is saved with the file's markup.
 	 *
 	 * @param int             $post_id Post id.
 	 * @param MigratePlus_Job $job     Job.
 	 * @return int Ids still waiting for their target.
 	 */
 	public static function relink( $post_id, MigratePlus_Job $job ) {
-		$post = get_post( $post_id );
+		$post  = get_post( $post_id );
+		$media = MigratePlus_Media::take_block_ids( (int) $post_id );
 		if ( ! $post || ! has_blocks( $post->post_content ) ) {
 			return 0;
 		}
+		return self::relink_from( (int) $post_id, $post->post_content, $post->post_content, $job, $media );
+	}
+
+	/**
+	 * Relink a post from its source markup, save the result and remember what it still waits for.
+	 *
+	 * @param int             $post_id Post id.
+	 * @param string          $source  Markup with the old site's ids (those import_content_images() mapped aside).
+	 * @param string          $current The post's markup now.
+	 * @param MigratePlus_Job $job     The job the source came with.
+	 * @param int[]           $media   Ids import_content_images() mapped, old => new.
+	 * @return int Ids still waiting for their target.
+	 */
+	protected static function relink_from( $post_id, $source, $current, MigratePlus_Job $job, array $media ) {
 		$pending = array();
-		$content = self::relink_content( $post->post_content, $job, $pending );
-		if ( $content !== $post->post_content ) {
+		$content = self::relink_content( $source, $job, $pending, $media );
+		$written = $current;
+		if ( $content !== $current ) {
 			// Straight to the table: wp_update_post() would run the content through filters again and bump the modified date.
 			global $wpdb;
-			$wpdb->update( $wpdb->posts, array( 'post_content' => $content ), array( 'ID' => (int) $post_id ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+			if ( false !== $wpdb->update( $wpdb->posts, array( 'post_content' => $content ), array( 'ID' => (int) $post_id ) ) ) { // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+				$written = $content;
+			}
 			clean_post_cache( $post_id );
 		}
+		$pending = array_values( array_unique( $pending ) );
 		delete_post_meta( $post_id, self::PENDING_META );
-		foreach ( array_unique( $pending ) as $source_id ) {
-			add_post_meta( $post_id, self::PENDING_META, $source_id );
+		foreach ( $pending as $old ) {
+			add_post_meta( $post_id, self::PENDING_META, MigratePlus_Importer::uid( $job, $old ) );
 		}
-		return count( array_unique( $pending ) );
+		if ( $pending || $written !== $content ) {
+			// Kept for when a target arrives, or to try again when the write failed.
+			$keep = array(
+				'content' => $source,
+				'job'     => (string) $job->data['id'],
+				'media'   => $media,
+				'written' => md5( $written ),
+			);
+			update_post_meta( $post_id, self::SOURCE_META, wp_slash( $keep ) );
+		} else {
+			delete_post_meta( $post_id, self::SOURCE_META );
+		}
+		return count( $pending );
 	}
 
 	/**
@@ -109,14 +172,33 @@ class MigratePlus_Blocks {
 				'fields'           => 'ids',
 				'suppress_filters' => true,
 				'meta_key'         => self::PENDING_META, // phpcs:ignore WordPress.DB.SlowDBQuery
-				'meta_value'       => (string) $source_id, // phpcs:ignore WordPress.DB.SlowDBQuery
+				'meta_value'       => MigratePlus_Importer::uid( $job, $source_id ), // phpcs:ignore WordPress.DB.SlowDBQuery
 			)
 		);
 		foreach ( $waiting as $id ) {
 			if ( (int) $id !== (int) $post_id ) {
-				self::relink( (int) $id, $job );
+				self::relink_waiting( (int) $id, $job );
 			}
 		}
+	}
+
+	/**
+	 * Relink a waiting post from the markup kept for it, with the job that kept it.
+	 * A post edited since is left as it is, and stops waiting.
+	 *
+	 * @param int             $post_id Post id.
+	 * @param MigratePlus_Job $job     The job whose post arrived (same source, as the uid matched).
+	 */
+	protected static function relink_waiting( $post_id, MigratePlus_Job $job ) {
+		$post = get_post( $post_id );
+		$kept = get_post_meta( $post_id, self::SOURCE_META, true );
+		if ( ! $post || ! is_array( $kept ) || ! isset( $kept['content'] ) || ( isset( $kept['written'] ) && md5( $post->post_content ) !== $kept['written'] ) ) {
+			delete_post_meta( $post_id, self::PENDING_META );
+			delete_post_meta( $post_id, self::SOURCE_META );
+			return;
+		}
+		$recorder = ! empty( $kept['job'] ) ? MigratePlus_Job::load( $kept['job'] ) : null;
+		self::relink_from( $post_id, (string) $kept['content'], $post->post_content, $recorder ? $recorder : $job, isset( $kept['media'] ) ? array_map( 'intval', (array) $kept['media'] ) : array() );
 	}
 
 	/**
@@ -125,48 +207,50 @@ class MigratePlus_Blocks {
 	 * @param string          $content Block markup.
 	 * @param MigratePlus_Job $job     Job.
 	 * @param string[]        $pending Source ids whose target is not here yet (by reference).
+	 * @param int[]           $media   Attachment ids import_content_images() already pointed at its copies,
+	 *                                 old => new: image, cover, media & text, video, audio and file blocks holding
+	 *                                 either are left alone, and other blocks naming an old one get its copy.
 	 * @return string
 	 */
-	public static function relink_content( $content, MigratePlus_Job $job, array &$pending ) {
+	public static function relink_content( $content, MigratePlus_Job $job, array &$pending, array $media = array() ) {
 		$images = array(); // Old attachment id => new, for the wp-image-N class in the markup.
+		$done   = array_flip( array_merge( array_keys( $media ), array_values( $media ) ) );
 		$out    = preg_replace_callback(
 			'/<!--\s+wp:([a-z][a-z0-9_-]*\/)?([a-z][a-z0-9_-]*)\s+(\{.*?\})\s+(\/?)-->/s',
-			static function ( $m ) use ( $job, &$pending, &$images ) {
+			static function ( $m ) use ( $job, &$pending, &$images, $media, $done ) {
 				$name = ( '' !== $m[1] ? $m[1] : 'core/' ) . $m[2];
 				if ( ! isset( self::REFS[ $name ] ) || ! self::REFS[ $name ] ) {
 					return $m[0];
 				}
-				$attrs = json_decode( $m[3], true );
-				if ( ! is_array( $attrs ) ) {
+				// Objects stay objects: decoded to arrays, an empty {} would be written back as [].
+				$attrs = json_decode( $m[3] );
+				if ( ! $attrs instanceof stdClass ) {
 					return $m[0];
 				}
+				$mapped  = 0 === strpos( $name, 'core/' ) && in_array( substr( $name, 5 ), MigratePlus_Media::BLOCK_TYPES, true ) ? $done : array();
 				$changed = false;
 				foreach ( self::REFS[ $name ] as $attr => $kind ) {
-					if ( ! isset( $attrs[ $attr ] ) ) {
+					if ( ! isset( $attrs->$attr ) ) {
 						continue;
 					}
-					if ( 'ids' === $attr && is_array( $attrs[ $attr ] ) ) {
-						foreach ( $attrs[ $attr ] as $i => $old ) {
-							$new = self::resolve( $kind, $old, $attrs, $job, $pending );
-							if ( $new && $new !== (int) $old ) {
-								$images[ (int) $old ] = $new;
-								$attrs[ $attr ][ $i ] = $new;
-								$changed              = true;
-							}
-						}
-						continue;
+					if ( 'attachment' === $kind && is_scalar( $attrs->$attr ) && isset( $mapped[ (int) $attrs->$attr ] ) ) {
+						continue; // Already one of this site's: import_content_images() put it there.
 					}
-					$new = self::resolve( $kind, $attrs[ $attr ], $attrs, $job, $pending );
-					if ( ! $new || $new === (int) $attrs[ $attr ] ) {
-						continue;
+					$ctx   = array(
+						'job'     => $job,
+						'attrs'   => (array) $attrs,
+						'media'   => $media,
+						'images'  => &$images,
+						'pending' => &$pending,
+					);
+					$value = 'query' === $kind ? self::relink_query( $attrs->$attr, $ctx ) : self::relink_value( $kind, $attrs->$attr, $ctx );
+					if ( wp_json_encode( $value ) === wp_json_encode( $attrs->$attr ) ) {
+						continue; // Nothing found to change: the block is written back byte for byte.
 					}
-					if ( 'attachment' === $kind ) {
-						$images[ (int) $attrs[ $attr ] ] = $new;
-					}
-					$attrs[ $attr ] = $new;
-					$changed        = true;
+					$attrs->$attr = $value;
+					$changed      = true;
 					if ( 'link' === $kind ) {
-						$attrs['url'] = isset( $attrs['kind'] ) && 'taxonomy' === $attrs['kind'] ? (string) get_term_link( $new ) : (string) get_permalink( $new );
+						$attrs->url = isset( $attrs->kind ) && 'taxonomy' === $attrs->kind ? (string) get_term_link( (int) $value ) : (string) get_permalink( (int) $value );
 					}
 				}
 				if ( ! $changed ) {
@@ -176,30 +260,129 @@ class MigratePlus_Blocks {
 			},
 			$content
 		);
-		if ( null === $out ) {
-			return $content;
+		if ( null === $out || ! $images ) {
+			return null === $out ? $content : $out;
 		}
-		foreach ( $images as $old => $new ) {
-			$out = preg_replace( '/\bwp-image-' . (int) $old . '\b/', 'wp-image-' . (int) $new, $out );
+		// One pass, each class looked up once: with { 12: 340, 340: 977 }, replacing one id after another
+		// would turn the image that became 340 into 977 as well.
+		$replaced = preg_replace_callback(
+			'/\bwp-image-(\d+)\b/',
+			static function ( $m ) use ( $images, $done ) {
+				return isset( $images[ (int) $m[1] ] ) && ! isset( $done[ (int) $m[1] ] ) ? 'wp-image-' . $images[ (int) $m[1] ] : $m[0];
+			},
+			$out
+		);
+		return null === $replaced ? $out : $replaced;
+	}
+
+	/**
+	 * An attribute's id, or list of ids, pointed at this site's content. Ids not
+	 * found stay as they are.
+	 *
+	 * @param string $kind  What the ids name (see REFS).
+	 * @param mixed  $value Id, list of ids, or list of objects with an id.
+	 * @param array  $ctx   { job, attrs, media, images (by reference), pending (by reference) }.
+	 * @return mixed
+	 */
+	protected static function relink_value( $kind, $value, array $ctx ) {
+		if ( is_array( $value ) ) {
+			foreach ( $value as $i => $item ) {
+				$value[ $i ] = self::relink_value( $kind, $item, $ctx );
+			}
+			return $value;
 		}
-		return $out;
+		if ( $value instanceof stdClass ) {
+			if ( isset( $value->id ) ) {
+				$value     = clone $value;
+				$value->id = self::relink_value( $kind, $value->id, $ctx );
+			}
+			return $value;
+		}
+		$new = self::resolve( $kind, $value, $ctx['attrs'], $ctx['job'], $ctx['pending'], $ctx['media'] );
+		if ( ! $new || $new === (int) $value ) {
+			return $value;
+		}
+		if ( 'attachment' === $kind ) {
+			$ctx['images'][ (int) $value ] = $new;
+		}
+		return is_string( $value ) ? (string) $new : $new;
+	}
+
+	/**
+	 * A query block's query with the posts and terms it names pointed at this site's.
+	 *
+	 * @param mixed $query The block's "query" attribute.
+	 * @param array $ctx   As relink_value() takes it.
+	 * @return mixed
+	 */
+	protected static function relink_query( $query, array $ctx ) {
+		if ( ! $query instanceof stdClass ) {
+			return $query;
+		}
+		$query = clone $query;
+		foreach ( array( 'exclude', 'parents' ) as $key ) {
+			if ( isset( $query->$key ) ) {
+				$query->$key = self::relink_value( 'post', $query->$key, $ctx );
+			}
+		}
+		if ( isset( $query->taxQuery ) && $query->taxQuery instanceof stdClass ) { // phpcs:ignore WordPress.NamingConventions.ValidVariableName.UsedPropertyNotSnakeCase -- the block's own name.
+			$query->taxQuery = self::relink_tax_query( $query->taxQuery, $ctx ); // phpcs:ignore WordPress.NamingConventions.ValidVariableName.UsedPropertyNotSnakeCase
+		}
+		return $query;
+	}
+
+	/**
+	 * A query block's taxQuery ({ taxonomy: [ term ids ] }, possibly under include/exclude) with this site's term ids.
+	 *
+	 * @param stdClass $tax_query The taxQuery.
+	 * @param array    $ctx       As relink_value() takes it.
+	 * @return stdClass
+	 */
+	protected static function relink_tax_query( stdClass $tax_query, array $ctx ) {
+		$tax_query = clone $tax_query;
+		foreach ( get_object_vars( $tax_query ) as $key => $ids ) {
+			if ( $ids instanceof stdClass ) {
+				$tax_query->$key = self::relink_tax_query( $ids, $ctx );
+			} elseif ( is_array( $ids ) && taxonomy_exists( (string) $key ) ) {
+				$tax_query->$key = self::relink_value( 'term:' . $key, $ids, $ctx );
+			}
+		}
+		return $tax_query;
 	}
 
 	/**
 	 * This site's id for content the old site named by id.
 	 *
-	 * @param string          $kind    post, attachment, navigation or link.
+	 * @param string          $kind    post, attachment, link or term:<taxonomy>.
 	 * @param mixed           $old     Id on the old site.
 	 * @param array           $attrs   The block's attributes (a link says whether it points at a post or a term).
 	 * @param MigratePlus_Job $job     Job.
-	 * @param string[]        $pending Source ids not here yet (by reference).
+	 * @param string[]        $pending Source ids not here yet (by reference): posts, attachments and links only,
+	 *                                 since terms are imported before any post.
+	 * @param int[]           $media   Attachments import_content_images() made, old id => new.
 	 * @return int 0 when it is not here.
 	 */
-	protected static function resolve( $kind, $old, array $attrs, MigratePlus_Job $job, array &$pending ) {
+	protected static function resolve( $kind, $old, array $attrs, MigratePlus_Job $job, array &$pending, array $media = array() ) {
 		if ( ! is_numeric( $old ) || (int) $old <= 0 ) {
 			return 0;
 		}
 		$old = (string) (int) $old;
+		if ( 0 === strpos( $kind, 'term:' ) ) {
+			$taxonomy = substr( $kind, 5 );
+			return taxonomy_exists( $taxonomy ) ? MigratePlus_Terms::find_term(
+				array( 'taxonomy' => $taxonomy ),
+				MigratePlus_Terms::uid(
+					$job,
+					array(
+						'taxonomy' => $taxonomy,
+						'id'       => $old,
+					)
+				)
+			) : 0;
+		}
+		if ( 'attachment' === $kind && isset( $media[ $old ] ) ) {
+			return (int) $media[ $old ];
+		}
 		if ( 'link' === $kind && isset( $attrs['kind'] ) && 'taxonomy' === $attrs['kind'] ) {
 			// A term link: by the slug in its URL, since terms are not imported by id.
 			$taxonomy = isset( $attrs['type'] ) ? sanitize_key( $attrs['type'] ) : '';

@@ -30,8 +30,10 @@ class MigratePlus_Upgrade {
 		if ( get_option( self::FLAG ) ) {
 			return;
 		}
-		self::run();
-		update_option( self::FLAG, 1 );
+		// Only once everything moved: what failed is tried again on the next load.
+		if ( self::run() ) {
+			update_option( self::FLAG, 1 );
+		}
 	}
 
 	/**
@@ -45,18 +47,25 @@ class MigratePlus_Upgrade {
 
 	/**
 	 * Move everything. Safe to run again: what was moved is no longer under the old names.
+	 *
+	 * @return bool Whether every option and meta key was moved.
 	 */
 	public static function run() {
 		$uploads = wp_upload_dir( null, false );
 		$old_dir = wp_normalize_path( trailingslashit( $uploads['basedir'] ) . self::OLD_DIR . '/' );
 		$new_dir = wp_normalize_path( MigratePlus_Util::storage_dir() );
 		self::move_dir( $old_dir, $new_dir );
-		self::rename_options( $old_dir, $new_dir );
-		self::rename_meta();
+		list( $options, $options_ok ) = self::rename_options( $old_dir, $new_dir );
+		$meta                         = self::rename_meta();
 		wp_clear_scheduled_hook( self::OLD_CRON_HOOK ); // The new hook is scheduled on init.
 		MigratePlus_Settings::flush_cache();
-		// Meta was renamed in SQL, behind any persistent object cache.
-		wp_cache_flush();
+		// Meta was renamed in SQL, behind any persistent object cache, which may also hold "no such
+		// option" for the new names. Not on a new install, which has nothing to rename and would
+		// only lose every cached value.
+		if ( $options || false === $meta || $meta > 0 ) {
+			wp_cache_flush();
+		}
+		return $options_ok && false !== $meta;
 	}
 
 	/**
@@ -75,15 +84,21 @@ class MigratePlus_Upgrade {
 			return;
 		}
 		wp_mkdir_p( $new );
-		foreach ( (array) scandir( $old ) as $name ) {
-			if ( '.' === $name || '..' === $name || ! is_file( $old . $name ) ) {
+		$guards = array( 'index.php', '.htaccess' );
+		$left   = false;
+		foreach ( array_diff( (array) scandir( $old ), array( '.', '..' ), $guards ) as $name ) {
+			// The rest have random names, so none is in both folders; a file that can't be moved keeps its old path.
+			if ( is_file( $old . $name ) && ( file_exists( $new . $name ) || ! @rename( $old . $name, $new . $name ) ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions
+				$left = true;
+			}
+		}
+		// The folder's index.php and .htaccess last, and only once nothing is left for them to guard.
+		foreach ( $left ? array() : $guards as $name ) {
+			if ( ! is_file( $old . $name ) ) {
 				continue;
 			}
 			if ( file_exists( $new . $name ) ) {
-				// Only the folder's index.php and .htaccess can be in both; the rest have random names.
-				if ( in_array( $name, array( 'index.php', '.htaccess' ), true ) ) {
-					wp_delete_file( $old . $name );
-				}
+				wp_delete_file( $old . $name );
 				continue;
 			}
 			@rename( $old . $name, $new . $name ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions
@@ -100,9 +115,11 @@ class MigratePlus_Upgrade {
 	 *
 	 * @param string $old_dir Old storage folder.
 	 * @param string $new_dir New storage folder.
+	 * @return array { 0: int old options found, 1: bool whether every one was moved }
 	 */
 	protected static function rename_options( $old_dir, $new_dir ) {
 		global $wpdb;
+		$ok   = true;
 		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT option_name, autoload FROM {$wpdb->options} WHERE option_name LIKE %s", $wpdb->esc_like( self::OLD_OPTION_PREFIX ) . '%' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		foreach ( (array) $rows as $row ) {
 			$new = 'migrateplus_' . substr( $row->option_name, strlen( self::OLD_OPTION_PREFIX ) );
@@ -118,9 +135,16 @@ class MigratePlus_Upgrade {
 				}
 				// WordPress 6.6 stores "on"/"off"/"auto…" instead of "yes"/"no"; add_option() takes both of the old ones.
 				add_option( $new, $value, '', in_array( $row->autoload, array( 'yes', 'on', 'auto', 'auto-on' ), true ) ? 'yes' : 'no' );
+				$exists = (bool) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->options} WHERE option_name = %s", $new ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+			}
+			// The old one only goes once the new one is there: a failed write must not lose the value.
+			if ( false !== $old && ! $exists ) {
+				$ok = false;
+				continue;
 			}
 			delete_option( $row->option_name );
 		}
+		return array( count( (array) $rows ), $ok );
 	}
 
 	/**
@@ -128,12 +152,20 @@ class MigratePlus_Upgrade {
 	 * fixed keys (job id, source uid/id/url, parent uid, ACF pending, comment uid, …)
 	 * and the per-product "_pressport_pending_<hash>" keys alike. A prefix LIKE uses
 	 * the meta_key index, so this stays fast however many rows there are.
+	 *
+	 * @return int|false Rows renamed, or false when an UPDATE failed.
 	 */
 	protected static function rename_meta() {
 		global $wpdb;
+		$rows = 0;
 		foreach ( array( $wpdb->postmeta, $wpdb->commentmeta, $wpdb->termmeta ) as $table ) {
-			$wpdb->query( $wpdb->prepare( "UPDATE {$table} SET meta_key = CONCAT( %s, SUBSTRING( meta_key, %d ) ) WHERE meta_key LIKE %s", '_migrateplus_', strlen( self::OLD_META_PREFIX ) + 1, $wpdb->esc_like( self::OLD_META_PREFIX ) . '%' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- core table names.
+			$done = $wpdb->query( $wpdb->prepare( "UPDATE {$table} SET meta_key = CONCAT( %s, SUBSTRING( meta_key, %d ) ) WHERE meta_key LIKE %s", '_migrateplus_', strlen( self::OLD_META_PREFIX ) + 1, $wpdb->esc_like( self::OLD_META_PREFIX ) . '%' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- core table names.
+			if ( false === $done ) {
+				return false;
+			}
+			$rows += (int) $done;
 		}
+		return $rows;
 	}
 
 	/**

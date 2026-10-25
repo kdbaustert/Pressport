@@ -46,7 +46,7 @@ class Test_Export extends WP_UnitTestCase {
 
 		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
 		$item = MigratePlus_Exporter::export_post( get_post( $post_id ), $args );
-		$this->assertSame( 'writer@source.test', $item['author'] );
+		$this->assertSame( 'writer', $item['author'] );
 		$this->assertSame( 'writer', $item['author_login'] );
 		$this->assertSame( array( 'guest@example.test', '' ), array_column( $item['comments'], 'author_email' ) );
 		$this->assertSame( array( '', 'writer@source.test' ), array_column( $item['comments'], 'user_email' ) );
@@ -100,12 +100,68 @@ class Test_Export extends WP_UnitTestCase {
 		$this->assertSame( array( 'mine-secret' ), array_column( $doc['items'], 'password' ) );
 		$this->assertSame( 1, $doc['migrateplus']['count'] );
 		$this->assertContains( 'Left out 1 item you are not allowed to edit.', $log );
-		$this->assertContains( 'Author and commenter emails and logins are left out, because you are not allowed to list users. The importing site matches authors by display name, so two people with the same name become one.', $log );
+		$this->assertContains( 'Author logins and commenter emails are left out, because you are not allowed to list users. The importing site keeps only the authors\' names with their posts.', $log );
 		$this->assertSame( '', MigratePlus_Exporter::export_post( get_post( $theirs ), $state['args'] )['password'] );
 
 		// WP-CLI without --user exports everything, as before.
 		wp_set_current_user( 0 );
 		$this->assertSame( 'their-secret', MigratePlus_Exporter::export_post( get_post( $theirs ), $state['args'] )['password'] );
 		unregister_post_type( 'mp_note' );
+	}
+
+	public function test_sanitize_args_refuses_statuses_dates_and_site_sections_it_cannot_read() {
+		$cases = array(
+			'migrateplus_export_status'        => array( 'statuses' => array( 'trash' ) ),
+			'migrateplus_export_date'          => array( 'after' => '2024-02-30' ),
+			'migrateplus_export_site_sections' => array(
+				'include_site_settings' => 1,
+				'site_sections'         => '',
+			),
+		);
+		foreach ( $cases as $code => $args ) {
+			$this->assertSame( $code, MigratePlus_Exporter::sanitize_args( $args )->get_error_code() );
+		}
+		$this->assertSame( array( 'publish', 'draft' ), MigratePlus_Exporter::sanitize_args( array( 'statuses' => 'publish, draft' ) )['statuses'] );
+		$this->assertSame( array(), MigratePlus_Exporter::sanitize_args( array( 'site_sections' => '' ) )['site_sections'] );
+	}
+
+	public function test_export_file_name_has_a_secret_part_the_download_name_lacks() {
+		self::factory()->post->create();
+		$state = MigratePlus_Exporter::start( MigratePlus_Exporter::sanitize_args( array( 'post_type' => 'post' ) ) );
+		while ( empty( $state['complete'] ) ) {
+			MigratePlus_Exporter::run_batch( $state );
+		}
+		MigratePlus_Exporter::forget( $state['id'] );
+		$this->assertMatchesRegularExpression( '/^export-' . $state['id'] . '-[a-z0-9]{20}-migrateplus-post-[0-9-]+\.json$/', wp_basename( $state['file'] ) );
+		$this->assertStringStartsWith( 'migrateplus-post-', $state['filename'] );
+	}
+
+	/**
+	 * A draft has no GMT date until it is published: it travels with its local date instead.
+	 */
+	public function test_a_draft_exports_its_date() {
+		$draft = self::factory()->post->create(
+			array(
+				'post_status' => 'draft',
+				'post_date'   => '2020-03-04 05:06:07',
+			)
+		);
+		$this->assertSame( '0000-00-00 00:00:00', get_post( $draft )->post_date_gmt );
+		$item = MigratePlus_Exporter::export_post( get_post( $draft ), MigratePlus_Exporter::sanitize_args( array() ) );
+		$this->assertSame( get_gmt_from_date( '2020-03-04 05:06:07', 'c' ), $item['date_gmt'] );
+	}
+
+	public function test_deactivation_removes_finished_exports_and_the_cleanup_event() {
+		self::factory()->post->create();
+		$state = MigratePlus_Exporter::start( MigratePlus_Exporter::sanitize_args( array( 'post_type' => 'post' ) ) );
+		while ( empty( $state['complete'] ) ) {
+			MigratePlus_Exporter::run_batch( $state );
+		}
+		wp_schedule_event( time() + HOUR_IN_SECONDS, 'daily', 'migrateplus_cleanup' );
+		do_action( 'deactivate_' . plugin_basename( MIGRATEPLUS_FILE ), false );
+		$this->assertFileDoesNotExist( $state['file'] );
+		$this->assertNull( MigratePlus_Exporter::load_state( $state['id'] ) );
+		$this->assertFalse( wp_next_scheduled( 'migrateplus_cleanup' ) );
+		MigratePlus_Exporter::forget( $state['id'] );
 	}
 }

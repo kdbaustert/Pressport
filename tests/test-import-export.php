@@ -314,17 +314,6 @@ class Test_Import_Export extends WP_UnitTestCase {
 		wp_delete_file( $b );
 	}
 
-	public function test_author_cache_retries_a_miss_when_creating() {
-		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
-		$this->assertSame( 0, MigratePlus_Importer::resolve_author( 'Cache Miss Person', false ) );
-		$this->assertGreaterThan( 0, MigratePlus_Importer::resolve_author( 'Cache Miss Person', true ) );
-	}
-
-	public function test_authors_are_only_created_by_users_who_may() {
-		wp_set_current_user( self::factory()->user->create( array( 'role' => 'editor' ) ) );
-		$this->assertSame( 0, MigratePlus_Importer::resolve_author( 'Editor Made Person', true ) );
-	}
-
 	public function test_importable_post_types_need_edit_access_and_content_types() {
 		wp_set_current_user( self::factory()->user->create( array( 'role' => 'subscriber' ) ) );
 		$this->assertFalse( MigratePlus_Importer::importable_post_type( 'post' ) );
@@ -715,7 +704,7 @@ class Test_Import_Export extends WP_UnitTestCase {
 		$this->set_permalink_structure( '' );
 	}
 
-	public function test_export_carries_author_email_login_and_name() {
+	public function test_export_carries_the_author_login_and_name_but_no_email() {
 		$user = self::factory()->user->create(
 			array(
 				'user_login'   => 'writer',
@@ -724,9 +713,10 @@ class Test_Import_Export extends WP_UnitTestCase {
 			)
 		);
 		$item = MigratePlus_Exporter::export_post( get_post( self::factory()->post->create( array( 'post_author' => $user ) ) ), MigratePlus_Exporter::sanitize_args( array() ) );
-		$this->assertSame( 'writer@source.test', $item['author'] );
+		$this->assertSame( 'writer', $item['author'] );
 		$this->assertSame( 'writer', $item['author_login'] );
 		$this->assertSame( 'Wanda Writer', $item['author_name'] );
+		$this->assertStringNotContainsString( 'writer@source.test', wp_json_encode( $item ) );
 		$fields = MigratePlus_Exporter::mapping_for(
 			array(
 				'args'      => MigratePlus_Exporter::sanitize_args( array() ),
@@ -740,103 +730,148 @@ class Test_Import_Export extends WP_UnitTestCase {
 	}
 
 	/**
-	 * Email first, then login; a record matching no one gets the default author and a warning.
+	 * User accounts differ from site to site: every post gets the author picked for the
+	 * import, even when a user here has the old author's email or login, and the old
+	 * author is kept with the post. An email in an older file is left out.
 	 */
-	public function test_export_authors_match_by_email_then_login() {
-		$admin   = self::factory()->user->create( array( 'role' => 'administrator' ) );
-		$by_mail = self::factory()->user->create(
+	public function test_records_get_the_picked_author_and_keep_the_old_one_as_a_note() {
+		$picked = self::factory()->user->create( array( 'role' => 'editor' ) );
+		self::factory()->user->create(
 			array(
-				'user_login' => 'mailmatch',
+				'user_login' => 'loginmatch',
 				'user_email' => 'same@both.test',
 			)
 		);
-		$by_name = self::factory()->user->create(
-			array(
-				'user_login' => 'loginmatch',
-				'user_email' => 'here@target.test',
-			)
-		);
-		wp_set_current_user( $admin );
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
 		$items = array(
-			// The email names one user and the login another: the email wins.
 			$this->item( 1 ) + array(
-				'author'       => 'same@both.test',
+				'author'       => 'loginmatch',
 				'author_login' => 'loginmatch',
 				'author_name'  => 'Someone',
 			),
+			// From before exports stopped carrying emails.
 			$this->item( 2 ) + array(
-				'author'       => 'there@source.test',
-				'author_login' => 'loginmatch',
-				'author_name'  => 'Someone',
-			),
-			$this->item( 3 ) + array(
-				'author'       => 'ghost@source.test',
-				'author_login' => 'ghost',
-				'author_name'  => 'Ghost Writer',
+				'author'      => 'same@both.test',
+				'author_name' => 'Old Style',
 			),
 		);
-		$file  = $this->export_file( $items );
-		$job   = $this->import_file(
+		$file = $this->export_file( $items );
+		$job  = $this->import_file( $file, array( 'author' => $picked ) );
+
+		$first  = $this->imported( 1, 'post' )[0];
+		$second = $this->imported( 2, 'post' )[0];
+		$this->assertSame( array( $picked, $picked ), array( (int) get_post( $first )->post_author, (int) get_post( $second )->post_author ) );
+
+		// Updating the posts hands them to whoever is picked this time.
+		$again   = self::factory()->user->create( array( 'role' => 'author' ) );
+		$updated = $this->import_file(
 			$file,
 			array(
-				'default_author' => $admin,
-				'create_authors' => 0,
+				'author'    => $again,
+				'duplicate' => 'update',
 			)
 		);
 		wp_delete_file( $file );
-
-		$this->assertSame( $by_mail, (int) get_post( $this->imported( 1, 'post' )[0] )->post_author );
-		$this->assertSame( $by_name, (int) get_post( $this->imported( 2, 'post' )[0] )->post_author );
-		$this->assertSame( $admin, (int) get_post( $this->imported( 3, 'post' )[0] )->post_author );
-		$warnings = wp_list_filter( $job->data['log'], array( 'l' => 'warning' ) );
-		$this->assertCount( 1, $warnings );
-		$this->assertStringContainsString( 'Ghost Writer', current( $warnings )['m'] );
+		$this->assertSame( array( $first, $second ), array( $this->imported( 1, 'post' )[0], $this->imported( 2, 'post' )[0] ) );
+		$this->assertSame( array( $again, $again ), array( (int) get_post( $first )->post_author, (int) get_post( $second )->post_author ) );
+		$updated->delete();
+		$this->assertSame( 'loginmatch', get_post_meta( $first, MigratePlus_Importer::SOURCE_AUTHOR_META, true ) );
+		$this->assertSame( 'Someone', get_post_meta( $first, MigratePlus_Importer::SOURCE_AUTHOR_NAME_META, true ) );
+		$this->assertSame( '', get_post_meta( $second, MigratePlus_Importer::SOURCE_AUTHOR_META, true ) );
+		$this->assertSame( 'Old Style', get_post_meta( $second, MigratePlus_Importer::SOURCE_AUTHOR_NAME_META, true ) );
+		$this->assertSame( array(), wp_list_filter( $job->data['log'], array( 'l' => 'warning' ) ) );
 		$job->delete();
 	}
 
-	public function test_created_export_authors_get_their_login_email_and_name() {
+	public function test_records_given_their_own_author_get_it_on_create_and_update() {
 		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
-		$id   = MigratePlus_Importer::resolve_exported_author( 'new@source.test', 'newbie', 'New Person', true );
-		$user = get_userdata( $id );
-		$this->assertSame( 'newbie', $user->user_login );
-		$this->assertSame( 'new@source.test', $user->user_email );
-		$this->assertSame( 'New Person', $user->display_name );
-	}
-
-	/**
-	 * A file whose mapping has no login or name (older exports) matches its author the way it always did.
-	 */
-	public function test_old_exports_match_authors_as_before() {
-		$admin = self::factory()->user->create( array( 'role' => 'administrator' ) );
-		$named = self::factory()->user->create( array( 'display_name' => 'Old Style Author' ) );
-		wp_set_current_user( $admin );
-		$file = $this->json_file(
+		$all  = self::factory()->user->create( array( 'role' => 'editor' ) );
+		$own  = self::factory()->user->create( array( 'role' => 'author' ) );
+		$file = $this->export_file( array( $this->item( 1 ), $this->item( 2 ), $this->item( 3 ) ) );
+		$job  = $this->import_file(
+			$file,
 			array(
-				'migrateplus' => array(
-					'site'    => 'http://legacy.test',
-					'mapping' => array(
-						'fields' => array(
-							'source_id'   => 'id',
-							'post_title'  => 'title',
-							'post_author' => 'author',
-						),
-					),
-				),
-				'items'       => array(
-					array(
-						'id'           => 1,
-						'title'        => 'Legacy',
-						'author'       => 'Old Style Author',
-						'author_login' => 'not-mapped',
-					),
-				),
+				'author'     => $all,
+				'authors'    => array( 1 => $own ),
+				'batch_size' => 2, // The third record comes in a batch of its own.
 			)
 		);
-		$job  = $this->import_file( $file );
-		wp_delete_file( $file );
-		$this->assertSame( $named, (int) get_post( $this->imported( 1, 'post' )[0] )->post_author );
-		$this->assertArrayNotHasKey( 'post_author_login', $job->data['mapping']['fields'] );
 		$job->delete();
+		$authors = function () {
+			return array_map(
+				function ( $id ) {
+					return (int) get_post( $this->imported( $id, 'post' )[0] )->post_author;
+				},
+				array( 1, 2, 3 )
+			);
+		};
+		$this->assertSame( array( $all, $own, $all ), $authors() );
+
+		// Updated, the posts follow this run's picks: the third gets one of its own, the rest the author for all.
+		$job = $this->import_file(
+			$file,
+			array(
+				'author'     => $own,
+				'authors'    => array( 2 => $all ),
+				'duplicate'  => 'update',
+				'batch_size' => 2,
+			)
+		);
+		$job->delete();
+		wp_delete_file( $file );
+		$this->assertSame( array( $own, $own, $all ), $authors() );
+	}
+
+	public function test_an_author_who_may_not_write_posts_falls_back_to_the_next_pick() {
+		$me         = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		$editor     = self::factory()->user->create( array( 'role' => 'editor' ) );
+		$subscriber = self::factory()->user->create( array( 'role' => 'subscriber' ) );
+		wp_set_current_user( $me );
+		$opts = array(
+			'author'  => $editor,
+			'authors' => array(
+				0 => $subscriber,
+				1 => 999999,
+				2 => $editor,
+			),
+		);
+		$this->assertSame( array( $editor, $editor, $editor, $editor ), array_map( array( 'MigratePlus_Importer', 'author_for' ), array_fill( 0, 4, $opts ), array( 0, 1, 2, null ) ) );
+		$this->assertSame( $me, MigratePlus_Importer::author_for( array( 'author' => $subscriber ), 0 ) );
+		$this->assertSame( $me, MigratePlus_Importer::author_for( array( 'author' => 0 ), null ) );
+		// WP-CLI without --user: no one, so WordPress picks the author.
+		wp_set_current_user( 0 );
+		$this->assertSame( 0, MigratePlus_Importer::author_for( array( 'author' => 0 ), 0 ) );
+	}
+
+	public function test_clean_options_keeps_only_valid_single_record_authors() {
+		$editor      = self::factory()->user->create( array( 'role' => 'editor' ) );
+		$contributor = self::factory()->user->create( array( 'role' => 'contributor' ) );
+		$subscriber  = self::factory()->user->create( array( 'role' => 'subscriber' ) );
+		$authors     = array(
+			0     => $editor,
+			1     => $subscriber,
+			2     => 999999,
+			'two' => $editor,
+			3     => (string) $contributor,
+			4     => $editor,
+			-1    => $editor,
+		);
+		$this->assertSame(
+			array(
+				0 => $editor,
+				3 => $contributor,
+			),
+			MigratePlus_Mappings::clean_options( array( 'authors' => $authors ), 4 )['authors']
+		);
+		$this->assertSame(
+			array(
+				0 => $editor,
+				3 => $contributor,
+				4 => $editor,
+			),
+			MigratePlus_Mappings::clean_options( array( 'authors' => $authors ) )['authors']
+		);
+		$this->assertSame( array(), MigratePlus_Mappings::clean_options( array( 'authors' => 'everyone' ) )['authors'] );
 	}
 
 	/**
@@ -1531,10 +1566,12 @@ class Test_Import_Export extends WP_UnitTestCase {
 				),
 			),
 			array(
-				'post_type'  => 'page',
-				'duplicate'  => 'update',
-				'dry_run'    => 1,
-				'update_ids' => array( 5 ),
+				'post_type'      => 'page',
+				'duplicate'      => 'update',
+				'dry_run'        => 1,
+				'update_ids'     => array( 5 ),
+				'skip_ids'       => array( 6 ),
+				'duplicate_rest' => 'copy',
 			),
 			array( 'id', 'title', 'isbn', 'authors.0.name' )
 		);
@@ -1545,6 +1582,8 @@ class Test_Import_Export extends WP_UnitTestCase {
 		$this->assertSame( 'update', $saved['options']['duplicate'] );
 		$this->assertArrayNotHasKey( 'dry_run', $saved['options'] );
 		$this->assertArrayNotHasKey( 'update_ids', $saved['options'] );
+		$this->assertArrayNotHasKey( 'skip_ids', $saved['options'] );
+		$this->assertArrayNotHasKey( 'duplicate_rest', $saved['options'] );
 		$this->assertFalse( wp_load_alloptions()[ MigratePlus_Mappings::OPTION ] ?? false );
 
 		// Same top-level fields in another order, with more authors: offered. Different fields: not.
@@ -2007,6 +2046,104 @@ class Test_Import_Export extends WP_UnitTestCase {
 	}
 
 	/**
+	 * Four posts imported before and one already here by slug, as a file of them again with new titles.
+	 *
+	 * @param string $title_prefix Put before each title.
+	 * @return string Path.
+	 */
+	protected function rest_file( $title_prefix ) {
+		$items = array();
+		foreach ( array( 'one', 'two', 'three', 'four', 'here' ) as $i => $slug ) {
+			$items[] = array(
+				'id'    => $i + 1,
+				'title' => $title_prefix . $slug,
+				'slug'  => $slug,
+			);
+		}
+		return $this->mapped_file(
+			'http://rest.test',
+			array(
+				'source_id'  => 'id',
+				'post_title' => 'title',
+				'post_name'  => 'slug',
+			),
+			$items
+		);
+	}
+
+	/**
+	 * The duplicates screen lists only so many duplicates: it names the ones to update and the ones to
+	 * skip, and duplicate_rest decides the rest, whether imported before or matched by slug.
+	 */
+	public function test_skip_ids_and_duplicate_rest_decide_the_duplicates_past_the_list() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$here  = self::factory()->post->create(
+			array(
+				'post_title' => 'Here',
+				'post_name'  => 'here',
+			)
+		);
+		$first = $this->rest_file( 'First ' );
+		$this->import_file( $first, array( 'skip_existing' => 1 ) )->delete();
+		wp_delete_file( $first );
+		$ids    = array_map(
+			function ( $source_id ) {
+				return $this->imported( $source_id )[0];
+			},
+			array( 1, 2, 3, 4 )
+		);
+		$titles = static function ( array $posts ) {
+			return array_map( 'get_the_title', $posts );
+		};
+
+		$again = $this->rest_file( 'Again ' );
+		$job   = $this->import_file(
+			$again,
+			array(
+				'skip_existing'  => 1,
+				'skip_ids'       => array( $ids[0] ),
+				'duplicate_rest' => 'update',
+			)
+		);
+		wp_delete_file( $again );
+		$this->assertSame( 4, $job->data['stats']['updated'] );
+		$this->assertSame( 1, $job->data['stats']['skipped'] );
+		$this->assertSame( array( 'First one', 'Again two', 'Again three', 'Again four', 'Again here' ), $titles( array_merge( $ids, array( $here ) ) ) );
+		$job->delete();
+
+		$third = $this->rest_file( 'Third ' );
+		$job   = $this->import_file(
+			$third,
+			array(
+				'skip_existing'  => 1,
+				'update_ids'     => array( $ids[0] ),
+				'skip_ids'       => array( $ids[1], $here ),
+				'duplicate_rest' => 'copy',
+			)
+		);
+		wp_delete_file( $third );
+		$this->assertSame( 1, $job->data['stats']['updated'] );
+		$this->assertSame( 2, $job->data['stats']['skipped'] );
+		$this->assertSame( 2, $job->data['stats']['created'] );
+		$this->assertSame( array( 'Third one', 'Again two', 'Again three', 'Again four', 'Again here' ), $titles( array_merge( $ids, array( $here ) ) ) );
+		$this->assertCount( 1, get_posts( array( 'title' => 'Third three' ) ) );
+		$this->assertCount( 1, get_posts( array( 'title' => 'Third four' ) ) );
+		$job->delete();
+	}
+
+	public function test_clean_options_keeps_only_known_duplicate_choices() {
+		$clean = MigratePlus_Mappings::clean_options(
+			array(
+				'skip_ids'       => array( '7', 'x', 9 ),
+				'duplicate_rest' => 'copy',
+			)
+		);
+		$this->assertSame( array( 7, 9 ), $clean['skip_ids'] );
+		$this->assertSame( 'copy', $clean['duplicate_rest'] );
+		$this->assertSame( '', MigratePlus_Mappings::clean_options( array( 'duplicate_rest' => 'delete' ) )['duplicate_rest'] );
+	}
+
+	/**
 	 * "Import as copies" puts each new child under the new copy of its parent, not the one an earlier import made.
 	 */
 	public function test_copies_link_to_the_parents_copied_with_them() {
@@ -2192,8 +2329,8 @@ class Test_Import_Export extends WP_UnitTestCase {
 		$job  = $this->import_file(
 			$file,
 			array(
-				'duplicate'      => 'update',
-				'default_author' => $contributor,
+				'duplicate' => 'update',
+				'author'    => $other, // Picked by a contributor, who may only write as themselves.
 			)
 		);
 		wp_delete_file( $file );
@@ -2421,6 +2558,311 @@ class Test_Import_Export extends WP_UnitTestCase {
 		$this->assertSame( '', $result['error'] );
 		$this->assertSame( 'rolled_back', $job->data['status'] );
 		$this->assertNull( get_post( $id ) );
+		$job->delete();
+	}
+
+	/**
+	 * @param array $doc More top-level keys for a Migrate Plus export with no items.
+	 * @return string Path.
+	 */
+	protected function sides_file( array $doc ) {
+		return $this->json_file(
+			$doc + array(
+				'migrateplus' => array(
+					'site'    => 'http://old.test',
+					'mapping' => array( 'fields' => array( 'source_id' => 'id' ) ),
+				),
+				'items'       => array(),
+			)
+		);
+	}
+
+	/**
+	 * @param MigratePlus_Job $job Job, previewed.
+	 * @return MigratePlus_Job The job, run to the end (at most 10 batches).
+	 */
+	protected function run_to_the_end( MigratePlus_Job $job ) {
+		$batches = 0;
+		do {
+			$result = MigratePlus_Runner::run_batch( $job );
+			$this->assertIsArray( $result );
+			if ( ++$batches > 10 ) {
+				$this->fail( 'The import was still not done after 10 batches.' );
+			}
+		} while ( ! $result['done'] );
+		return $job;
+	}
+
+	public function test_a_side_section_that_throws_is_tried_again_once_then_left_out() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$file   = $this->sides_file( array( 'site_settings' => array( 'options' => array( 'blogname' => 'New name' ) ) ) );
+		$throws = 1;
+		$fault  = static function ( $value ) use ( &$throws ) {
+			if ( $throws-- > 0 ) {
+				throw new RuntimeException( 'Deadlock found.' );
+			}
+			return $value;
+		};
+		add_filter( 'pre_update_option_blogname', $fault );
+		$once   = $this->run_to_the_end( MigratePlus_Runner::preview( 'json', array( 'file' => $file ) )['job'] );
+		$throws = 99;
+		$always = $this->run_to_the_end( MigratePlus_Runner::preview( 'json', array( 'file' => $file ) )['job'] );
+		remove_filter( 'pre_update_option_blogname', $fault );
+		wp_delete_file( $file );
+
+		$this->assertSame( 'New name', get_option( 'blogname' ) );
+		$this->assertSame( 1, $once->data['stats']['failed'] );
+		$this->assertContains( 'Site settings stopped: Deadlock found. The next batch tries again from where it stopped.', wp_list_pluck( $once->data['log'], 'm' ) );
+		$this->assertSame( 'complete', $always->data['status'] );
+		$this->assertSame( 2, $always->data['stats']['failed'] );
+		$this->assertContains( 'Site settings stopped at the same place again, so the rest of them were left out: Deadlock found.', wp_list_pluck( $always->data['log'], 'm' ) );
+		$once->delete();
+		$always->delete();
+	}
+
+	public function test_an_import_paused_on_the_old_users_section_finishes() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$file = $this->sides_file( array( 'site_settings' => array( 'options' => array( 'blogname' => 'Resumed' ) ) ) );
+		$job  = MigratePlus_Runner::preview( 'json', array( 'file' => $file ) )['job'];
+		// What an older version left in a job it was importing users for.
+		$job->data['status']    = 'running';
+		$job->data['stage']     = 'users';
+		$job->data['stage_pos'] = 3;
+		$job->save();
+		$job = $this->run_to_the_end( $job );
+		wp_delete_file( $file );
+
+		$this->assertSame( 'complete', $job->data['status'] );
+		$this->assertSame( 'Resumed', get_option( 'blogname' ) );
+		$this->assertContains( 'This import was paused on a section this version no longer imports. It continues with the next one.', wp_list_pluck( $job->data['log'], 'm' ) );
+		$job->delete();
+	}
+
+	/**
+	 * ACF definitions register the taxonomies and term field groups that terms need.
+	 */
+	public function test_acf_definitions_import_before_terms() {
+		$file = $this->sides_file(
+			array(
+				'terms'           => array(
+					array(
+						'taxonomy' => 'category',
+						'name'     => 'News',
+					),
+				),
+				'acf_definitions' => array( array( 'key' => 'group_1' ) ),
+			)
+		);
+		$job  = MigratePlus_Runner::preview( 'json', array( 'file' => $file ) )['job'];
+		wp_delete_file( $file );
+
+		$this->assertSame( array( 'acf_definitions', 'terms' ), array_column( $job->data['sections'], 'type' ) );
+		$order = array();
+		for ( $stage = MigratePlus_Runner::next_stage( $job ); 'records' !== $stage; $stage = MigratePlus_Runner::next_stage( $job, $stage ) ) {
+			$order[] = $stage;
+		}
+		$this->assertSame( array( 'acf_definitions', 'terms' ), $order );
+		$job->delete();
+	}
+
+	/**
+	 * Site settings can make a term the import created the default category, which WordPress
+	 * refuses to delete: rollback puts the setting back first.
+	 */
+	public function test_rollback_deletes_a_term_the_import_made_the_default_category() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$before = (int) get_option( 'default_category' );
+		$file   = $this->sides_file( array( 'site_settings' => array( 'options' => array( 'default_category' => 'Imported news' ) ) ) );
+		$job    = $this->run_to_the_end( MigratePlus_Runner::preview( 'json', array( 'file' => $file ) )['job'] );
+		wp_delete_file( $file );
+		$term = get_term_by( 'name', 'Imported news', 'category' );
+		$this->assertSame( $term->term_id, (int) get_option( 'default_category' ) );
+
+		do {
+			$result = MigratePlus_Runner::rollback_batch( $job );
+		} while ( ! $result['done'] );
+
+		$this->assertSame( '', $result['error'] );
+		$this->assertSame( 'rolled_back', $job->data['status'] );
+		$this->assertFalse( get_term_by( 'name', 'Imported news', 'category' ) );
+		$this->assertSame( $before, (int) get_option( 'default_category' ) );
+		$job->delete();
+	}
+
+	/**
+	 * Terms of an ACF taxonomy whose definition went first are still rolled back.
+	 */
+	public function test_rollback_deletes_terms_of_a_taxonomy_no_longer_registered() {
+		global $wpdb;
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		register_taxonomy( 'mp_gone', 'post', array( 'show_ui' => true ) );
+		$file = $this->json_file(
+			array(
+				'migrateplus' => array(
+					'site'    => 'http://gone.test',
+					'mapping' => array(
+						'fields'     => array(
+							'source_id'  => 'id',
+							'post_title' => 'title',
+						),
+						'taxonomies' => array(
+							array(
+								'taxonomy' => 'mp_gone',
+								'source'   => 'terms.mp_gone',
+							),
+						),
+					),
+				),
+				'items'       => array(
+					array(
+						'id'    => 1,
+						'title' => 'Tagged',
+						'terms' => array( 'mp_gone' => array( 'Old genre' ) ),
+					),
+				),
+			)
+		);
+		$job  = $this->import_file( $file );
+		wp_delete_file( $file );
+		unregister_taxonomy( 'mp_gone' );
+
+		$this->assertSame( 2, $job->imported_count() );
+		do {
+			$result = MigratePlus_Runner::rollback_batch( $job );
+		} while ( ! $result['done'] );
+		$this->assertSame( '', $result['error'] );
+		$this->assertSame( 'rolled_back', $job->data['status'] );
+		$this->assertSame( '0', $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->term_taxonomy} WHERE taxonomy = 'mp_gone'" ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$this->assertFalse( taxonomy_exists( 'mp_gone' ) );
+		$job->delete();
+	}
+
+	/**
+	 * A request that dies after saving a post but before its terms, fields and images
+	 * leaves it half done: the resumed batch finishes it instead of skipping it.
+	 */
+	public function test_a_post_left_half_imported_is_finished_on_resume() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		self::factory()->category->create( array( 'name' => 'News' ) );
+		$file    = $this->mapped_file(
+			'http://crash.test',
+			array(
+				'source_id'  => 'id',
+				'post_title' => 'title',
+				'categories' => 'categories',
+			),
+			array(
+				array(
+					'id'         => 1,
+					'title'      => 'Half done',
+					'categories' => array( 'News' ),
+				),
+			)
+		);
+		$preview = MigratePlus_Runner::preview( 'json', array( 'file' => $file ) );
+		wp_delete_file( $file );
+		$job = $preview['job'];
+		$this->assertSame( 'skip', $job->data['options']['duplicate'] );
+		$die = static function ( $meta_id, $post_id, $key ) {
+			if ( '_migrateplus_source_id' === $key ) {
+				throw new RuntimeException( 'Maximum execution time exceeded' );
+			}
+		};
+		add_action( 'added_post_meta', $die, 10, 3 );
+		try {
+			MigratePlus_Importer::import( $preview['records'][0], $job );
+			$this->fail( 'The import did not stop.' );
+		} catch ( RuntimeException $e ) {
+			unset( $e ); // The request died here: nothing of the batch was saved.
+		}
+		remove_action( 'added_post_meta', $die, 10 );
+		$half = $this->imported( 1, 'post' );
+		$this->assertCount( 1, $half );
+		$this->assertFalse( has_category( 'News', $half[0] ) );
+
+		$this->run_to_the_end( $job );
+
+		$this->assertSame( $half, $this->imported( 1, 'post' ) );
+		$this->assertSame( array( 'News' ), wp_list_pluck( get_the_category( $half[0] ), 'name' ) );
+		$this->assertSame( '', get_post_meta( $half[0], MigratePlus_Importer::INCOMPLETE_META, true ) );
+		$this->assertSame( 1, $job->data['stats']['created'] );
+		$this->assertSame( 1, $job->data['created_total'] );
+		$job->delete();
+	}
+
+	public function test_a_failed_preview_deletes_the_caches_it_wrote() {
+		$before = glob( MigratePlus_Util::ensure_storage_dir() . 'json-*' );
+		$file   = $this->sides_file( array() );
+		$this->assertSame( 'The source returned no records.', MigratePlus_Runner::preview( 'json', array( 'file' => $file ) )->get_error_message() );
+		wp_delete_file( $file );
+		$this->assertSame( $before, glob( MigratePlus_Util::storage_dir() . 'json-*' ) );
+	}
+
+	/**
+	 * Side sections are built before the file is opened, so one that dies leaves no file behind.
+	 */
+	public function test_an_export_that_dies_building_a_side_section_leaves_no_file() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$state = MigratePlus_Exporter::start(
+			MigratePlus_Exporter::sanitize_args(
+				array(
+					'post_types'            => array(),
+					'include_site_settings' => 1,
+				)
+			)
+		);
+		$die   = static function () {
+			throw new RuntimeException( 'Allowed memory size exhausted' );
+		};
+		add_filter( 'option_blogname', $die );
+		try {
+			MigratePlus_Exporter::run_batch( $state, 10 );
+			$this->fail( 'The export did not stop.' );
+		} catch ( RuntimeException $e ) {
+			unset( $e ); // The request died here.
+		}
+		remove_filter( 'option_blogname', $die );
+		$this->assertSame( array(), glob( MigratePlus_Util::storage_dir() . 'export-' . $state['id'] . '-*-migrateplus-*' ) );
+		MigratePlus_Exporter::forget( $state['id'] );
+	}
+
+	public function test_a_side_section_holding_a_value_json_cannot_write_is_refused() {
+		$before = glob( MigratePlus_Util::ensure_storage_dir() . 'json-*' );
+		$file   = wp_tempnam( 'migrateplus-test.json' );
+		// 1e400 decodes to INF, which JSON can't hold: the menus could not be cached.
+		file_put_contents( $file, '{"migrateplus":{"site":"http://old.test","mapping":{"fields":{"source_id":"id"}}},"items":[{"id":1}],"menus":[{"name":"Main","width":1e400}]}' ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$out = ( new MigratePlus_Source_JSON( array( 'file' => $file ) ) )->prepare();
+		wp_delete_file( $file );
+		$this->assertWPError( $out );
+		$this->assertSame( 'migrateplus_json', $out->get_error_code() );
+		$this->assertSame( $before, glob( MigratePlus_Util::storage_dir() . 'json-*' ) );
+	}
+
+	/**
+	 * "C", "C#" and "C++" share the slug "c": each name gets a term of its own.
+	 */
+	public function test_terms_whose_names_share_a_slug_stay_apart() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$file = $this->mapped_file(
+			'http://langs.test',
+			array(
+				'source_id'  => 'id',
+				'post_title' => 'title',
+				'tags'       => 'tags',
+			),
+			array(
+				array(
+					'id'    => 1,
+					'title' => 'Languages',
+					'tags'  => array( 'C', 'C#', 'C++' ),
+				),
+			)
+		);
+		$job  = $this->import_file( $file );
+		wp_delete_file( $file );
+		$names = wp_list_pluck( wp_get_post_tags( $this->imported( 1, 'post' )[0] ), 'name' );
+		sort( $names );
+		$this->assertSame( array( 'C', 'C#', 'C++' ), $names );
 		$job->delete();
 	}
 }

@@ -27,7 +27,7 @@ class MigratePlus_Admin {
 		add_action( 'admin_enqueue_scripts', array( __CLASS__, 'assets' ) );
 		add_filter( 'plugin_action_links_' . plugin_basename( MIGRATEPLUS_FILE ), array( __CLASS__, 'action_links' ) );
 
-		foreach ( array( 'preview', 'duplicates', 'media_preview', 'save', 'run', 'rollback', 'delete', 'history_delete', 'jobs', 'job', 'restart', 'export_count', 'export_start', 'export_run', 'export_download', 'exports', 'export_log', 'export_forget', 'replace_start', 'replace_run', 'replace_history', 'replace_rollback', 'replace_forget', 'mapping_save', 'mapping_rename', 'mapping_delete' ) as $action ) {
+		foreach ( array( 'preview', 'users', 'records', 'duplicates', 'media_preview', 'save', 'run', 'rollback', 'delete', 'history_delete', 'jobs', 'job', 'restart', 'export_count', 'export_start', 'export_run', 'export_download', 'exports', 'export_log', 'export_forget', 'replace_start', 'replace_run', 'replace_history', 'replace_rollback', 'replace_forget', 'mapping_save', 'mapping_rename', 'mapping_delete' ) as $action ) {
 			add_action( 'wp_ajax_migrateplus_' . $action, array( __CLASS__, 'ajax_' . $action ) );
 		}
 	}
@@ -96,7 +96,11 @@ class MigratePlus_Admin {
 		if ( MigratePlus_Settings::PAGE === $page ) {
 			return;
 		}
-		wp_enqueue_script( 'migrateplus', MIGRATEPLUS_URL . 'assets/admin.js', array( 'wp-element' ), (string) filemtime( MIGRATEPLUS_DIR . 'assets/admin.js' ), true );
+		// The date-range picker. Versioned by the library release, since the vendored files only change with it.
+		wp_enqueue_style( 'migrateplus-calendar', MIGRATEPLUS_URL . 'assets/vendor/vanilla-calendar-pro/vanilla-calendar-pro.min.css', array(), '3.4.0' );
+		wp_enqueue_script( 'migrateplus-calendar', MIGRATEPLUS_URL . 'assets/vendor/vanilla-calendar-pro/vanilla-calendar-pro.min.js', array(), '3.4.0', true );
+		wp_enqueue_script( 'migrateplus', MIGRATEPLUS_URL . 'assets/admin.js', array( 'wp-element', 'wp-i18n', 'migrateplus-calendar' ), (string) filemtime( MIGRATEPLUS_DIR . 'assets/admin.js' ), true );
+		wp_set_script_translations( 'migrateplus', 'migrateplus' );
 		$views = array(
 			self::HISTORY_SLUG => 'history',
 			self::EXPORT_SLUG  => 'export',
@@ -153,20 +157,6 @@ class MigratePlus_Admin {
 			);
 		}
 
-		$users = array();
-		foreach ( get_users(
-			array(
-				'capability' => array( 'edit_posts' ),
-				'number'     => 200,
-				'fields'     => array( 'ID', 'display_name' ),
-			)
-		) as $u ) {
-			$users[] = array(
-				'id'   => (int) $u->ID,
-				'name' => $u->display_name,
-			);
-		}
-
 		$targets = array();
 		foreach ( MigratePlus_Importer::targets() as $key => $info ) {
 			$targets[] = array(
@@ -182,7 +172,6 @@ class MigratePlus_Admin {
 			'adminUrl'       => admin_url(),
 			'view'           => $view,
 			'importUrl'      => self::url(),
-			'historyUrl'     => self::url( self::HISTORY_SLUG ),
 			'exportUrl'      => self::url( self::EXPORT_SLUG ),
 			'exportDefaults' => MigratePlus_Exporter::defaults(),
 			'settingsUrl'    => current_user_can( 'manage_options' ) ? self::url( MigratePlus_Settings::PAGE ) : '',
@@ -190,7 +179,8 @@ class MigratePlus_Admin {
 			'resume'         => ! empty( $_GET['resume'] ), // phpcs:ignore WordPress.Security.NonceVerification
 			'sources'        => $sources,
 			'postTypes'      => $post_types,
-			'users'          => $users,
+			// Who may be picked as the posts' author. 200 means there may be more: the picker searches (ajax_users()).
+			'authors'        => self::authors( '', 200 ),
 			'targets'        => $targets,
 			'defaults'       => MigratePlus_Job::default_options(),
 			'maxUpload'      => size_format( wp_max_upload_size() ),
@@ -200,7 +190,6 @@ class MigratePlus_Admin {
 			'menus'          => current_user_can( 'edit_theme_options' ), // Whether this user may export menus.
 			'siteSections'   => MigratePlus_Site::sections_for_js(), // What the Site settings chip lets you pick.
 			'sides'          => array( // ...and the other sections an export offers.
-				'users'  => current_user_can( 'list_users' ),
 				'site'   => current_user_can( 'manage_options' ),
 				'orders' => MigratePlus_Orders::active() && current_user_can( 'manage_woocommerce' ),
 				'yoast'  => MigratePlus_Yoast::active(),
@@ -432,6 +421,68 @@ class MigratePlus_Admin {
 	}
 
 	/**
+	 * People who may write posts, for the author picker: those whose login, email,
+	 * nicename or display name contains the search, or everyone.
+	 *
+	 * @param string $search Search, or '' for anyone.
+	 * @param int    $limit  At most this many.
+	 * @return array[] { id, name, login }
+	 */
+	protected static function authors( $search, $limit ) {
+		$query = array(
+			'capability' => array( 'edit_posts' ),
+			'number'     => $limit,
+			'orderby'    => 'display_name',
+			'fields'     => array( 'ID', 'display_name', 'user_login' ),
+		);
+		if ( '' !== $search ) {
+			$query['search']         = '*' . $search . '*';
+			$query['search_columns'] = array( 'user_login', 'user_email', 'user_nicename', 'display_name' );
+		}
+		$out = array();
+		foreach ( get_users( $query ) as $u ) {
+			$out[] = array(
+				'id'    => (int) $u->ID,
+				'name'  => $u->display_name,
+				'login' => $u->user_login,
+			);
+		}
+		return $out;
+	}
+
+	/**
+	 * Search the people who may be picked as the author (param q), for a site with
+	 * more than the 200 the page lists.
+	 */
+	public static function ajax_users() {
+		self::guard();
+		$q = isset( $_POST['q'] ) ? sanitize_text_field( wp_unslash( $_POST['q'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification -- verified in guard().
+		wp_send_json_success( array( 'authors' => self::authors( $q, 50 ) ) );
+	}
+
+	/**
+	 * A page of a job's records, for picking an author for each: params offset, limit (at
+	 * most 100), q (part of a title) and mapping (JSON, so titles follow the mapping on
+	 * screen; the job's own otherwise).
+	 */
+	public static function ajax_records() {
+		self::guard();
+		$job = self::request_job();
+		// phpcs:disable WordPress.Security.NonceVerification, WordPress.Security.ValidatedSanitizedInput -- verified in guard(); the mapping is cleaned below.
+		$offset  = isset( $_POST['offset'] ) ? absint( $_POST['offset'] ) : 0;
+		$limit   = isset( $_POST['limit'] ) ? max( 1, min( 100, absint( $_POST['limit'] ) ) ) : 50;
+		$q       = isset( $_POST['q'] ) ? trim( sanitize_text_field( wp_unslash( $_POST['q'] ) ) ) : '';
+		$mapping = isset( $_POST['mapping'] ) ? json_decode( wp_unslash( $_POST['mapping'] ), true ) : null;
+		// phpcs:enable
+		$mapping = is_array( $mapping ) ? MigratePlus_Mappings::clean_mapping( $mapping ) : (array) $job->data['mapping'];
+		$page    = MigratePlus_Runner::list_records( $job, $mapping, $offset, $limit, $q );
+		if ( is_wp_error( $page ) ) {
+			self::fail( $page );
+		}
+		wp_send_json_success( $page );
+	}
+
+	/**
 	 * Whether a job imports a MigratePlus export, which carries its own mapping.
 	 *
 	 * @param MigratePlus_Job $job Job.
@@ -494,7 +545,10 @@ class MigratePlus_Admin {
 	 */
 	public static function ajax_mapping_delete() {
 		self::guard();
-		MigratePlus_Mappings::delete( isset( $_POST['name'] ) ? wp_unslash( $_POST['name'] ) : '' ); // phpcs:ignore WordPress.Security.NonceVerification, WordPress.Security.ValidatedSanitizedInput -- verified in guard(); cleaned by MigratePlus_Mappings.
+		$done = MigratePlus_Mappings::delete( isset( $_POST['name'] ) ? wp_unslash( $_POST['name'] ) : '' ); // phpcs:ignore WordPress.Security.NonceVerification, WordPress.Security.ValidatedSanitizedInput -- verified in guard(); cleaned by MigratePlus_Mappings.
+		if ( is_wp_error( $done ) ) {
+			self::fail( $done );
+		}
 		wp_send_json_success( array( 'mappings' => MigratePlus_Mappings::for_js() ) );
 	}
 
@@ -515,7 +569,7 @@ class MigratePlus_Admin {
 		if ( ! $sides_only && empty( $clean_map['fields']['post_title'] ) && empty( $clean_map['fields']['post_content'] ) ) {
 			self::fail( new WP_Error( 'migrateplus_mapping', __( 'Map at least the Title or Content field.', 'migrateplus' ) ) );
 		}
-		$clean_opt = self::clean_options( (array) $options );
+		$clean_opt = self::clean_options( (array) $options, $job->data['total'] );
 		$lock      = self::lock_job( $job );
 
 		$job->data['mapping'] = $clean_map;
@@ -543,7 +597,7 @@ class MigratePlus_Admin {
 			$job->data['mapping'] = MigratePlus_Mappings::clean_mapping( (array) json_decode( wp_unslash( $_POST['mapping'] ), true ) );
 		}
 		if ( isset( $_POST['options'] ) ) {
-			$job->data['options'] = self::clean_options( (array) json_decode( wp_unslash( $_POST['options'] ), true ) );
+			$job->data['options'] = self::clean_options( (array) json_decode( wp_unslash( $_POST['options'] ), true ), $job->data['total'] );
 		}
 		// phpcs:enable
 		$found = MigratePlus_Runner::find_duplicates( $job );
@@ -553,17 +607,34 @@ class MigratePlus_Admin {
 		// The browser may not be able to reach the old site (another network, a login, its own rules), so
 		// the imported side of each media comparison is fetched through this site, which downloads it anyway.
 		foreach ( $found['images'] as $i => $image ) {
-			$found['images'][ $i ]['imported_preview'] = '' !== $image['imported'] ? add_query_arg(
-				array(
-					'action' => 'migrateplus_media_preview',
-					'url'    => rawurlencode( $image['imported'] ),
-					'sig'    => self::preview_signature( $image['imported'] ),
-					'nonce'  => wp_create_nonce( 'migrateplus_admin' ),
-				),
-				admin_url( 'admin-ajax.php' )
-			) : '';
+			$found['images'][ $i ]['imported_preview'] = self::media_preview_url( $image['imported'] );
+		}
+		foreach ( $found['items'] as $i => $item ) {
+			if ( $item['media'] ) {
+				$found['items'][ $i ]['media']['imported_preview'] = self::media_preview_url( $item['media']['imported'] );
+			}
 		}
 		wp_send_json_success( $found );
+	}
+
+	/**
+	 * Where the browser fetches an imported image through this site (ajax_media_preview()).
+	 *
+	 * @param string $imported The image's URL on the old site.
+	 * @return string '' when it has none.
+	 */
+	protected static function media_preview_url( $imported ) {
+		// Signed as ajax_media_preview() will read it back, escaped: a URL with a space would not match otherwise.
+		$url = esc_url_raw( $imported, array( 'http', 'https' ) );
+		return '' !== $url ? add_query_arg(
+			array(
+				'action' => 'migrateplus_media_preview',
+				'url'    => rawurlencode( $url ),
+				'sig'    => self::preview_signature( $url ),
+				'nonce'  => wp_create_nonce( 'migrateplus_admin' ),
+			),
+			admin_url( 'admin-ajax.php' )
+		) : '';
 	}
 
 	/**
@@ -615,11 +686,12 @@ class MigratePlus_Admin {
 	}
 
 	/**
-	 * @param array $options Import options from the request.
+	 * @param array    $options Import options from the request.
+	 * @param int|null $total   Records in the job, as for MigratePlus_Mappings::clean_options().
 	 * @return array
 	 */
-	protected static function clean_options( array $options ) {
-		$clean = MigratePlus_Mappings::clean_options( $options );
+	protected static function clean_options( array $options, $total = null ) {
+		$clean = MigratePlus_Mappings::clean_options( $options, null === $total ? null : (int) $total );
 		if ( ! current_user_can( get_post_type_object( $clean['post_type'] )->cap->edit_posts ) ) {
 			self::fail( new WP_Error( 'migrateplus_import_cap', __( 'You are not allowed to import this post type.', 'migrateplus' ) ) );
 		}
@@ -631,7 +703,8 @@ class MigratePlus_Admin {
 	 */
 	public static function ajax_run() {
 		self::guard();
-		$job    = self::request_job();
+		$job = self::request_job();
+		self::refuse_draft( $job );
 		$result = MigratePlus_Runner::run_batch( $job );
 		if ( is_wp_error( $result ) ) {
 			self::fail( $result );
@@ -650,12 +723,21 @@ class MigratePlus_Admin {
 	 */
 	public static function ajax_restart() {
 		self::guard();
-		$job    = self::request_job();
+		$job = self::request_job();
+		self::refuse_draft( $job );
 		$lock   = self::lock_job( $job );
 		$source = $job->source();
-		if ( ! is_wp_error( $source ) && $source instanceof MigratePlus_Source_Base && $source->has_remote_input() ) {
+		// A finished import's cached copies were deleted (MigratePlus_Job::delete_caches()): prepare the file again.
+		$cleared = ! empty( $job->data['caches_cleared'] );
+		$remote  = ! is_wp_error( $source ) && $source instanceof MigratePlus_Source_Base && $source->has_remote_input();
+		if ( ! is_wp_error( $source ) && ( $cleared || $remote ) ) {
 			// Re-download the remote file / feed so re-runs pick up new items.
 			$prepared = $source->prepare();
+			if ( is_wp_error( $prepared ) && $cleared ) {
+				MigratePlus_Runner::unlock( $job, $lock );
+				/* translators: %s: error message */
+				self::fail( new WP_Error( 'migrateplus_restart', sprintf( __( 'Could not read the file again: %s Start a new import.', 'migrateplus' ), $prepared->get_error_message() ) ) );
+			}
 			if ( is_wp_error( $prepared ) ) {
 				/* translators: %s: error message */
 				$job->log( 'warning', sprintf( __( 'Could not refresh the source, re-using the previous copy: %s', 'migrateplus' ), $prepared->get_error_message() ) );
@@ -664,9 +746,10 @@ class MigratePlus_Admin {
 				if ( $old && ( empty( $prepared['cache_file'] ) || $old !== $prepared['cache_file'] ) && file_exists( $old ) ) {
 					wp_delete_file( $old );
 				}
-				$job->data['settings'] = $prepared;
-				$job->data['total']    = isset( $prepared['total'] ) ? $prepared['total'] : null;
-				$job->log( 'info', __( 'Source refreshed from its URL.', 'migrateplus' ) );
+				$job->data['settings']       = $prepared;
+				$job->data['total']          = isset( $prepared['total'] ) ? $prepared['total'] : null;
+				$job->data['caches_cleared'] = 0;
+				$job->log( 'info', $remote ? __( 'Source refreshed from its URL.', 'migrateplus' ) : __( 'File read again.', 'migrateplus' ) );
 			}
 		}
 		$job->data['status'] = 'ready';
@@ -674,13 +757,27 @@ class MigratePlus_Admin {
 		$job->data['stats']  = array_fill_keys( array( 'processed', 'created', 'updated', 'skipped', 'failed' ), 0 );
 		$job->reset_sections();
 		// Changes approved last time may not be what the source holds now: the re-run follows the duplicate option.
-		$job->data['options']['update_ids']  = array();
-		$job->data['options']['replace_ids'] = array();
-		$job->data['options']['copy_ids']    = array();
+		$job->data['options']['update_ids']     = array();
+		$job->data['options']['replace_ids']    = array();
+		$job->data['options']['copy_ids']       = array();
+		$job->data['options']['skip_ids']       = array();
+		$job->data['options']['duplicate_rest'] = '';
 		$job->log( 'info', __( 'Job restarted.', 'migrateplus' ) );
 		$job->save();
 		MigratePlus_Runner::unlock( $job, $lock );
 		wp_send_json_success( array( 'job' => $job->to_public() ) );
+	}
+
+	/**
+	 * Stop with an error for a job that was never started: only the mapping screen's
+	 * save starts one, after the duplicate check settled its options.
+	 *
+	 * @param MigratePlus_Job $job Job.
+	 */
+	protected static function refuse_draft( MigratePlus_Job $job ) {
+		if ( 'draft' === $job->data['status'] ) {
+			self::fail( new WP_Error( 'migrateplus_draft', __( 'This import has not been started yet. Choose its mapping and options, then start it.', 'migrateplus' ) ) );
+		}
 	}
 
 	/**
@@ -749,7 +846,8 @@ class MigratePlus_Admin {
 					$skip( $kind, $id, __( 'not allowed', 'migrateplus' ) );
 					continue;
 				}
-				if ( 'running' === $job->data['status'] ) {
+				// One whose requests died stays "running"; it has stopped once its lock has expired.
+				if ( 'running' === $job->data['status'] && ! $job->is_stalled() ) {
 					$skip( $kind, $id, __( 'still running', 'migrateplus' ) );
 					continue;
 				}
@@ -758,8 +856,9 @@ class MigratePlus_Admin {
 					$skip( $kind, $id, __( 'an import or rollback batch is running', 'migrateplus' ) );
 					continue;
 				}
-				// lock() reloaded the job: it may have started running while this request waited.
-				if ( 'running' === $job->data['status'] ) {
+				// lock() reloaded the job: it may have started running while this request waited. The lock
+				// is this request's now, so only the time of the last save tells a stopped one apart.
+				if ( 'running' === $job->data['status'] && (int) $job->data['updated'] > time() - MigratePlus_Runner::LOCK_TTL ) {
 					MigratePlus_Runner::unlock( $job, $lock );
 					$skip( $kind, $id, __( 'still running', 'migrateplus' ) );
 					continue;
@@ -885,7 +984,6 @@ class MigratePlus_Admin {
 		// A toggle hidden from users who may not see its section still arrives with its default: leave the section out.
 		foreach ( array(
 			'include_menus'         => 'edit_theme_options',
-			'include_users'         => 'list_users',
 			'include_site_settings' => 'manage_options',
 			'include_orders'        => 'manage_woocommerce',
 		) as $arg => $capability ) {
@@ -931,7 +1029,7 @@ class MigratePlus_Admin {
 		if ( is_wp_error( $state ) ) {
 			self::fail( $state );
 		}
-		// With menus, terms, users or settings included, a file of those alone is still worth having.
+		// With menus, terms or settings included, a file of those alone is still worth having.
 		if ( 0 === (int) $state['total'] && ! array_sum( MigratePlus_Exporter::side_counts( $args ) ) ) {
 			MigratePlus_Exporter::forget( $state['id'] );
 			self::fail( new WP_Error( 'migrateplus_export_empty', __( 'Nothing matches these filters. Widen the status or date range.', 'migrateplus' ) ) );

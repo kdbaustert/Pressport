@@ -50,7 +50,7 @@ jobs:
         run: |
           zip="migrateplus-${{ steps.version.outputs.version }}.zip"
           list=$(unzip -Z1 "$zip")
-          for required in migrateplus/migrateplus.php migrateplus/uninstall.php migrateplus/readme.txt migrateplus/assets/admin.js migrateplus/includes/class-migrateplus-importer.php; do
+          for required in migrateplus/migrateplus.php migrateplus/uninstall.php migrateplus/readme.txt migrateplus/assets/admin.js migrateplus/assets/vendor/vanilla-calendar-pro/vanilla-calendar-pro.min.js migrateplus/includes/class-migrateplus-importer.php; do
             echo "$list" | grep -qx "$required" || { echo "::error::$required is missing from the zip."; exit 1; }
           done
           if echo "$list" | grep -E '^migrateplus/(tests|vendor|\.github)/|^migrateplus/(composer\.(json|lock)|phpcs\.xml\.dist|phpunit\.xml\.dist)$'; then

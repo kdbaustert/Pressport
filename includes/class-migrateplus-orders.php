@@ -14,10 +14,11 @@ defined( 'ABSPATH' ) || exit;
  * are here.
  *
  * Line items name their product the way related products are named (source id,
- * SKU, slug); customers travel as email and login; refunds and order notes come
- * with their order. Totals are copied, never worked out again, so an imported
- * order reads as it did. Creating an order on a shop sends emails and moves
- * stock: both are switched off while the import runs.
+ * SKU, slug); customers travel as their email; refunds (per line) and order
+ * notes come with their order. Totals are copied, never worked out again, so an
+ * imported order reads as it did. Creating an order on a shop sends emails and
+ * webhooks, moves stock and counts sales: all of it is switched off while the
+ * import runs, since products and coupons bring the old site's counts.
  *
  * An order is matched by the uid it was imported with. Importing the same file
  * again skips or updates it as "Records imported before" says; an update sets
@@ -32,6 +33,34 @@ class MigratePlus_Orders {
 	 * @var string[]
 	 */
 	const PROPS = array( 'currency', 'prices_include_tax', 'discount_total', 'discount_tax', 'shipping_total', 'shipping_tax', 'cart_tax', 'total', 'payment_method', 'payment_method_title', 'transaction_id', 'customer_note', 'created_via', 'order_key' );
+
+	/**
+	 * Custom fields starting with an underscore that travel with an order or its
+	 * items: payment gateways' and tax plugins' references, without which a
+	 * refund or a VAT invoice cannot be traced on the new site. Every other
+	 * underscore key is that install's bookkeeping. Developers change the list
+	 * with the migrateplus_order_meta_allowlist filter.
+	 *
+	 * @var string[]
+	 */
+	const META_ALLOWLIST = array( '_order_number', '_stripe_customer_id', '_stripe_intent_id', '_stripe_charge_captured', '_paypal_transaction_id', '_ppcp_paypal_order_id', '_vat_number', '_billing_vat' );
+
+	/**
+	 * Underscore keys that never travel, whatever the filter says: they record
+	 * stock moved and sales counted on the old site, and an import moves no
+	 * stock and counts no sales of its own (see mark_counted()).
+	 *
+	 * @var string[]
+	 */
+	const META_NEVER = array( '_reduced_stock', '_order_stock_reduced', '_recorded_sales', '_recorded_coupon_usage_counts', '_refunded_item_id' );
+
+	/**
+	 * Where wc_order_fully_refunded was hooked before quiet() took it off, or
+	 * false when it was not.
+	 *
+	 * @var int|false
+	 */
+	protected static $fully_refunded_priority = false;
 
 	/**
 	 * Whether WooCommerce is active with orders.
@@ -126,10 +155,7 @@ class MigratePlus_Orders {
 			'date_created'   => self::date( $order->get_date_created() ),
 			'date_paid'      => self::date( $order->get_date_paid() ),
 			'date_completed' => self::date( $order->get_date_completed() ),
-			'customer'       => $customer ? array(
-				'email' => $customer->user_email,
-				'login' => $customer->user_login,
-			) : null,
+			'customer'       => $customer ? array( 'email' => $customer->user_email ) : null, // Matched by email only on import.
 			'billing'        => $order->get_address( 'billing' ),
 			'shipping'       => $order->get_address( 'shipping' ),
 			'items'          => array(),
@@ -149,6 +175,7 @@ class MigratePlus_Orders {
 			$product_id      = (int) $line->get_product_id();
 			$variation_id    = (int) $line->get_variation_id();
 			$item['items'][] = array(
+				'id'        => (int) $line->get_id(), // What refund lines name.
 				'name'      => $line->get_name(),
 				'product'   => $product_id ? self::product_ref( $product_id ) : null,
 				'variation' => $variation_id ? self::product_ref( $variation_id ) : null,
@@ -162,6 +189,7 @@ class MigratePlus_Orders {
 		}
 		foreach ( $order->get_items( 'shipping' ) as $line ) {
 			$item['shipping_lines'][] = array(
+				'id'           => (int) $line->get_id(),
 				'method_title' => $line->get_method_title(),
 				'method_id'    => $line->get_method_id(),
 				'instance_id'  => $line->get_instance_id(),
@@ -172,6 +200,7 @@ class MigratePlus_Orders {
 		}
 		foreach ( $order->get_items( 'fee' ) as $line ) {
 			$item['fee_lines'][] = array(
+				'id'         => (int) $line->get_id(),
 				'name'       => $line->get_name(),
 				'tax_class'  => $line->get_tax_class(),
 				'tax_status' => $line->get_tax_status(),
@@ -206,6 +235,7 @@ class MigratePlus_Orders {
 				'reason'      => $refund->get_reason(),
 				'date'        => self::date( $refund->get_date_created() ),
 				'refunded_by' => $by ? $by->user_email : '',
+				'line_items'  => self::refund_lines( $refund ),
 			);
 		}
 		foreach ( wc_get_order_notes(
@@ -224,12 +254,70 @@ class MigratePlus_Orders {
 		}
 		foreach ( $order->get_meta_data() as $meta ) {
 			$key = (string) $meta->key;
-			if ( '' === $key || '_' === $key[0] || ( ! empty( $args['exclude_meta'] ) && MigratePlus_Exporter::meta_excluded( $key, $args['exclude_meta'] ) ) ) {
+			if ( ! self::meta_travels( $key, 'order' ) || ( ! empty( $args['exclude_meta'] ) && MigratePlus_Exporter::meta_excluded( $key, $args['exclude_meta'] ) ) ) {
 				continue;
 			}
 			$item['meta'][ $key ] = $meta->value;
 		}
 		return apply_filters( 'migrateplus_export_order', $item, $order, $args );
+	}
+
+	/**
+	 * What a refund gave back per line, so per-product refund reports read the
+	 * same on the new site. Each names the order's line by its id on the old site.
+	 *
+	 * @param WC_Order_Refund $refund Refund.
+	 * @return array[] { item, qty, refund_total, refund_tax: { rate id => amount } }, amounts positive.
+	 */
+	protected static function refund_lines( WC_Order_Refund $refund ) {
+		$out = array();
+		foreach ( $refund->get_items( array( 'line_item', 'fee', 'shipping' ) ) as $line ) {
+			$item_id = (int) $line->get_meta( '_refunded_item_id', true );
+			if ( ! $item_id ) {
+				continue;
+			}
+			$taxes = $line->get_taxes();
+			$out[] = array(
+				'item'         => $item_id,
+				'qty'          => $line->is_type( 'line_item' ) ? abs( (float) $line->get_quantity() ) : 0,
+				'refund_total' => abs( (float) $line->get_total() ),
+				'refund_tax'   => array_map(
+					static function ( $amount ) {
+						return abs( (float) $amount );
+					},
+					isset( $taxes['total'] ) && is_array( $taxes['total'] ) ? $taxes['total'] : array()
+				),
+			);
+		}
+		return $out;
+	}
+
+	/**
+	 * Whether a custom field travels with an order or an order item: every key
+	 * without a leading underscore, and those META_ALLOWLIST names.
+	 *
+	 * @param string $key     Meta key.
+	 * @param string $context order|item.
+	 * @return bool
+	 */
+	protected static function meta_travels( $key, $context ) {
+		$key = (string) $key;
+		if ( '' === $key ) {
+			return false;
+		}
+		if ( '_' !== $key[0] ) {
+			return true;
+		}
+		if ( in_array( $key, self::META_NEVER, true ) || 0 === strpos( $key, '_migrateplus_' ) ) {
+			return false;
+		}
+		/**
+		 * The underscore custom fields that travel with orders and their items.
+		 *
+		 * @param string[] $keys    Meta keys.
+		 * @param string   $context order|item.
+		 */
+		return in_array( $key, (array) apply_filters( 'migrateplus_order_meta_allowlist', self::META_ALLOWLIST, $context ), true );
 	}
 
 	/**
@@ -261,7 +349,7 @@ class MigratePlus_Orders {
 		$out = array();
 		foreach ( $line->get_meta_data() as $meta ) {
 			$key = (string) $meta->key;
-			if ( '' !== $key && '_' !== $key[0] ) {
+			if ( self::meta_travels( $key, 'item' ) ) {
 				$out[] = array(
 					'key'   => $key,
 					'value' => $meta->value,
@@ -296,9 +384,25 @@ class MigratePlus_Orders {
 	 * @return array[]|WP_Error
 	 */
 	protected static function load( MigratePlus_Job $job ) {
+		static $cache = array(
+			'key'  => '',
+			'data' => null,
+		);
+
 		$file = isset( $job->data['settings']['orders_file'] ) ? (string) $job->data['settings']['orders_file'] : '';
-		$data = '' !== $file && is_readable( $file ) ? json_decode( (string) file_get_contents( $file ), true ) : null; // phpcs:ignore WordPress.WP.AlternativeFunctions
-		return is_array( $data ) ? $data : new WP_Error( 'migrateplus_orders_cache', __( 'The cached orders are missing. Start a new import.', 'migrateplus' ) );
+		if ( '' === $file || ! is_readable( $file ) ) {
+			return new WP_Error( 'migrateplus_orders_cache', __( 'The cached orders are missing. Start a new import.', 'migrateplus' ) );
+		}
+		// WP-CLI runs every batch in one process: decode the file once there, not once per batch.
+		clearstatcache( true, $file );
+		$key = $file . '|' . filemtime( $file ) . '|' . filesize( $file );
+		if ( $key !== $cache['key'] ) {
+			$cache = array(
+				'key'  => $key,
+				'data' => json_decode( (string) file_get_contents( $file ), true ), // phpcs:ignore WordPress.WP.AlternativeFunctions
+			);
+		}
+		return is_array( $cache['data'] ) ? $cache['data'] : new WP_Error( 'migrateplus_orders_cache', __( 'The cached orders are missing. Start a new import.', 'migrateplus' ) );
 	}
 
 	/**
@@ -336,15 +440,17 @@ class MigratePlus_Orders {
 			if ( is_array( $record ) ) {
 				try {
 					$results[] = self::import_order( $record, $job, $opts );
-				} catch ( Exception $e ) {
+				} catch ( Throwable $e ) {
+					// Errors too, not only exceptions: one broken order must not stop the rest, nor mark the stage done.
 					/* translators: 1: order number, 2: error */
 					$results[] = self::result( 'failed', 0, sprintf( __( 'Order #%1$s could not be imported: %2$s', 'migrateplus' ), isset( $record['number'] ) ? MigratePlus_Util::stringify( $record['number'] ) : '', $e->getMessage() ) );
 				}
 			}
-			++$pos;
+			// Saved after each order, so a request that dies part way through repeats one order at most.
+			$job->data['stage_pos'] = ++$pos;
+			$job->save();
 		}
 		self::quiet( false );
-		$job->data['stage_pos'] = $pos;
 		return array(
 			'done'    => $pos >= count( $orders ),
 			'results' => $results,
@@ -353,7 +459,13 @@ class MigratePlus_Orders {
 
 	/**
 	 * Keep WooCommerce from acting on imported orders as on new ones: no emails
-	 * to customers or the shop, no stock moved.
+	 * to customers or the shop, no webhooks to other systems, no stock moved,
+	 * and no refund made up for a refunded status.
+	 *
+	 * Stock: wc_maybe_reduce_stock_levels() still marks the order
+	 * _order_stock_reduced when its status arrives, but wc_reduce_stock_levels()
+	 * is told no first, and no line gets _reduced_stock, so cancelling the order
+	 * later gives nothing back either (META_NEVER keeps the file from adding it).
 	 *
 	 * @param bool $on Switch on or off.
 	 */
@@ -361,12 +473,24 @@ class MigratePlus_Orders {
 		$fn = $on ? 'add_filter' : 'remove_filter';
 		$fn( 'woocommerce_can_reduce_order_stock', '__return_false' );
 		$fn( 'woocommerce_can_restore_order_stock', '__return_false' );
+		$fn( 'woocommerce_webhook_should_deliver', '__return_false' );
 		// Not deferred, so each email asks whether it is enabled now, and is told no.
 		$fn( 'woocommerce_defer_transactional_emails', '__return_false' );
 		if ( function_exists( 'WC' ) && WC()->mailer() ) {
 			foreach ( WC()->mailer()->get_emails() as $email ) {
 				$fn( 'woocommerce_email_enabled_' . $email->id, '__return_false' );
 			}
+		}
+		// A refunded status makes WooCommerce refund whatever the order's refunds leave over. The file's refunds
+		// are the real ones, and that extra refund would also leave no room for them.
+		if ( $on ) {
+			self::$fully_refunded_priority = has_action( 'woocommerce_order_status_refunded', 'wc_order_fully_refunded' );
+			if ( false !== self::$fully_refunded_priority ) {
+				remove_action( 'woocommerce_order_status_refunded', 'wc_order_fully_refunded', self::$fully_refunded_priority );
+			}
+		} elseif ( false !== self::$fully_refunded_priority ) {
+			add_action( 'woocommerce_order_status_refunded', 'wc_order_fully_refunded', self::$fully_refunded_priority );
+			self::$fully_refunded_priority = false;
 		}
 	}
 
@@ -402,16 +526,10 @@ class MigratePlus_Orders {
 			$status     = 'on-hold';
 		}
 		$customer    = isset( $record['customer'] ) && is_array( $record['customer'] ) ? $record['customer'] : array();
-		$customer_id = 0;
-		if ( $customer ) {
-			$user = ! empty( $customer['email'] ) && is_email( $customer['email'] ) ? get_user_by( 'email', $customer['email'] ) : false;
-			$user = $user ? $user : ( ! empty( $customer['login'] ) ? get_user_by( 'login', MigratePlus_Util::stringify( $customer['login'] ) ) : false );
-			if ( $user ) {
-				$customer_id = (int) $user->ID;
-			} else {
-				/* translators: %s: customer email */
-				$warnings[] = sprintf( __( 'Customer "%s" is not on this site, so the order is a guest order.', 'migrateplus' ), isset( $customer['email'] ) ? MigratePlus_Util::stringify( $customer['email'] ) : '' );
-			}
+		$customer_id = $customer ? self::find_customer( $customer ) : 0;
+		if ( $customer && ! $customer_id ) {
+			/* translators: %s: customer email */
+			$warnings[] = sprintf( __( 'Customer "%s" was not found on this site, so the order is a guest order with the billing and shipping details from the file.', 'migrateplus' ), isset( $customer['email'] ) ? MigratePlus_Util::stringify( $customer['email'] ) : '' );
 		}
 
 		if ( $dry ) {
@@ -428,6 +546,14 @@ class MigratePlus_Orders {
 					'customer_id' => $customer_id,
 				)
 			);
+			if ( $order instanceof WC_Order ) {
+				// wc_create_order() has saved it: marked now, so a rollback and the next run find it even when a
+				// step below fails.
+				$order->update_meta_data( '_migrateplus_job_id', $job->data['id'] );
+				$order->update_meta_data( '_migrateplus_source_uid', $uid );
+				$order->save_meta_data();
+				++$job->data['created_total'];
+			}
 		}
 		if ( ! $order instanceof WC_Order ) {
 			/* translators: %s: order number */
@@ -440,6 +566,9 @@ class MigratePlus_Orders {
 				$props[ $prop ] = 'prices_include_tax' === $prop ? (bool) $record[ $prop ] : MigratePlus_Util::stringify( $record[ $prop ] );
 			}
 		}
+		if ( $existing && ! $updating ) {
+			unset( $props['order_key'] ); // A copy of an order imported before: its own key, or both would share pay and view links.
+		}
 		foreach ( array( 'billing', 'shipping' ) as $kind ) {
 			foreach ( isset( $record[ $kind ] ) && is_array( $record[ $kind ] ) ? $record[ $kind ] : array() as $field => $value ) {
 				$field = sanitize_key( $field );
@@ -448,40 +577,107 @@ class MigratePlus_Orders {
 				}
 			}
 		}
+		$dates = array();
 		foreach ( array( 'date_created', 'date_paid', 'date_completed' ) as $prop ) {
 			$date = MigratePlus_Importer::parse_date( $read( $prop ) );
 			if ( $date ) {
-				$props[ $prop ] = $date->getTimestamp();
+				$dates[ $prop ] = $date->getTimestamp();
 			}
 		}
-		$order->set_props( $props );
+		self::set_props_or_warn( $order, $props + $dates, $warnings, __( 'Some of the order\'s details were not set', 'migrateplus' ) );
 
+		$item_ids = array();
 		if ( ! $updating ) {
-			self::add_items( $order, $record, $job, $warnings );
+			self::add_items( $order, $record, $job, $warnings, $item_ids );
 		}
 		foreach ( isset( $record['meta'] ) && is_array( $record['meta'] ) ? $record['meta'] : array() as $key => $value ) {
 			$key = sanitize_text_field( (string) $key );
-			if ( '' !== $key && '_' !== $key[0] ) {
+			if ( self::meta_travels( $key, 'order' ) ) {
 				$order->update_meta_data( $key, $value );
 			}
 		}
-		if ( ! $updating ) {
-			$order->update_meta_data( '_migrateplus_job_id', $job->data['id'] );
-			$order->update_meta_data( '_migrateplus_source_uid', $uid );
+		if ( '' !== $read( 'number' ) ) {
+			$order->update_meta_data( '_migrateplus_source_order_number', $read( 'number' ) );
 		}
+		// Saved while still pending, with its lines, so the refunds below have totals and lines to refund against.
+		$order->save();
+		$order_id = $order->get_id();
+
+		if ( ! $updating ) {
+			if ( '' !== $read( 'number' ) ) {
+				/* translators: %s: order number on the old site */
+				$order->add_order_note( sprintf( __( 'Imported from order #%s on the old site.', 'migrateplus' ), $read( 'number' ) ), 0, false );
+			}
+			self::add_notes( $order, isset( $record['notes'] ) && is_array( $record['notes'] ) ? $record['notes'] : array() );
+			// Before the status: a refunded status set first is taken for a full refund, and the real refunds then
+			// find nothing left to refund.
+			self::add_refunds( $order, isset( $record['refunds'] ) && is_array( $record['refunds'] ) ? $record['refunds'] : array(), $item_ids, $warnings );
+			// A refund that empties the order sets it refunded through its own copy of the order: read it again.
+			$order = wc_get_order( $order_id );
+		}
+		self::mark_counted( $order, $status );
 		// The status last: the change fires WooCommerce's order hooks, with emails and stock switched off.
 		$order->set_status( $status );
+		if ( isset( $dates['date_completed'] ) ) {
+			$order->set_date_completed( $dates['date_completed'] ); // set_status( 'completed' ) stamps it with now.
+		}
 		$order->save();
 
-		if ( ! $updating ) {
-			++$job->data['created_total'];
-			self::add_notes( $order, isset( $record['notes'] ) && is_array( $record['notes'] ) ? $record['notes'] : array() );
-			self::add_refunds( $order, isset( $record['refunds'] ) && is_array( $record['refunds'] ) ? $record['refunds'] : array(), $warnings );
-		}
-
 		/* translators: 1: Created/Updated, 2: order number on the old site, 3: order id here */
-		$message = sprintf( __( '%1$s order #%2$s (#%3$d).', 'migrateplus' ), $updating ? __( 'Updated', 'migrateplus' ) : __( 'Created', 'migrateplus' ), $number, $order->get_id() );
-		return self::result( $updating ? 'updated' : 'created', $order->get_id(), self::with_warnings( $message, $warnings ), ! empty( $warnings ) );
+		$message = sprintf( __( '%1$s order #%2$s (#%3$d).', 'migrateplus' ), $updating ? __( 'Updated', 'migrateplus' ) : __( 'Created', 'migrateplus' ), $number, $order_id );
+		return self::result( $updating ? 'updated' : 'created', $order_id, self::with_warnings( $message, $warnings ), ! empty( $warnings ) );
+	}
+
+	/**
+	 * This site's account for an order's customer, by email only. A login alone
+	 * can name two people (the old site's "admin" is not this site's), and an
+	 * import creates no accounts: without a match the order is a guest order.
+	 *
+	 * @param array $customer { email }.
+	 * @return int 0 when they are not here.
+	 */
+	protected static function find_customer( array $customer ) {
+		$email = isset( $customer['email'] ) ? sanitize_email( MigratePlus_Util::stringify( $customer['email'] ) ) : '';
+		$user  = is_email( $email ) ? get_user_by( 'email', $email ) : false;
+		return $user ? (int) $user->ID : 0;
+	}
+
+	/**
+	 * Mark an imported order's sales and coupon uses as counted, before its
+	 * status is set. Products' total_sales and coupons' usage_count arrive as the
+	 * old site counted them, this order included; the status change would count
+	 * it again. Only for statuses WooCommerce counts in, so moving a pending or
+	 * cancelled order on later still counts it once.
+	 *
+	 * @param WC_Order $order  Saved order.
+	 * @param string   $status Status it is about to get.
+	 */
+	protected static function mark_counted( WC_Order $order, $status ) {
+		$store = $order->get_data_store();
+		if ( ! in_array( $status, array( 'pending', 'failed', 'cancelled', 'checkout-draft' ), true ) ) {
+			$store->set_recorded_sales( $order, true );
+		}
+		// WooCommerce counts a coupon use from pending on, and gives it back on cancelled or failed.
+		if ( ! in_array( $status, array( 'failed', 'cancelled', 'checkout-draft' ), true ) ) {
+			$store->set_recorded_coupon_usage_counts( $order, true );
+		}
+	}
+
+	/**
+	 * Set an order's or an item's props, keeping the ones WooCommerce turns down
+	 * (a malformed email, an unknown country) as a warning rather than dropping
+	 * them unseen.
+	 *
+	 * @param WC_Data  $object   Order or item.
+	 * @param array    $props    Props.
+	 * @param string[] $warnings Warnings (by reference).
+	 * @param string   $what     What was being set, for the warning.
+	 */
+	protected static function set_props_or_warn( WC_Data $object, array $props, array &$warnings, $what ) {
+		$result = $object->set_props( $props );
+		if ( is_wp_error( $result ) ) {
+			$warnings[] = $what . ': ' . implode( ' ', $result->get_error_messages() );
+		}
 	}
 
 	/**
@@ -491,8 +687,9 @@ class MigratePlus_Orders {
 	 * @param array           $record   Order as exported.
 	 * @param MigratePlus_Job $job      Job.
 	 * @param string[]        $warnings Warnings (by reference).
+	 * @param WC_Order_Item[] $item_ids Filled with id on the old site => the line made of it, for the refunds.
 	 */
-	protected static function add_items( WC_Order $order, array $record, MigratePlus_Job $job, array &$warnings ) {
+	protected static function add_items( WC_Order $order, array $record, MigratePlus_Job $job, array &$warnings, array &$item_ids ) {
 		foreach ( isset( $record['items'] ) && is_array( $record['items'] ) ? $record['items'] : array() as $line ) {
 			if ( ! is_array( $line ) ) {
 				continue;
@@ -504,7 +701,8 @@ class MigratePlus_Orders {
 				/* translators: %s: product name */
 				$warnings[] = sprintf( __( 'Product "%s" is not on this site; its line keeps the name and price but links to no product.', 'migrateplus' ), isset( $line['name'] ) ? MigratePlus_Util::stringify( $line['name'] ) : '' );
 			}
-			$item->set_props(
+			self::set_props_or_warn(
+				$item,
 				array(
 					'name'         => isset( $line['name'] ) ? MigratePlus_Util::stringify( $line['name'] ) : '',
 					'product_id'   => $product_id,
@@ -513,57 +711,77 @@ class MigratePlus_Orders {
 					'tax_class'    => isset( $line['tax_class'] ) ? MigratePlus_Util::stringify( $line['tax_class'] ) : '',
 					'subtotal'     => isset( $line['subtotal'] ) ? MigratePlus_Util::stringify( $line['subtotal'] ) : '0',
 					'total'        => isset( $line['total'] ) ? MigratePlus_Util::stringify( $line['total'] ) : '0',
-				)
+				),
+				$warnings,
+				__( 'A line of the order was not set in full', 'migrateplus' )
 			);
 			self::set_taxes( $item, $line );
 			self::set_item_meta( $item, $line );
 			$order->add_item( $item );
+			if ( ! empty( $line['id'] ) ) {
+				$item_ids[ (int) $line['id'] ] = $item;
+			}
 		}
 		foreach ( isset( $record['shipping_lines'] ) && is_array( $record['shipping_lines'] ) ? $record['shipping_lines'] : array() as $line ) {
 			if ( ! is_array( $line ) ) {
 				continue;
 			}
 			$item = new WC_Order_Item_Shipping();
-			$item->set_props(
+			self::set_props_or_warn(
+				$item,
 				array(
 					'method_title' => isset( $line['method_title'] ) ? MigratePlus_Util::stringify( $line['method_title'] ) : '',
 					'method_id'    => isset( $line['method_id'] ) ? MigratePlus_Util::stringify( $line['method_id'] ) : '',
 					'instance_id'  => isset( $line['instance_id'] ) ? MigratePlus_Util::stringify( $line['instance_id'] ) : '',
 					'total'        => isset( $line['total'] ) ? MigratePlus_Util::stringify( $line['total'] ) : '0',
-				)
+				),
+				$warnings,
+				__( 'A line of the order was not set in full', 'migrateplus' )
 			);
 			self::set_taxes( $item, $line );
 			self::set_item_meta( $item, $line );
 			$order->add_item( $item );
+			if ( ! empty( $line['id'] ) ) {
+				$item_ids[ (int) $line['id'] ] = $item;
+			}
 		}
 		foreach ( isset( $record['fee_lines'] ) && is_array( $record['fee_lines'] ) ? $record['fee_lines'] : array() as $line ) {
 			if ( ! is_array( $line ) ) {
 				continue;
 			}
 			$item = new WC_Order_Item_Fee();
-			$item->set_props(
+			self::set_props_or_warn(
+				$item,
 				array(
 					'name'       => isset( $line['name'] ) ? MigratePlus_Util::stringify( $line['name'] ) : '',
 					'tax_class'  => isset( $line['tax_class'] ) ? MigratePlus_Util::stringify( $line['tax_class'] ) : '',
 					'tax_status' => isset( $line['tax_status'] ) && in_array( $line['tax_status'], array( 'taxable', 'none' ), true ) ? $line['tax_status'] : 'taxable',
 					'amount'     => isset( $line['amount'] ) ? MigratePlus_Util::stringify( $line['amount'] ) : '0',
 					'total'      => isset( $line['total'] ) ? MigratePlus_Util::stringify( $line['total'] ) : '0',
-				)
+				),
+				$warnings,
+				__( 'A line of the order was not set in full', 'migrateplus' )
 			);
 			self::set_taxes( $item, $line );
 			$order->add_item( $item );
+			if ( ! empty( $line['id'] ) ) {
+				$item_ids[ (int) $line['id'] ] = $item;
+			}
 		}
 		foreach ( isset( $record['coupon_lines'] ) && is_array( $record['coupon_lines'] ) ? $record['coupon_lines'] : array() as $line ) {
 			if ( ! is_array( $line ) || empty( $line['code'] ) ) {
 				continue;
 			}
 			$item = new WC_Order_Item_Coupon();
-			$item->set_props(
+			self::set_props_or_warn(
+				$item,
 				array(
 					'code'         => MigratePlus_Util::stringify( $line['code'] ),
 					'discount'     => isset( $line['discount'] ) ? MigratePlus_Util::stringify( $line['discount'] ) : '0',
 					'discount_tax' => isset( $line['discount_tax'] ) ? MigratePlus_Util::stringify( $line['discount_tax'] ) : '0',
-				)
+				),
+				$warnings,
+				__( 'A line of the order was not set in full', 'migrateplus' )
 			);
 			$order->add_item( $item );
 		}
@@ -573,7 +791,8 @@ class MigratePlus_Orders {
 			}
 			$item = new WC_Order_Item_Tax();
 			// The rate id is the old site's: it keys the items' taxes above, so the totals still add up here.
-			$item->set_props(
+			self::set_props_or_warn(
+				$item,
 				array(
 					'rate_id'            => isset( $line['rate_id'] ) ? (int) $line['rate_id'] : 0,
 					'rate_code'          => isset( $line['rate_code'] ) ? MigratePlus_Util::stringify( $line['rate_code'] ) : '',
@@ -582,7 +801,9 @@ class MigratePlus_Orders {
 					'tax_total'          => isset( $line['tax_total'] ) ? MigratePlus_Util::stringify( $line['tax_total'] ) : '0',
 					'shipping_tax_total' => isset( $line['shipping_tax_total'] ) ? MigratePlus_Util::stringify( $line['shipping_tax_total'] ) : '0',
 					'rate_percent'       => isset( $line['rate_percent'] ) ? (float) $line['rate_percent'] : 0,
-				)
+				),
+				$warnings,
+				__( 'A line of the order was not set in full', 'migrateplus' )
 			);
 			$order->add_item( $item );
 		}
@@ -637,7 +858,7 @@ class MigratePlus_Orders {
 	 */
 	protected static function set_item_meta( WC_Order_Item $item, array $line ) {
 		foreach ( isset( $line['meta'] ) && is_array( $line['meta'] ) ? $line['meta'] : array() as $meta ) {
-			if ( is_array( $meta ) && isset( $meta['key'] ) && '' !== (string) $meta['key'] && '_' !== (string) $meta['key'][0] ) {
+			if ( is_array( $meta ) && isset( $meta['key'] ) && is_scalar( $meta['key'] ) && self::meta_travels( (string) $meta['key'], 'item' ) ) {
 				$item->add_meta_data( (string) $meta['key'], isset( $meta['value'] ) ? $meta['value'] : '' );
 			}
 		}
@@ -672,36 +893,55 @@ class MigratePlus_Orders {
 	}
 
 	/**
-	 * @param WC_Order $order    Saved order.
-	 * @param array[]  $refunds  Exported refunds.
-	 * @param string[] $warnings Warnings (by reference).
+	 * Add an order's refunds, with their dates, who made them and what each gave
+	 * back per line. Nothing is paid back and nothing restocked.
+	 *
+	 * @param WC_Order        $order    Saved order.
+	 * @param array[]         $refunds  Exported refunds.
+	 * @param WC_Order_Item[] $item_ids From add_items(): id on the old site => the order's line here.
+	 * @param string[]        $warnings Warnings (by reference).
 	 */
-	protected static function add_refunds( WC_Order $order, array $refunds, array &$warnings ) {
+	protected static function add_refunds( WC_Order $order, array $refunds, array $item_ids, array &$warnings ) {
 		foreach ( $refunds as $refund ) {
 			if ( ! is_array( $refund ) || ! isset( $refund['amount'] ) ) {
 				continue;
 			}
-			$by  = ! empty( $refund['refunded_by'] ) && is_email( $refund['refunded_by'] ) ? get_user_by( 'email', $refund['refunded_by'] ) : false;
-			$new = wc_create_refund(
-				array(
-					'order_id'       => $order->get_id(),
-					'amount'         => MigratePlus_Util::stringify( $refund['amount'] ),
-					'reason'         => isset( $refund['reason'] ) ? MigratePlus_Util::stringify( $refund['reason'] ) : '',
-					'refunded_by'    => $by ? (int) $by->ID : 0,
-					'refund_payment' => false,
-					'restock_items'  => false,
-				)
+			$by    = ! empty( $refund['refunded_by'] ) && is_email( $refund['refunded_by'] ) ? get_user_by( 'email', $refund['refunded_by'] ) : false;
+			$lines = array();
+			foreach ( isset( $refund['line_items'] ) && is_array( $refund['line_items'] ) ? $refund['line_items'] : array() as $line ) {
+				$item = is_array( $line ) && isset( $line['item'] ) && isset( $item_ids[ (int) $line['item'] ] ) ? $item_ids[ (int) $line['item'] ] : null;
+				if ( ! $item || ! $item->get_id() ) {
+					$warnings[] = __( 'A refund names a line the order does not have here, so it gives back the amount without saying for what.', 'migrateplus' );
+					continue;
+				}
+				$lines[ $item->get_id() ] = array(
+					'qty'          => isset( $line['qty'] ) ? abs( (float) $line['qty'] ) : 0,
+					'refund_total' => isset( $line['refund_total'] ) ? abs( (float) $line['refund_total'] ) : 0,
+					'refund_tax'   => isset( $line['refund_tax'] ) && is_array( $line['refund_tax'] ) ? array_map( 'floatval', $line['refund_tax'] ) : array(),
+				);
+			}
+			$args = array(
+				'order_id'       => $order->get_id(),
+				'amount'         => MigratePlus_Util::stringify( $refund['amount'] ),
+				'reason'         => isset( $refund['reason'] ) ? MigratePlus_Util::stringify( $refund['reason'] ) : '',
+				'line_items'     => $lines,
+				'refund_payment' => false,
+				'restock_items'  => false,
 			);
+			$date = isset( $refund['date'] ) ? MigratePlus_Importer::parse_date( MigratePlus_Util::stringify( $refund['date'] ) ) : null;
+			if ( $date ) {
+				$args['date_created'] = $date->getTimestamp();
+			}
+			$new = wc_create_refund( $args );
 			if ( is_wp_error( $new ) ) {
 				/* translators: %s: error */
 				$warnings[] = sprintf( __( 'A refund could not be added: %s', 'migrateplus' ), $new->get_error_message() );
 				continue;
 			}
-			$date = isset( $refund['date'] ) ? MigratePlus_Importer::parse_date( MigratePlus_Util::stringify( $refund['date'] ) ) : null;
-			if ( $date ) {
-				$new->set_date_created( $date->getTimestamp() );
-				$new->save();
-			}
+			// wc_create_refund() credits whoever runs the import. The person on the old site, when they are here;
+			// nobody rather than the wrong person when they are not.
+			$new->set_refunded_by( $by ? (int) $by->ID : 0 );
+			$new->save();
 		}
 	}
 
@@ -727,9 +967,10 @@ class MigratePlus_Orders {
 	}
 
 	/**
-	 * Orders with a meta value. WooCommerce's own order tables take a meta query;
-	 * orders kept as posts are asked through the posts table, since that store
-	 * refuses one.
+	 * Orders with a meta value, in the trash too: an imported order someone
+	 * trashed is still the job's to roll back, and still imported before.
+	 * WooCommerce's own order tables take a meta query; orders kept as posts are
+	 * asked through the posts table, since that store refuses one.
 	 *
 	 * @param string $key   Meta key.
 	 * @param string $value Meta value.
@@ -742,7 +983,7 @@ class MigratePlus_Orders {
 			$ids = wc_get_orders(
 				array(
 					'type'       => 'shop_order',
-					'status'     => array_keys( wc_get_order_statuses() ),
+					'status'     => array_merge( array_keys( wc_get_order_statuses() ), array( 'trash' ) ),
 					'limit'      => $limit,
 					'return'     => 'ids',
 					'meta_query' => array( // phpcs:ignore WordPress.DB.SlowDBQuery
@@ -758,7 +999,7 @@ class MigratePlus_Orders {
 		$ids = get_posts(
 			array(
 				'post_type'        => 'shop_order',
-				'post_status'      => 'any',
+				'post_status'      => array( 'any', 'trash' ), // "any" alone leaves the trash out.
 				'posts_per_page'   => $limit,
 				'fields'           => 'ids',
 				'orderby'          => 'ID',
@@ -786,6 +1027,9 @@ class MigratePlus_Orders {
 		foreach ( $order->get_refunds() as $refund ) {
 			$refund->delete( true );
 		}
+		// The import never added this order to its products' total_sales (see mark_counted()), so deleting it
+		// must not take it off them either.
+		$order->get_data_store()->set_recorded_sales( $order, false );
 		$ok = (bool) $order->delete( true );
 		self::quiet( false );
 		return $ok;

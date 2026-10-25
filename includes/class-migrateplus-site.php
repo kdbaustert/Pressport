@@ -112,15 +112,19 @@ class MigratePlus_Site {
 	}
 
 	/**
-	 * The section keys the args name, or every section when they name none.
+	 * The section keys the args name, or every section when they do not say.
+	 * A list that names none picks none: unticking every section must not
+	 * export them all.
 	 *
 	 * @param array $args Export args (site_sections).
 	 * @return string[]
 	 */
 	public static function picked_sections( array $args ) {
-		$all    = array_keys( self::sections() );
-		$picked = isset( $args['site_sections'] ) ? array_values( array_intersect( $all, (array) $args['site_sections'] ) ) : array();
-		return $picked ? $picked : $all;
+		$all = array_keys( self::sections() );
+		if ( ! isset( $args['site_sections'] ) ) {
+			return $all;
+		}
+		return array_values( array_intersect( $all, (array) $args['site_sections'] ) );
 	}
 
 	/**
@@ -144,14 +148,14 @@ class MigratePlus_Site {
 	 * The site's settings as one portable record: the sections the args pick.
 	 *
 	 * @param array $args Export args (site_sections).
-	 * @return array { sections, options, widgets, theme, plugins }, empty when the person may not read them.
+	 * @return array { sections, options, widgets, theme, plugins }, empty when the person may not read them or no section is picked.
 	 */
 	public static function export( array $args ) {
-		if ( ! self::user_can() ) {
+		$picked = self::picked_sections( $args );
+		if ( ! self::user_can() || ! $picked ) {
 			return array();
 		}
 		$sections = self::sections();
-		$picked   = self::picked_sections( $args );
 		$options  = array();
 		foreach ( $picked as $key ) {
 			foreach ( $sections[ $key ]['options'] as $name ) {
@@ -211,13 +215,13 @@ class MigratePlus_Site {
 	}
 
 	/**
-	 * One record, when the person may read it.
+	 * One record, when the person may read it and the args pick a section.
 	 *
 	 * @param array $args Export args.
 	 * @return int
 	 */
-	public static function count( array $args ) { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- every side section counts with the export args.
-		return self::user_can() ? 1 : 0;
+	public static function count( array $args ) {
+		return self::user_can() && self::picked_sections( $args ) ? 1 : 0;
 	}
 
 	/**
@@ -234,9 +238,10 @@ class MigratePlus_Site {
 	}
 
 	/**
-	 * The widget areas and the widgets in them.
+	 * The widget areas and the widgets in them, with the slug of each menu a
+	 * Navigation Menu widget shows: its id here means nothing on the new site.
 	 *
-	 * @return array { sidebars: { area => [ widget ids ] }, instances: { widget_xxx option => value } }
+	 * @return array { sidebars: { area => [ widget ids ] }, instances: { widget_xxx option => value }, menus: { menu id => slug } }
 	 */
 	protected static function widgets() {
 		$sidebars  = array();
@@ -253,9 +258,17 @@ class MigratePlus_Site {
 				}
 			}
 		}
+		$menus = array();
+		foreach ( isset( $instances['widget_nav_menu'] ) && is_array( $instances['widget_nav_menu'] ) ? $instances['widget_nav_menu'] : array() as $instance ) {
+			$menu = is_array( $instance ) && ! empty( $instance['nav_menu'] ) ? get_term( (int) $instance['nav_menu'], 'nav_menu' ) : null;
+			if ( $menu instanceof WP_Term ) {
+				$menus[ (string) $menu->term_id ] = $menu->slug;
+			}
+		}
 		return array(
 			'sidebars'  => $sidebars,
 			'instances' => $instances,
+			'menus'     => $menus,
 		);
 	}
 
@@ -351,12 +364,18 @@ class MigratePlus_Site {
 				$ids   = MigratePlus_Importer::resolve_terms( 'category', array( MigratePlus_Util::stringify( $value ) ), ! empty( $opts['create_terms'] ), $warnings, $job );
 				$value = $ids ? (int) $ids[0] : null;
 			} elseif ( 'site_icon' === $name ) {
-				$value = $dry ? 0 : self::sideload( $value, $job, $warnings, __( 'Site icon', 'migrateplus' ) );
+				$value = self::settings_image( $value, $job, $opts, $dry, $warnings, __( 'The site icon', 'migrateplus' ) );
 			} elseif ( ! in_array( $name, $allowed, true ) ) {
 				continue;
 			}
 			if ( null === $value ) {
 				continue;
+			}
+			// A staging site's export says "discourage search engines": imported unnoticed, it hides the live site.
+			if ( 'blog_public' === $name && (string) (int) get_option( 'blog_public' ) !== (string) (int) $value ) {
+				$warnings[] = (int) $value
+					? __( 'Search engine visibility changes: search engines are now asked to index this site.', 'migrateplus' )
+					: __( 'Search engine visibility changes: search engines are now asked not to index this site. Check Settings > Reading if this is the live site.', 'migrateplus' );
 			}
 			++$counts['options'];
 			if ( ! $dry ) {
@@ -384,7 +403,8 @@ class MigratePlus_Site {
 				if ( ! isset( $job->data['side_prev']['yoast'] ) ) {
 					$job->data['side_prev']['yoast'] = array();
 				}
-				$counts['plugins'] = MigratePlus_Yoast::import_settings( $plugins['yoast'], $job->data['side_prev']['yoast'] );
+				// The job and warnings let it download the logo and social images.
+				$counts['plugins'] = MigratePlus_Yoast::import_settings( $plugins['yoast'], $job->data['side_prev']['yoast'], $job, $warnings );
 			}
 		}
 
@@ -420,7 +440,93 @@ class MigratePlus_Site {
 			$current                                    = get_option( $name );
 			$job->data['side_prev']['options'][ $name ] = false === $current ? array( 'none' => true ) : array( 'value' => $current );
 		}
+		self::write_option( $name, $value );
+	}
+
+	/**
+	 * Save an option. The permalink ones go through WP_Rewrite, which saves the
+	 * option and rebuilds its own state: written with update_option(), rules
+	 * flushed later in the same request would still be built for the old
+	 * structure.
+	 *
+	 * @param string $name  Option.
+	 * @param mixed  $value Value.
+	 * @return bool Whether it was a permalink option.
+	 */
+	protected static function write_option( $name, $value ) {
+		global $wp_rewrite;
+		$setters = array(
+			'permalink_structure' => 'set_permalink_structure',
+			'category_base'       => 'set_category_base',
+			'tag_base'            => 'set_tag_base',
+		);
+		if ( isset( $setters[ $name ] ) && $wp_rewrite instanceof WP_Rewrite ) {
+			$wp_rewrite->{$setters[ $name ]}( (string) $value );
+			self::refresh_permastructs();
+			return true;
+		}
 		update_option( $name, $value );
+		return false;
+	}
+
+	/**
+	 * Register the taxonomies' and post types' permalink shapes again, as init
+	 * did with the old settings: the category and tag bases are read once, and
+	 * a site that had no permalink structure registered none at all. Adding
+	 * replaces what is there; their remove_rewrite_rules() is not called, as a
+	 * post type's also drops its meta capabilities for the rest of the request.
+	 */
+	protected static function refresh_permastructs() {
+		global $wp_rewrite;
+		$bases = array(
+			'category' => array( 'category_base', 'category' ),
+			'post_tag' => array( 'tag_base', 'tag' ),
+		);
+		foreach ( get_taxonomies( array(), 'objects' ) as $taxonomy ) {
+			if ( false === $taxonomy->rewrite ) {
+				continue;
+			}
+			// Registered under plain links, the rewrite args never got their defaults: as WP_Taxonomy::set_props() gives them.
+			$taxonomy->rewrite = wp_parse_args(
+				is_array( $taxonomy->rewrite ) ? $taxonomy->rewrite : array(),
+				array(
+					'with_front'   => true,
+					'hierarchical' => false,
+					'ep_mask'      => EP_NONE,
+				)
+			);
+			if ( empty( $taxonomy->rewrite['slug'] ) ) {
+				$taxonomy->rewrite['slug'] = sanitize_title_with_dashes( $taxonomy->name );
+			}
+			if ( isset( $bases[ $taxonomy->name ] ) ) {
+				// As create_initial_taxonomies() works them out.
+				$base                            = (string) get_option( $bases[ $taxonomy->name ][0] );
+				$taxonomy->rewrite['slug']       = '' !== $base ? $base : $bases[ $taxonomy->name ][1];
+				$taxonomy->rewrite['with_front'] = '' === $base || $wp_rewrite->using_index_permalinks();
+			}
+			$taxonomy->add_rewrite_rules();
+		}
+		foreach ( get_post_types( array(), 'objects' ) as $type ) {
+			if ( false === $type->rewrite ) {
+				continue;
+			}
+			// As WP_Post_Type::set_props() fills them in when permalinks are on.
+			$rewrite  = is_array( $type->rewrite ) ? $type->rewrite : array();
+			$rewrite += array(
+				'slug'       => $type->name,
+				'with_front' => true,
+				'pages'      => true,
+				'ep_mask'    => EP_PERMALINK,
+			);
+			if ( empty( $rewrite['slug'] ) ) {
+				$rewrite['slug'] = $type->name;
+			}
+			if ( ! isset( $rewrite['feeds'] ) || ! $type->has_archive ) {
+				$rewrite['feeds'] = (bool) $type->has_archive;
+			}
+			$type->rewrite = $rewrite;
+			$type->add_rewrite_rules();
+		}
 	}
 
 	/**
@@ -485,11 +591,43 @@ class MigratePlus_Site {
 	}
 
 	/**
+	 * The attachment for an image the settings name (site icon, logo, header
+	 * image). Downloaded under the rule every image of an import follows: only
+	 * when "Featured images" is on.
+	 *
+	 * @param mixed           $url      URL.
+	 * @param MigratePlus_Job $job      Job.
+	 * @param array           $opts     Job options.
+	 * @param bool            $dry      Dry run.
+	 * @param string[]        $warnings Warnings (by reference).
+	 * @param string          $what     What it is, for the warnings ("The site icon").
+	 * @return int|null Attachment id (0 in a dry run, or to clear), null to leave the setting alone.
+	 */
+	protected static function settings_image( $url, MigratePlus_Job $job, array $opts, $dry, array &$warnings, $what ) {
+		if ( '' === MigratePlus_Util::stringify( $url ) ) {
+			return 0;
+		}
+		if ( empty( $opts['import_featured_image'] ) ) {
+			/* translators: %s: The site icon, The logo... */
+			$warnings[] = sprintf( __( '%s was not downloaded: images are downloaded only when "Featured images" is on.', 'migrateplus' ), $what );
+			return null;
+		}
+		return $dry ? 0 : self::sideload( $url, $job, $warnings, $what );
+	}
+
+	/**
 	 * Fill this theme's widget areas from the export's. An area this theme does
 	 * not have goes to Inactive Widgets, where its widgets can be moved by hand.
 	 *
-	 * @param array           $widgets  { sidebars, instances }.
-	 * @param MigratePlus_Job $job      Job.
+	 * The file's widgets join this site's rather than replace them: each is added
+	 * to its widget_* option, under a new number when this site already uses its
+	 * own, and what an area the file fills held before goes to Inactive Widgets.
+	 * Text, HTML and block widgets need unfiltered_html, as Additional CSS needs
+	 * edit_css: on a network a site's administrator has neither, and could
+	 * otherwise add script through a file.
+	 *
+	 * @param array           $widgets  { sidebars, instances, menus }.
+	 * @param MigratePlus_Job $job      Job (side_prev and widget_menus updated in place).
 	 * @param bool            $dry      Dry run.
 	 * @param string[]        $warnings Warnings (by reference).
 	 * @return int Areas filled.
@@ -497,43 +635,192 @@ class MigratePlus_Site {
 	protected static function import_widgets( array $widgets, MigratePlus_Job $job, $dry, array &$warnings ) {
 		global $wp_registered_sidebars;
 		$registered = is_array( $wp_registered_sidebars ) ? array_keys( $wp_registered_sidebars ) : array();
-		$current    = (array) get_option( 'sidebars_widgets', array() );
-		$new        = array( 'wp_inactive_widgets' => array() );
-		$filled     = 0;
+		$html_ok    = self::user_can( 'unfiltered_html' );
+		$plan       = array();
+		$left_out   = 0;
 		foreach ( $widgets['sidebars'] as $area => $ids ) {
 			$area = sanitize_key( $area );
 			$ids  = array_values( array_filter( array_map( 'sanitize_key', (array) $ids ) ) );
-			if ( 'wp_inactive_widgets' === $area || ! $ids ) {
+			if ( 'wp_inactive_widgets' === $area ) {
 				continue;
 			}
-			if ( in_array( $area, $registered, true ) ) {
-				$new[ $area ] = $ids;
-				++$filled;
-			} else {
-				/* translators: %s: widget area */
-				$warnings[]                 = sprintf( __( 'This theme has no "%s" widget area; its widgets were put with the inactive widgets.', 'migrateplus' ), $area );
-				$new['wp_inactive_widgets'] = array_merge( $new['wp_inactive_widgets'], $ids );
+			if ( ! $html_ok ) {
+				$kept      = array_values( array_filter( $ids, array( __CLASS__, 'widget_is_plain' ) ) );
+				$left_out += count( $ids ) - count( $kept );
+				$ids       = $kept;
 			}
+			if ( $ids ) {
+				$plan[ $area ] = $ids;
+			}
+		}
+		if ( $left_out ) {
+			/* translators: %d: number of widgets */
+			$warnings[] = sprintf( _n( 'You may not add unfiltered HTML on this site, so %d text, HTML or block widget was left out.', 'You may not add unfiltered HTML on this site, so %d text, HTML or block widgets were left out.', $left_out, 'migrateplus' ), $left_out );
+		}
+		$filled = count( array_intersect( array_keys( $plan ), $registered ) );
+		foreach ( array_diff( array_keys( $plan ), $registered ) as $area ) {
+			/* translators: %s: widget area */
+			$warnings[] = sprintf( __( 'This theme has no "%s" widget area; its widgets were put with the inactive widgets.', 'migrateplus' ), $area );
 		}
 		if ( $dry ) {
 			return $filled;
 		}
-		foreach ( isset( $widgets['instances'] ) && is_array( $widgets['instances'] ) ? $widgets['instances'] : array() as $name => $value ) {
-			if ( preg_match( '/^widget_[a-z0-9_-]+$/i', (string) $name ) && is_array( $value ) ) {
-				self::set_option( (string) $name, $value, $job );
+
+		$current   = (array) get_option( 'sidebars_widgets', array() );
+		$inactive  = isset( $current['wp_inactive_widgets'] ) && is_array( $current['wp_inactive_widgets'] ) ? $current['wp_inactive_widgets'] : array();
+		$sources   = isset( $widgets['instances'] ) && is_array( $widgets['instances'] ) ? $widgets['instances'] : array();
+		$options   = array();
+		$new       = array();
+		$new_menus = array();
+		foreach ( $plan as $area => $ids ) {
+			$placed = array();
+			foreach ( $ids as $id ) {
+				if ( ! preg_match( '/^([a-z0-9_-]+)-(\d+)$/', $id, $m ) ) {
+					$placed[] = $id; // A widget of the old single-instance kind: nothing to copy.
+					continue;
+				}
+				$name     = 'widget_' . $m[1];
+				$instance = isset( $sources[ $name ][ $m[2] ] ) && is_array( $sources[ $name ][ $m[2] ] ) ? $sources[ $name ][ $m[2] ] : null;
+				if ( null === $instance ) {
+					continue;
+				}
+				if ( ! isset( $options[ $name ] ) ) {
+					$options[ $name ] = get_option( $name, array() );
+					$options[ $name ] = is_array( $options[ $name ] ) ? $options[ $name ] : array();
+				}
+				$menu     = '';
+				$instance = self::remap_widget( $m[1], $instance, $widgets, $job, $warnings, $menu );
+				$number   = (int) $m[2];
+				// The same number holding another widget here: a new number, and the area names it by that.
+				if ( isset( $options[ $name ][ $number ] ) && $options[ $name ][ $number ] !== $instance ) {
+					$number = max( array_merge( array( 1 ), array_filter( array_keys( $options[ $name ] ), 'is_int' ) ) ) + 1;
+				}
+				$options[ $name ][ $number ] = $instance;
+				$placed[]                    = $m[1] . '-' . $number;
+				if ( '' !== $menu ) {
+					$new_menus[ $number ] = $menu;
+				}
+			}
+			if ( in_array( $area, $registered, true ) ) {
+				$new[ $area ] = $placed;
+			} else {
+				$inactive = array_merge( $inactive, $placed );
 			}
 		}
-		// Areas the file does not mention keep what they have; an area it fills replaces its widgets.
+		foreach ( $options as $name => $value ) {
+			self::set_option( $name, $value + array( '_multiwidget' => 1 ), $job );
+		}
+		if ( $new_menus ) {
+			$job->data['widget_menus'] = $new_menus + ( isset( $job->data['widget_menus'] ) ? (array) $job->data['widget_menus'] : array() );
+		}
+		// Areas the file does not mention keep what they have; one it fills gets the file's widgets, and the
+		// widgets it had before wait in Inactive Widgets.
 		foreach ( $current as $area => $ids ) {
-			if ( ! isset( $new[ $area ] ) && 'array_version' !== $area ) {
+			if ( 'array_version' === $area || 'wp_inactive_widgets' === $area || ! is_array( $ids ) ) {
+				continue;
+			}
+			if ( isset( $new[ $area ] ) ) {
+				$inactive = array_merge( $inactive, array_diff( $ids, $new[ $area ] ) );
+			} else {
 				$new[ $area ] = $ids;
 			}
 		}
+		$new = array( 'wp_inactive_widgets' => array_values( array_unique( $inactive ) ) ) + $new;
 		if ( isset( $current['array_version'] ) ) {
 			$new['array_version'] = $current['array_version'];
 		}
 		self::set_option( 'sidebars_widgets', $new, $job );
 		return $filled;
+	}
+
+	/**
+	 * Whether a widget carries no HTML of its own: not a text, custom HTML or
+	 * block widget.
+	 *
+	 * @param string $id Widget id (block-2).
+	 * @return bool
+	 */
+	protected static function widget_is_plain( $id ) {
+		return ! preg_match( '/^(text|custom_html|block)-\d+$/', (string) $id );
+	}
+
+	/**
+	 * Point a widget's references at this site: a Navigation Menu widget's menu
+	 * by its slug, a media widget's attachments by the uid they were imported
+	 * with. What cannot be found is cleared with a warning, so it does not point
+	 * at whatever has that id here.
+	 *
+	 * @param string          $base     Widget base (nav_menu, media_image...).
+	 * @param array           $instance Instance.
+	 * @param array           $widgets  The file's widgets (menus: { id => slug }).
+	 * @param MigratePlus_Job $job      Job.
+	 * @param string[]        $warnings Warnings (by reference).
+	 * @param string          $menu     Set to the menu's slug when it is not here yet (by reference).
+	 * @return array
+	 */
+	protected static function remap_widget( $base, array $instance, array $widgets, MigratePlus_Job $job, array &$warnings, &$menu ) {
+		if ( 'nav_menu' === $base && ! empty( $instance['nav_menu'] ) ) {
+			$slug = isset( $widgets['menus'][ (string) $instance['nav_menu'] ] ) ? sanitize_title( MigratePlus_Util::stringify( $widgets['menus'][ (string) $instance['nav_menu'] ] ) ) : '';
+			$term = '' !== $slug ? get_term_by( 'slug', $slug, 'nav_menu' ) : false;
+			// Menus are imported after the settings: one not here yet is set by resolve_widget_menus() then.
+			$instance['nav_menu'] = $term instanceof WP_Term ? (int) $term->term_id : 0;
+			if ( ! $term && '' !== $slug ) {
+				$menu = $slug;
+				/* translators: %s: menu slug */
+				$warnings[] = sprintf( __( 'A Navigation Menu widget shows the "%s" menu, which is not on this site yet: it gets it if the file\'s menus are imported, otherwise choose one in the widget.', 'migrateplus' ), $slug );
+			} elseif ( ! $term ) {
+				$warnings[] = __( 'A Navigation Menu widget names a menu the file does not, so it shows no menu until one is chosen.', 'migrateplus' );
+			}
+		}
+		if ( 0 !== strpos( $base, 'media_' ) ) {
+			return $instance;
+		}
+		$find = static function ( $old ) use ( $job ) {
+			return MigratePlus_Importer::find_by_uid( MigratePlus_Importer::uid( $job, MigratePlus_Util::stringify( $old ) ), 'attachment', $job->data['id'] );
+		};
+		if ( ! empty( $instance['attachment_id'] ) ) {
+			$id                        = $find( $instance['attachment_id'] );
+			$instance['attachment_id'] = $id;
+			if ( $id && isset( $instance['url'] ) ) {
+				$instance['url'] = (string) wp_get_attachment_url( $id );
+			} elseif ( ! $id ) {
+				$warnings[] = __( 'A media widget\'s file is not in the file\'s media, so the widget loads it from the old site\'s address.', 'migrateplus' );
+			}
+		}
+		if ( ! empty( $instance['ids'] ) && is_array( $instance['ids'] ) ) {
+			$old             = array_filter( $instance['ids'] );
+			$instance['ids'] = array_values( array_filter( array_map( $find, $old ) ) );
+			if ( count( $instance['ids'] ) < count( $old ) ) {
+				$warnings[] = __( 'A gallery widget shows images that are not in the file\'s media; they were left out of it.', 'migrateplus' );
+			}
+		}
+		return $instance;
+	}
+
+	/**
+	 * Point Navigation Menu widgets at their menus once the import has made them.
+	 * Menus come after the settings (they link to the records), so a widget whose
+	 * menu was not here yet was left empty and its menu's slug kept in the job.
+	 *
+	 * @param MigratePlus_Job $job Job (widget_menus cleared in place).
+	 * @return int Widgets given their menu.
+	 */
+	public static function resolve_widget_menus( MigratePlus_Job $job ) {
+		$pending = isset( $job->data['widget_menus'] ) ? (array) $job->data['widget_menus'] : array();
+		unset( $job->data['widget_menus'] );
+		$option = get_option( 'widget_nav_menu', array() );
+		$fixed  = 0;
+		foreach ( $pending as $number => $slug ) {
+			$term = get_term_by( 'slug', (string) $slug, 'nav_menu' );
+			if ( $term instanceof WP_Term && isset( $option[ $number ] ) && is_array( $option[ $number ] ) ) {
+				$option[ $number ]['nav_menu'] = (int) $term->term_id;
+				++$fixed;
+			}
+		}
+		if ( $fixed ) {
+			update_option( 'widget_nav_menu', $option ); // side_prev already holds what it was before the import.
+		}
+		return $fixed;
 	}
 
 	/**
@@ -562,22 +849,43 @@ class MigratePlus_Site {
 				continue;
 			}
 			if ( 'custom_logo' === $key ) {
-				$value = $dry ? 0 : ( ! empty( $opts['import_featured_image'] ) ? self::sideload( $value, $job, $warnings, __( 'Logo', 'migrateplus' ) ) : null );
+				$value = self::settings_image( $value, $job, $opts, $dry, $warnings, __( 'The logo', 'migrateplus' ) );
 				if ( null === $value ) {
 					continue;
 				}
+			}
+			$header = null;
+			// A header image is a URL on the old site; downloaded like the logo, so it does not keep loading from there.
+			if ( 'header_image' === $key && is_string( $value ) && preg_match( '#^https?://#i', $value ) ) {
+				$header = self::settings_image( $value, $job, $opts, $dry, $warnings, __( 'The header image', 'migrateplus' ) );
+				if ( null === $header ) {
+					continue;
+				}
+				$value = $header ? (string) wp_get_attachment_url( $header ) : $value;
 			}
 			++$n;
 			if ( $dry ) {
 				continue;
 			}
-			if ( ! isset( $job->data['side_prev']['theme_mods'] ) || ! array_key_exists( $key, (array) $job->data['side_prev']['theme_mods'] ) ) {
-				$prev = get_theme_mod( $key, null );
-				$job->data['side_prev']['theme_mods'][ $key ] = null === $prev ? array( 'none' => true ) : array( 'value' => $prev );
+			self::set_mod( $key, $value, $job );
+			if ( $header ) {
+				$meta = wp_get_attachment_metadata( $header );
+				self::set_mod(
+					'header_image_data',
+					(object) array(
+						'attachment_id' => $header,
+						'url'           => $value,
+						'thumbnail_url' => $value,
+						'width'         => isset( $meta['width'] ) ? (int) $meta['width'] : 0,
+						'height'        => isset( $meta['height'] ) ? (int) $meta['height'] : 0,
+					),
+					$job
+				);
 			}
-			set_theme_mod( $key, $value );
 		}
-		if ( isset( $theme['custom_css'] ) && is_string( $theme['custom_css'] ) && '' !== $theme['custom_css'] ) {
+		if ( isset( $theme['custom_css'] ) && is_string( $theme['custom_css'] ) && '' !== $theme['custom_css'] && ! self::user_can( 'edit_css' ) ) {
+			$warnings[] = __( 'You may not edit CSS on this site, so the Additional CSS was not applied.', 'migrateplus' );
+		} elseif ( isset( $theme['custom_css'] ) && is_string( $theme['custom_css'] ) && '' !== $theme['custom_css'] ) {
 			++$n;
 			if ( ! $dry ) {
 				if ( ! isset( $job->data['side_prev']['custom_css'] ) ) {
@@ -593,6 +901,21 @@ class MigratePlus_Site {
 			}
 		}
 		return $n;
+	}
+
+	/**
+	 * Set a theme mod, keeping what it was for rollback.
+	 *
+	 * @param string          $key   Theme mod.
+	 * @param mixed           $value Value.
+	 * @param MigratePlus_Job $job   Job (side_prev updated in place).
+	 */
+	protected static function set_mod( $key, $value, MigratePlus_Job $job ) {
+		if ( ! isset( $job->data['side_prev']['theme_mods'] ) || ! array_key_exists( $key, (array) $job->data['side_prev']['theme_mods'] ) ) {
+			$prev = get_theme_mod( $key, null );
+			$job->data['side_prev']['theme_mods'][ $key ] = null === $prev ? array( 'none' => true ) : array( 'value' => $prev );
+		}
+		set_theme_mod( $key, $value );
 	}
 
 	/**
@@ -634,13 +957,21 @@ class MigratePlus_Site {
 	 * @param MigratePlus_Job $job Job (side_prev cleared in place).
 	 */
 	public static function restore( MigratePlus_Job $job ) {
-		$prev = isset( $job->data['side_prev'] ) ? (array) $job->data['side_prev'] : array();
+		$prev       = isset( $job->data['side_prev'] ) ? (array) $job->data['side_prev'] : array();
+		$permalinks = false;
 		foreach ( isset( $prev['options'] ) ? (array) $prev['options'] : array() as $name => $was ) {
 			if ( isset( $was['none'] ) ) {
+				// A permalink option that was never saved reads as empty: emptied through WP_Rewrite first, so its
+				// state follows, then deleted as it was.
+				$permalinks = ( in_array( $name, self::SECTIONS['permalinks']['options'], true ) && self::write_option( $name, '' ) ) || $permalinks;
 				delete_option( $name );
 			} elseif ( is_array( $was ) && array_key_exists( 'value', $was ) ) {
-				update_option( $name, $was['value'] );
+				$permalinks = self::write_option( $name, $was['value'] ) || $permalinks;
 			}
+		}
+		// The import flushed rules for its structure; without a flush they would outlive the rollback.
+		if ( $permalinks ) {
+			flush_rewrite_rules( false );
 		}
 		foreach ( isset( $prev['theme_mods'] ) ? (array) $prev['theme_mods'] : array() as $key => $was ) {
 			if ( isset( $was['none'] ) ) {
@@ -677,13 +1008,15 @@ class MigratePlus_Site {
 	}
 
 	/**
-	 * Whether the person may read and change the site's settings. WP-CLI without
-	 * --user runs with the shell account's access.
+	 * Whether the person may read and change the site's settings, or do what
+	 * another capability says. WP-CLI without --user runs with the shell
+	 * account's access.
 	 *
+	 * @param string $capability Capability.
 	 * @return bool
 	 */
-	protected static function user_can() {
-		return ! get_current_user_id() || current_user_can( 'manage_options' );
+	protected static function user_can( $capability = 'manage_options' ) {
+		return ! get_current_user_id() || current_user_can( $capability );
 	}
 
 	/**

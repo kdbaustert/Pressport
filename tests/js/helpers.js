@@ -7,7 +7,8 @@
 //
 // WordPress gives admin.js its React as wp.element. The tests build that from
 // React 18's UMD builds, the last React with them; the development builds
-// print React's warnings.
+// print React's warnings. wp.i18n has no translations loaded, so strings come
+// back as written.
 import { readFileSync } from 'node:fs'
 import { JSDOM } from 'jsdom'
 
@@ -22,22 +23,24 @@ const defaults = {
   post_type: 'post',
   default_status: 'publish',
   force_status: '',
-  default_author: 1,
+  author: 0,
+  // An empty PHP array, as wp_localize_script() sends it.
+  authors: [],
   duplicate: 'skip',
   skip_existing: 0,
   update_ids: [],
   replace_ids: [],
   copy_ids: [],
+  skip_ids: [],
+  duplicate_rest: '',
   batch_size: 10,
   import_featured_image: 1,
   import_content_images: 0,
   create_terms: 1,
-  create_authors: 0,
   rewrite_links: 1,
   import_comments: 1,
   import_menus: 1,
   import_term_data: 1,
-  import_users: 1,
   import_acf_definitions: 1,
   import_acf_options: 1,
   import_site_settings: 1,
@@ -53,7 +56,6 @@ const bootstrap = () => ({
   adminUrl: site + '/wp-admin/',
   view: 'new',
   importUrl: site + '/wp-admin/admin.php?page=migrateplus',
-  historyUrl: site + '/wp-admin/admin.php?page=migrateplus-history',
   exportUrl: site + '/wp-admin/admin.php?page=migrateplus-export',
   exportDefaults: {
     post_types: ['post'],
@@ -67,7 +69,6 @@ const bootstrap = () => ({
     include_woo: 0,
     include_comments: 0,
     include_menus: 0,
-    include_users: 0,
     include_acf_definitions: 1,
     include_acf_options: 1,
     include_site_settings: 0,
@@ -109,7 +110,10 @@ const bootstrap = () => ({
     { name: 'page', label: 'Page', plural: 'Pages', taxonomies: [] },
     { name: 'attachment', label: 'Media', plural: 'Media', taxonomies: [] },
   ],
-  users: [{ id: 1, name: 'Kenny' }],
+  authors: [
+    { id: 1, name: 'Kenny', login: 'kenny' },
+    { id: 2, name: 'Ada', login: 'ada' },
+  ],
   targets: [
     { key: 'post_title', label: 'Title', help: '' },
     { key: 'post_content', label: 'Content', help: '' },
@@ -121,7 +125,7 @@ const bootstrap = () => ({
   acf: { active: false, fields: {} },
   woo: { active: false },
   menus: true,
-  sides: { users: true, site: true, orders: false, yoast: false },
+  sides: { site: true, orders: false, yoast: false },
   siteSections: [
     { key: 'general', label: 'General', help: 'Site title, tagline, time zone' },
     { key: 'reading', label: 'Reading', help: 'Front page and posts page' },
@@ -187,28 +191,33 @@ function fakeClock() {
   }
 }
 
+// wp-i18n's three functions, as they behave with no translations loaded.
+const i18n = {
+  __: text => text,
+  _n: (single, plural, n) => (n === 1 ? single : plural),
+  sprintf: (format, ...args) => {
+    let next = 0
+    return format.replace(/%(?:(\d+)\$)?[sd]/g, (m, pos) => String(args[pos ? pos - 1 : next++]))
+  },
+}
+
 let booted = []
 
 // For afterEach: no flow may fall back to window.confirm, alert or prompt.
-// The saved-mapping rename is the one deliberate prompt; a test that expects
-// it passes the answer as `prompt`, which allows it.
 export function noNativeDialogs() {
   const calls = booted.flatMap(env => env.nativeDialogs)
   booted = []
   if (calls.length) throw new Error('native dialog used: ' + calls.join(', '))
 }
 
-export function boot({ data = {}, routes = {}, prompt } = {}) {
+export function boot({ data = {}, routes = {}, url = site + '/wp-admin/admin.php?page=migrateplus', setup } = {}) {
   // The page as MigratePlus_Admin::render_shell() prints it.
   const html = '<div class="wrap migrateplus-wrap"><h1 class="wp-heading-inline">Import Content</h1><div id="migrateplus-app"><p>Loading…</p></div></div>'
-  const { window } = new JSDOM(html, {
-    url: site + '/wp-admin/admin.php?page=migrateplus',
-    runScripts: 'outside-only',
-  })
+  const { window } = new JSDOM(html, { url, runScripts: 'outside-only' })
   const doc = window.document
   const requests = []
+  const xhrs = []
   const nativeDialogs = []
-  const prompts = []
   const clock = fakeClock()
 
   // Before the fake timers go in: React's scheduler keeps the setTimeout it finds.
@@ -216,16 +225,12 @@ export function boot({ data = {}, routes = {}, prompt } = {}) {
   window.eval(reactDom)
   // What react-dom/client sets, so createRoot doesn't warn that it came from react-dom.
   window.ReactDOM.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED.usingClientEntryPoint = true
-  window.wp = { element: { ...window.React, ...window.ReactDOM } }
+  window.wp = { element: { ...window.React, ...window.ReactDOM }, i18n }
 
   window.MIGRATEPLUS_DATA = { ...bootstrap(), ...data }
   window.confirm = () => nativeDialogs.push('confirm')
   window.alert = () => nativeDialogs.push('alert')
-  window.prompt = (...args) => {
-    if (prompt === undefined) nativeDialogs.push('prompt')
-    prompts.push(args)
-    return prompt ?? null
-  }
+  window.prompt = () => nativeDialogs.push('prompt')
   window.setTimeout = clock.setTimeout
   window.clearTimeout = clock.clearTimeout
   window.scrollTo = () => {}
@@ -259,7 +264,8 @@ export function boot({ data = {}, routes = {}, prompt } = {}) {
       return { status: 200, text: () => Promise.resolve(encode(value)) }
     })
 
-  // Uploads go through XHR for progress events.
+  // Uploads go through XHR for progress events. The body is sent at once; the
+  // answer comes when the route's promise settles, unless abort() came first.
   window.XMLHttpRequest = class {
     listeners = {}
     upload = { listeners: {}, addEventListener: (t, fn) => (this.upload.listeners[t] = fn) }
@@ -268,16 +274,30 @@ export function boot({ data = {}, routes = {}, prompt } = {}) {
       this.listeners[t] = fn
     }
     send(body) {
-      const text = encode(answer(body, 'xhr'))
-      Promise.resolve().then(() => {
-        this.upload.listeners.progress?.({ lengthComputable: true, loaded: 1, total: 1 })
-        this.upload.listeners.load?.({})
-        this.status = 200
-        this.responseText = text
-        this.listeners.load({})
-      })
+      xhrs.push(this)
+      const value = answer(body, 'xhr')
+      Promise.resolve()
+        .then(() => {
+          this.upload.listeners.progress?.({ lengthComputable: true, loaded: 1, total: 1 })
+          this.upload.listeners.load?.({})
+          return value
+        })
+        .then(value => {
+          if (this.aborted) return
+          this.status = 200
+          this.responseText = encode(value)
+          this.listeners.load({})
+        })
+    }
+    abort() {
+      this.aborted = true
+      this.listeners.abort?.({})
     }
   }
+
+  // A test's chance to plant globals the plugin's other enqueued scripts would have left,
+  // such as the calendar library, before admin.js runs and reads them.
+  setup?.(window)
 
   window.eval(source + '\n//# sourceURL=assets/admin.js')
 
@@ -290,8 +310,8 @@ export function boot({ data = {}, routes = {}, prompt } = {}) {
     document: doc,
     root: doc.getElementById('migrateplus-app'),
     requests,
+    xhrs,
     nativeDialogs,
-    prompts,
     clock,
     sent: action => requests.filter(r => r.action === action),
     $: sel => doc.querySelector(sel),
@@ -313,6 +333,11 @@ export function boot({ data = {}, routes = {}, prompt } = {}) {
     type(input, value) {
       Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(input, value)
       event(input, 'input')
+    },
+    // A select changed by the user: React reads the new value from the change event.
+    choose(select, value) {
+      select.value = value
+      event(select, 'change')
     },
     submit: form => event(form, 'submit'),
     file: (name, content = '[]') => new window.File([content], name, { type: 'application/json' }),

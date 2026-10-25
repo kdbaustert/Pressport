@@ -101,6 +101,21 @@ describe('modal focus', () => {
     assert.equal(tab(env, dialog), true)
   })
 
+  it('closes on Escape after focus has left the dialog', async () => {
+    const env = await history()
+    env.document.activeElement.blur()
+    assert.equal(env.document.activeElement, env.document.body)
+    env.document.body.dispatchEvent(new env.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    assert.equal(env.modal.isOpen(), false)
+  })
+
+  it('brings Tab from the page behind back into the dialog', async () => {
+    const env = await history()
+    env.document.activeElement.blur()
+    assert.equal(tab(env, env.document.body), true)
+    assert.equal(env.document.activeElement, env.$('.migrateplus-modal-close'))
+  })
+
   it('announces the title', async () => {
     const env = await history()
     assert.equal(env.$('.migrateplus-modal-title').getAttribute('aria-live'), 'polite')

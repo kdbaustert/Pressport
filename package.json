@@ -2,11 +2,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test \"tests/js/**/*.test.js\""
+    "test": "node --test \"tests/js/**/*.test.js\"",
+    "vendor": "mkdir -p assets/vendor/vanilla-calendar-pro && cp node_modules/vanilla-calendar-pro/index.js assets/vendor/vanilla-calendar-pro/vanilla-calendar-pro.min.js && cp node_modules/vanilla-calendar-pro/styles/index.css assets/vendor/vanilla-calendar-pro/vanilla-calendar-pro.min.css && cp node_modules/vanilla-calendar-pro/LICENSE assets/vendor/vanilla-calendar-pro/LICENSE",
+    "postinstall": "npm run vendor"
   },
   "devDependencies": {
     "jsdom": "30.1.2",
     "react": "18.3.1",
     "react-dom": "18.3.1"
+  },
+  "dependencies": {
+    "vanilla-calendar-pro": "3.4.0"
   }
 }

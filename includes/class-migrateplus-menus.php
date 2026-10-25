@@ -21,7 +21,11 @@ defined( 'ABSPATH' ) || exit;
  * A menu is matched by slug (then by name, which WordPress keeps unique), so
  * importing the same file again fills the same menu. Items carry
  * _migrateplus_source_uid like posts do, so they are updated, not added twice.
- * Menus and items the import creates carry _migrateplus_job_id for rollback.
+ * An item made by hand in a menu that is already here, pointing at the same
+ * target, is taken over rather than doubled. Menus and items the import
+ * creates carry _migrateplus_job_id for rollback; an item an earlier import of
+ * the same source created that the file no longer has is removed, and items
+ * made by hand never are.
  */
 class MigratePlus_Menus {
 
@@ -206,6 +210,10 @@ class MigratePlus_Menus {
 				$results[] = self::import_menu( $menu, $job, $opts );
 			}
 		}
+		// Navigation Menu widgets imported before their menu existed are pointed at it now.
+		if ( empty( $opts['dry_run'] ) ) {
+			MigratePlus_Site::resolve_widget_menus( $job );
+		}
 		return $results;
 	}
 
@@ -295,6 +303,16 @@ class MigratePlus_Menus {
 			$counts['updated'],
 			$counts['skipped']
 		);
+		if ( $counts['removed'] ) {
+			$message .= ' ' . sprintf(
+				$dry
+					/* translators: %d: number of menu items */
+					? _n( 'Would remove %d item the file no longer has.', 'Would remove %d items the file no longer has.', $counts['removed'], 'migrateplus' )
+					/* translators: %d: number of menu items */
+					: _n( 'Removed %d item the file no longer has.', 'Removed %d items the file no longer has.', $counts['removed'], 'migrateplus' ),
+				$counts['removed']
+			);
+		}
 		if ( $dry && $menu_id ) {
 			// Matched by slug, then name: say which menu here the items would go into.
 			$message = sprintf(
@@ -314,27 +332,29 @@ class MigratePlus_Menus {
 	}
 
 	/**
-	 * Add or update a menu's items, parents before children.
+	 * Add or update a menu's items, parents before children, then remove the
+	 * items earlier imports of this source created that the file no longer has.
 	 *
 	 * @param int             $menu_id  Menu (0 in a dry run for a menu that does not exist yet).
 	 * @param array[]         $items    Items as exported.
 	 * @param MigratePlus_Job $job      Job.
 	 * @param array           $opts     Job options.
 	 * @param string[]        $warnings Warnings (by reference).
-	 * @return int[] { created, updated, skipped }
+	 * @return int[] { created, updated, skipped, removed }
 	 */
 	protected static function import_items( $menu_id, array $items, MigratePlus_Job $job, array $opts, array &$warnings ) {
-		$counts  = array_fill_keys( array( 'created', 'updated', 'skipped' ), 0 );
-		$local   = array(); // Item id on the old site => item id here.
-		$pending = array_values( array_filter( $items, 'is_array' ) );
+		$counts   = array_fill_keys( array( 'created', 'updated', 'skipped', 'removed' ), 0 );
+		$local    = array(); // Item id on the old site => item id here.
+		$pending  = array_values( array_filter( $items, 'is_array' ) );
+		$handmade = self::handmade_items( $menu_id );
 		usort(
 			$pending,
 			static function ( $a, $b ) {
 				return ( isset( $a['order'] ) ? (int) $a['order'] : 0 ) - ( isset( $b['order'] ) ? (int) $b['order'] : 0 );
 			}
 		);
-		$place = static function ( array $item, $parent_id ) use ( $menu_id, $job, $opts, &$warnings, &$counts, &$local ) {
-			$id = self::import_item( $menu_id, $item, $parent_id, $job, $opts, $warnings, $counts );
+		$place = static function ( array $item, $parent_id ) use ( $menu_id, $job, $opts, &$warnings, &$counts, &$local, &$handmade ) {
+			$id = self::import_item( $menu_id, $item, $parent_id, $job, $opts, $warnings, $counts, $handmade );
 			if ( $id && isset( $item['id'] ) ) {
 				$local[ (string) (int) $item['id'] ] = $id;
 			}
@@ -357,7 +377,83 @@ class MigratePlus_Menus {
 		foreach ( $pending as $item ) {
 			$place( $item, 0 ); // Parents that point at each other.
 		}
+		$counts['removed'] = self::remove_dropped_items( $menu_id, $items, $job, ! empty( $opts['dry_run'] ) );
 		return $counts;
+	}
+
+	/**
+	 * A menu's items that no import made, by what they point at, so an item in
+	 * the file can take one over instead of adding its double.
+	 *
+	 * @param int $menu_id Menu, or 0.
+	 * @return int[] target key (see target_key()) => item id.
+	 */
+	protected static function handmade_items( $menu_id ) {
+		$out = array();
+		foreach ( $menu_id ? self::menu_posts( $menu_id ) : array() as $post ) {
+			if ( '' !== (string) get_post_meta( $post->ID, '_migrateplus_source_uid', true ) ) {
+				continue;
+			}
+			$key = self::target_key(
+				(string) get_post_meta( $post->ID, '_menu_item_type', true ),
+				(string) get_post_meta( $post->ID, '_menu_item_object', true ),
+				(int) get_post_meta( $post->ID, '_menu_item_object_id', true ),
+				(string) get_post_meta( $post->ID, '_menu_item_url', true )
+			);
+			if ( ! isset( $out[ $key ] ) ) {
+				$out[ $key ] = (int) $post->ID;
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * What an item points at, as one string: the URL of a custom link, else its type, object and object id.
+	 *
+	 * @param string $type      Item type.
+	 * @param string $object    Object (post type, taxonomy, "custom").
+	 * @param int    $object_id Object id.
+	 * @param string $url       URL of a custom link.
+	 * @return string
+	 */
+	protected static function target_key( $type, $object, $object_id, $url ) {
+		return 'custom' === $type ? 'custom|' . untrailingslashit( $url ) : $type . '|' . $object . '|' . (int) $object_id;
+	}
+
+	/**
+	 * Delete the items an import of this job's source created in a menu that the
+	 * file no longer lists (deleted on the old site). Items without the job tag
+	 * (made by hand, or taken over) and items of another source are kept.
+	 *
+	 * @param int             $menu_id Menu, or 0.
+	 * @param array[]         $items   Items as exported.
+	 * @param MigratePlus_Job $job     Job.
+	 * @param bool            $dry     Count only.
+	 * @return int Items removed (or that would be).
+	 */
+	protected static function remove_dropped_items( $menu_id, array $items, MigratePlus_Job $job, $dry ) {
+		if ( ! $menu_id ) {
+			return 0;
+		}
+		$listed = array();
+		foreach ( $items as $item ) {
+			if ( is_array( $item ) && isset( $item['id'] ) && '' !== MigratePlus_Util::stringify( $item['id'] ) ) {
+				$listed[ MigratePlus_Importer::uid( $job, 'menu-item:' . MigratePlus_Util::stringify( $item['id'] ) ) ] = true;
+			}
+		}
+		$removed = 0;
+		foreach ( self::menu_posts( $menu_id ) as $post ) {
+			$uid       = (string) get_post_meta( $post->ID, '_migrateplus_source_uid', true );
+			$source_id = (string) get_post_meta( $post->ID, '_migrateplus_source_id', true );
+			// The uid is scoped to its source: recomputed under this job, it only matches for the same source.
+			if ( '' === $uid || isset( $listed[ $uid ] ) || '' === (string) get_post_meta( $post->ID, '_migrateplus_job_id', true ) || MigratePlus_Importer::uid( $job, $source_id ) !== $uid ) {
+				continue;
+			}
+			if ( $dry || wp_delete_post( $post->ID, true ) ) {
+				++$removed;
+			}
+		}
+		return $removed;
 	}
 
 	/**
@@ -386,9 +482,10 @@ class MigratePlus_Menus {
 	 * @param array           $opts      Job options.
 	 * @param string[]        $warnings  Warnings (by reference).
 	 * @param int[]           $counts    Counts (by reference).
+	 * @param int[]           $handmade  Items made by hand, from handmade_items(): one taken over leaves the list (by reference).
 	 * @return int The item here (in a dry run: 1 for an item that would be saved), or 0 when skipped.
 	 */
-	protected static function import_item( $menu_id, array $item, $parent_id, MigratePlus_Job $job, array $opts, array &$warnings, array &$counts ) {
+	protected static function import_item( $menu_id, array $item, $parent_id, MigratePlus_Job $job, array $opts, array &$warnings, array &$counts, array &$handmade ) {
 		$dry    = ! empty( $opts['dry_run'] );
 		$read   = static function ( $key ) use ( $item ) {
 			return isset( $item[ $key ] ) ? MigratePlus_Util::stringify( $item[ $key ] ) : '';
@@ -402,6 +499,12 @@ class MigratePlus_Menus {
 		}
 		$uid      = '' !== $read( 'id' ) ? MigratePlus_Importer::uid( $job, 'menu-item:' . $read( 'id' ) ) : '';
 		$existing = $uid ? MigratePlus_Importer::find_by_uid( $uid, 'nav_menu_item' ) : 0;
+		$key      = self::target_key( $target['type'], $target['object'], $target['object_id'], $target['url'] );
+		if ( ! $existing && isset( $handmade[ $key ] ) ) {
+			// The same link made by hand in the menu here: fill that one rather than adding a second.
+			$existing = $handmade[ $key ];
+			unset( $handmade[ $key ] );
+		}
 		if ( $existing && 'skip' === $opts['duplicate'] ) {
 			++$counts['skipped'];
 			return $existing;
@@ -479,7 +582,7 @@ class MigratePlus_Menus {
 				return $out;
 
 			case 'taxonomy':
-				$id = taxonomy_exists( $object ) ? self::find_term( $ref, $object ) : 0;
+				$id = taxonomy_exists( $object ) ? self::find_term( $ref, $object, $job ) : 0;
 				if ( ! $id ) {
 					/* translators: 1: item title, 2: taxonomy */
 					return new WP_Error( 'migrateplus_menu_target', sprintf( __( 'Menu item "%1$s" was skipped: its %2$s term is not on this site.', 'migrateplus' ), $title, $object ) );
@@ -542,22 +645,32 @@ class MigratePlus_Menus {
 	}
 
 	/**
-	 * The term an item points at: by its "Parent > Child" path as terms are imported, then by slug.
+	 * The term an item points at, found as the terms section finds a term: by the
+	 * uid it was imported with, then its slug, then its exact "Parent > Child" path.
 	 *
-	 * @param array  $ref      { id, slug, name, path, taxonomy }.
-	 * @param string $taxonomy Taxonomy.
+	 * @param array           $ref      { id, slug, name, path, taxonomy }.
+	 * @param string          $taxonomy Taxonomy.
+	 * @param MigratePlus_Job $job      Job.
 	 * @return int
 	 */
-	protected static function find_term( array $ref, $taxonomy ) {
-		$path = isset( $ref['path'] ) ? MigratePlus_Util::stringify( $ref['path'] ) : ( isset( $ref['name'] ) ? MigratePlus_Util::stringify( $ref['name'] ) : '' );
-		if ( '' !== $path ) {
-			$ids = MigratePlus_Importer::resolve_terms( $taxonomy, array( $path ), false );
-			if ( $ids ) {
-				return (int) $ids[0];
-			}
-		}
-		$term = ! empty( $ref['slug'] ) ? get_term_by( 'slug', sanitize_title( MigratePlus_Util::stringify( $ref['slug'] ) ), $taxonomy ) : false;
-		return $term instanceof WP_Term ? (int) $term->term_id : 0;
+	protected static function find_term( array $ref, $taxonomy, MigratePlus_Job $job ) {
+		$name = isset( $ref['name'] ) ? MigratePlus_Util::stringify( $ref['name'] ) : '';
+		$uid  = ! empty( $ref['id'] ) ? MigratePlus_Terms::uid(
+			$job,
+			array(
+				'taxonomy' => $taxonomy,
+				'id'       => $ref['id'],
+			)
+		) : '';
+		return MigratePlus_Terms::find_term(
+			array(
+				'taxonomy' => $taxonomy,
+				'slug'     => isset( $ref['slug'] ) ? $ref['slug'] : '',
+				'path'     => isset( $ref['path'] ) ? MigratePlus_Util::stringify( $ref['path'] ) : $name,
+				'name'     => $name,
+			),
+			$uid
+		);
 	}
 
 	/**

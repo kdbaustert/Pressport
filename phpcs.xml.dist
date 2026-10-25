@@ -39,6 +39,13 @@
 		</properties>
 	</rule>
 
+	<!-- WooCommerce's capability, checked before touching orders. -->
+	<rule ref="WordPress.WP.Capabilities">
+		<properties>
+			<property name="custom_capabilities" type="array" value="manage_woocommerce"/>
+		</properties>
+	</rule>
+
 	<rule ref="WordPress.NamingConventions.PrefixAllGlobals">
 		<properties>
 			<property name="prefixes" type="array" value="migrateplus,MigratePlus"/>

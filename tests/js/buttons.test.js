@@ -1,6 +1,6 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { boot, job, noNativeDialogs } from './helpers.js'
+import { boot, job, offline, noNativeDialogs } from './helpers.js'
 
 afterEach(noNativeDialogs)
 
@@ -92,5 +92,37 @@ describe('Past replacements', () => {
     await env.flush()
     assert.equal(env.byText('.migrateplus-replace-runs button', 'Roll back'), undefined)
     assert.equal(env.$('.migrateplus-replace-runs .migrateplus-undo-note').textContent, note)
+  })
+})
+
+describe('Find and replace', () => {
+  const replaceScreen = routes =>
+    boot({
+      data: { view: 'replace', tables: [{ name: 'wp_posts', rows: 1200, size: 4194304 }] },
+      routes: { replace_history: { runs: [] }, replace_start: { id: 'run1' }, ...routes },
+    })
+  const finished = over => ({ complete: true, dry_run: 1, tables: [{ name: 'wp_posts', rows: 2, changes: 3, samples: [] }], ...over })
+  const dryRun = async env => {
+    await env.flush()
+    env.type(env.$('#migrateplus-replace-search'), 'http://old.test')
+    env.submit(env.$('form.migrateplus-replace'))
+    await env.flush()
+  }
+
+  it('does not offer to roll back a dry run that stopped', async () => {
+    const env = replaceScreen({ replace_run: finished({ error: 'The table wp_posts went away.' }) })
+    await dryRun(env)
+    assert.equal(env.modal.title(), 'Find and replace stopped')
+    assert.equal(env.modal.message(), 'The table wp_posts went away.')
+  })
+
+  it('retries a batch after a network failure', async () => {
+    const env = replaceScreen({ replace_run: (fields, calls) => (calls ? finished() : offline) })
+    await dryRun(env)
+    assert.equal(env.sent('replace_run').length, 1)
+    env.clock.tick(2000)
+    await env.flush()
+    assert.equal(env.sent('replace_run').length, 2)
+    assert.equal(env.modal.title(), 'Dry run finished')
   })
 })

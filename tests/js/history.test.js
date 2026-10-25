@@ -163,6 +163,28 @@ describe('History', () => {
     assert.deepEqual(names(imports(env)), ['books.json', 'reviews.json'])
   })
 
+  it('keeps the other ticked rows when one row is deleted', async () => {
+    const env = await history({ delete: {} })
+    const [books, , reviews] = boxes(imports(env))
+    env.check(books)
+    env.check(reviews)
+    env.click(imports(env).querySelectorAll('tbody .migrateplus-link-danger')[1])
+    env.click(env.modal.primary())
+    await env.flush()
+    assert.equal(bulk(imports(env)).textContent, 'Delete 2 entries')
+  })
+
+  it('offers Roll back for an import left running, in History and on its run screen', async () => {
+    const left = job({ status: 'running', stats: { processed: 5, created: 5 }, created_total: 5 })
+    const env = await history({ jobs: { jobs: [left] } })
+    assert.ok(env.byText('tbody button', 'Roll back'))
+
+    const run = boot({ data: { openJob: 'books' }, routes: { job: { job: left } } })
+    await run.flush()
+    assert.equal(run.byText('button', 'Resume').disabled, false)
+    assert.ok(run.byText('button', 'Roll back this import'))
+  })
+
   it('shows a file name with markup in it as text', async () => {
     const hostile = '<img src=x onerror=alert(1)>'
     const env = await history({ jobs: { jobs: [job({ settings: { file_name: hostile } })] } })

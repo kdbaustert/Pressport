@@ -189,6 +189,110 @@ class Test_Media extends WP_UnitTestCase {
 		$this->assertCount( 1, $this->requests );
 	}
 
+	public function test_block_ids_content_images_mapped_are_not_mapped_again_when_blocks_relink() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$job  = MigratePlus_Job::create( 'json', array( 'migrateplus_site' => 'http://old.test' ) );
+		$hero = MigratePlus_Media::sideload( 'http://old.test/uploads/hero.png', 0 );
+		update_post_meta( $hero, '_migrateplus_source_uid', MigratePlus_Importer::uid( $job, '12' ) );
+		// The old site's attachment numbered like the hero's copy here: mapping that number again would land on it.
+		$decoy = MigratePlus_Media::sideload( 'http://old.test/uploads/decoy.png', 0 );
+		update_post_meta( $decoy, '_migrateplus_source_uid', MigratePlus_Importer::uid( $job, (string) $hero ) );
+		$post = self::factory()->post->create();
+		$html = '<!-- wp:image {"id":12} --><figure class="wp-block-image"><img src="http://old.test/uploads/hero.png" class="wp-image-12"/></figure><!-- /wp:image -->'
+			. '<!-- wp:block {"ref":99} /-->';
+
+		$out = MigratePlus_Media::import_content_images( $html, $post, 'http://old.test', $job->data['id'] );
+		wp_update_post(
+			wp_slash(
+				array(
+					'ID'           => $post,
+					'post_content' => $out,
+				)
+			)
+		);
+		MigratePlus_Blocks::relink( $post, $job );
+		$image = '<!-- wp:image {"id":' . $hero . '} --><figure class="wp-block-image"><img src="' . wp_get_attachment_url( $hero ) . '" class="wp-image-' . $hero . '"/></figure><!-- /wp:image -->';
+		$this->assertSame( $image . '<!-- wp:block {"ref":99} /-->', get_post( $post )->post_content );
+
+		// The pattern arrives: the post is relinked from what the import saved, and the image keeps its id.
+		$pattern = self::factory()->post->create( array( 'post_type' => 'wp_block' ) );
+		update_post_meta( $pattern, '_migrateplus_source_uid', MigratePlus_Importer::uid( $job, '99' ) );
+		MigratePlus_Blocks::link_pending( $pattern, '99', $job );
+		$this->assertSame( $image . '<!-- wp:block {"ref":' . $pattern . '} /-->', get_post( $post )->post_content );
+		$this->assertSame( array(), get_post_meta( $post, MigratePlus_Blocks::PENDING_META, false ) );
+		$this->assertSame( '', get_post_meta( $post, MigratePlus_Blocks::SOURCE_META, true ) );
+		$job->delete();
+	}
+
+	public function test_content_images_come_only_from_the_old_site_and_uploads_folders() {
+		$html = '<img src="http://old.test/uploads/mug.png">'
+			. '<img src="http://cdn.test/wp-content/uploads/2024/05/cup.png">'
+			. '<img src="http://tracker.test/pixel.png">';
+
+		$out = MigratePlus_Media::import_content_images( $html, 0, 'http://old.test', '' );
+		$this->assertSame( array( 'http://old.test/uploads/mug.png', 'http://cdn.test/wp-content/uploads/2024/05/cup.png' ), array_keys( $this->requests ) );
+		$this->assertStringContainsString( '<img src="http://tracker.test/pixel.png">', $out );
+
+		add_filter(
+			'migrateplus_content_image_hosts',
+			static function ( $hosts ) {
+				$hosts[] = 'tracker.test';
+				return $hosts;
+			}
+		);
+		MigratePlus_Media::import_content_images( $html, 0, 'http://old.test', '' );
+		$this->assertArrayHasKey( 'http://tracker.test/pixel.png', $this->requests );
+	}
+
+	public function test_cover_backgrounds_videos_and_files_point_at_the_local_copies() {
+		$html = '<!-- wp:cover {"url":"http://old.test/uploads/bg.png","id":21,"hasParallax":true} --><div class="wp-block-cover has-parallax" style="background-image:url(http://old.test/uploads/bg.png)"></div><!-- /wp:cover -->'
+			. '<!-- wp:video {"id":22} --><figure class="wp-block-video"><video controls src="http://old.test/uploads/clip.png"></video></figure><!-- /wp:video -->'
+			. '<!-- wp:file {"id":23,"href":"http://old.test/uploads/doc.png"} --><div class="wp-block-file"><a href="http://old.test/uploads/doc.png">doc</a></div><!-- /wp:file -->';
+
+		$out  = MigratePlus_Media::import_content_images( $html, 0, 'http://old.test', '' );
+		$bg   = MigratePlus_Media::find_existing( 'http://old.test/uploads/bg.png' );
+		$clip = MigratePlus_Media::find_existing( 'http://old.test/uploads/clip.png' );
+		$doc  = MigratePlus_Media::find_existing( 'http://old.test/uploads/doc.png' );
+		$this->assertSame(
+			'<!-- wp:cover {"url":"' . wp_get_attachment_url( $bg ) . '","id":' . $bg . ',"hasParallax":true} --><div class="wp-block-cover has-parallax" style="background-image:url(' . wp_get_attachment_url( $bg ) . ')"></div><!-- /wp:cover -->'
+				. '<!-- wp:video {"id":' . $clip . '} --><figure class="wp-block-video"><video controls src="' . wp_get_attachment_url( $clip ) . '"></video></figure><!-- /wp:video -->'
+				. '<!-- wp:file {"id":' . $doc . ',"href":"' . wp_get_attachment_url( $doc ) . '"} --><div class="wp-block-file"><a href="' . wp_get_attachment_url( $doc ) . '">doc</a></div><!-- /wp:file -->',
+			$out
+		);
+	}
+
+	public function test_a_crash_while_resizing_leaves_an_attachment_rollback_can_find() {
+		add_filter(
+			'wp_generate_attachment_metadata',
+			static function () {
+				throw new RuntimeException( 'Out of memory' );
+			}
+		);
+		try {
+			MigratePlus_Media::sideload( 'http://old.test/uploads/huge.png', 0, '', '', 'abc123' );
+			$this->fail( 'The resize did not throw.' );
+		} catch ( RuntimeException $e ) {
+			$this->assertSame( 'Out of memory', $e->getMessage() );
+		}
+		$this->assertCount(
+			1,
+			get_posts(
+				array(
+					'post_type'   => 'attachment',
+					'post_status' => 'any',
+					'meta_key'    => '_migrateplus_job_id', // phpcs:ignore WordPress.DB.SlowDBQuery
+					'meta_value'  => 'abc123', // phpcs:ignore WordPress.DB.SlowDBQuery
+				)
+			)
+		);
+	}
+
+	public function test_replacing_from_a_url_without_an_extension_names_the_file_by_its_type() {
+		$id = MigratePlus_Media::sideload( 'http://old.test/uploads/mug.png', 0 );
+		$this->assertTrue( MigratePlus_Media::replace_file( $id, 'http://old.test/download?id=5' ) );
+		$this->assertSame( 'image/png', get_post_mime_type( $id ) );
+	}
+
 	public function test_replacing_a_scaled_image_keeps_its_scaled_url() {
 		$big = imagecreatetruecolor( 2600, 20 );
 		ob_start();
@@ -407,5 +511,67 @@ class Test_Media extends WP_UnitTestCase {
 		$this->assertSame( array( MigratePlus_Importer::uid( $export['job'], 99 ) ), $export['pending'] );
 		// Data from elsewhere still matches by title.
 		$this->assertSame( $local, MigratePlus_ACF::resolve_post( $ref, array( 'page' ), new MigratePlus_Job( array( 'source' => 'json' ) ) ) );
+	}
+	public function test_acf_number_leaves_a_comma_alone() {
+		$ctx   = array(
+			'post_id'  => 0,
+			'warnings' => array(),
+		);
+		$field = array(
+			'type'  => 'number',
+			'label' => 'Rating',
+		);
+		$this->assertSame( '', MigratePlus_ACF::convert( $field, '1,5', $ctx ) );
+		$this->assertSame( array( 'ACF "Rating": "1,5" is not a number, so it was left empty.' ), $ctx['warnings'] );
+		$this->assertSame( 1500, MigratePlus_ACF::convert( $field, '1 500', $ctx ) );
+		$this->assertSame( 2.5, MigratePlus_ACF::convert( $field, '2.5', $ctx ) );
+	}
+
+	public function test_acf_links_urls_and_editor_text_point_at_this_site_when_links_are_rewritten() {
+		$ctx = array(
+			'post_id'  => 0,
+			'base'     => 'http://old.test',
+			'rewrite'  => true,
+			'warnings' => array(),
+		);
+		$this->assertSame(
+			array(
+				'url'    => home_url( '/contact/' ),
+				'title'  => 'Contact',
+				'target' => '',
+			),
+			MigratePlus_ACF::convert(
+				array( 'type' => 'link' ),
+				array(
+					'url'   => 'http://old.test/contact/',
+					'title' => 'Contact',
+				),
+				$ctx
+			)
+		);
+		$this->assertSame( home_url( '/shop/' ), MigratePlus_ACF::convert( array( 'type' => 'url' ), 'http://old.test/shop/', $ctx ) );
+		$this->assertSame( '<a href="' . home_url( '/about/' ) . '">About</a> <img src="http://old.test/wp-content/uploads/a.png">', MigratePlus_ACF::convert( array( 'type' => 'wysiwyg' ), '<a href="http://old.test/about/">About</a> <img src="http://old.test/wp-content/uploads/a.png">', $ctx ) );
+
+		$ctx['rewrite'] = false;
+		$this->assertSame( 'http://old.test/shop/', MigratePlus_ACF::convert( array( 'type' => 'url' ), 'http://old.test/shop/', $ctx ) );
+	}
+
+	public function test_acf_references_never_resolve_to_a_menu_item_or_revision() {
+		$item     = self::factory()->post->create(
+			array(
+				'post_type'  => 'nav_menu_item',
+				'post_title' => 'Lonely',
+			)
+		);
+		$revision = self::factory()->post->create(
+			array(
+				'post_type'  => 'revision',
+				'post_title' => 'Draft words',
+			)
+		);
+		$this->assertSame( 0, MigratePlus_ACF::resolve_post( 'Lonely', array() ) );
+		$this->assertSame( 0, MigratePlus_ACF::resolve_post( 'Draft words', array() ) );
+		$this->assertSame( 0, MigratePlus_ACF::resolve_post( (string) $item, array() ) );
+		$this->assertSame( 0, MigratePlus_ACF::resolve_post( (string) $revision, array() ) );
 	}
 }

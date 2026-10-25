@@ -9,7 +9,8 @@ defined( 'ABSPATH' ) || exit;
 
 /**
  * Imports an array of objects from an uploaded JSON file (or one compressed as .json.gz), normally a MigratePlus export.
- * The records are cached locally so batches are consistent.
+ * The records are cached locally so batches are consistent: as JSON Lines, one record per line,
+ * behind an index of where each line starts, so a batch reads only its own lines (see fetch()).
  */
 class MigratePlus_Source_JSON extends MigratePlus_Source_Base {
 
@@ -97,7 +98,7 @@ class MigratePlus_Source_JSON extends MigratePlus_Source_Base {
 	}
 
 	/**
-	 * The largest JSON a .json.gz upload may expand to: an eighth of the memory limit.
+	 * The largest JSON a file may hold, or a .json.gz upload expand to: an eighth of the memory limit.
 	 * prepare() holds the file as a string, the decoded records and their encoded copy
 	 * at once, several times the file's size, so larger JSON would run out of memory
 	 * part way; stopping first also keeps a gzip bomb from filling the disk. 1 GB when
@@ -183,6 +184,9 @@ class MigratePlus_Source_JSON extends MigratePlus_Source_Base {
 			}
 			$doc = json_decode( (string) file_get_contents( $plain ), true ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 			wp_delete_file( $plain );
+		} elseif ( filesize( $file ) > self::max_json_size() ) {
+			/* translators: %s: size limit */
+			return new WP_Error( 'migrateplus_json_size', sprintf( __( 'This file holds more than %s of JSON, more than this server can import. Use a smaller export, or raise PHP\'s memory limit.', 'migrateplus' ), size_format( self::max_json_size() ) ) );
 		} else {
 			$doc = json_decode( (string) file_get_contents( $file ), true ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 		}
@@ -228,43 +232,50 @@ class MigratePlus_Source_JSON extends MigratePlus_Source_Base {
 		}
 
 		$cache = MigratePlus_Util::ensure_storage_dir() . 'json-' . wp_generate_password( 12, false ) . '.json';
-		$json  = wp_json_encode( $records );
-		if ( false === $json ) {
-			// Values PHP cannot write back out, such as a number too large to hold (1e400).
-			return new WP_Error( 'migrateplus_json', __( 'This JSON file holds values that cannot be read: ', 'migrateplus' ) . json_last_error_msg() );
+		$lines = self::encode_lines( $records );
+		if ( is_wp_error( $lines ) ) {
+			return $lines;
 		}
-		if ( false === file_put_contents( $cache, $json ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
+		if ( false === file_put_contents( $cache, $lines ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
 			return new WP_Error( 'migrateplus_json_cache', __( 'Could not write the import cache to the uploads folder.', 'migrateplus' ) );
 		}
+		unset( $lines );
 
 		$this->settings['cache_file'] = $cache;
 		$this->settings['total']      = count( $records );
-		// Side sections (terms, users, ACF definitions and options, site settings, menus, orders) are imported apart
+		// Side sections (ACF definitions, terms, ACF options, site settings, menus, orders) are imported apart
 		// from the items, each from a cache of its own. "Run again" prepares a refreshed file
 		// over the last run's settings: a section of the previous file must not carry over to
 		// one without it.
 		$old_sides = array();
 		$written   = array();
 		foreach ( MigratePlus_Runner::side_keys() as $key ) {
-			$data                     = $export && ! empty( $doc[ $key ] ) && is_array( $doc[ $key ] ) ? $doc[ $key ] : array();
-			$data                     = isset( $data[0] ) || array() === $data ? array_values( array_filter( $data, 'is_array' ) ) : array( $data ); // "site" is one object; the lists hold one record each.
+			$data                        = $export && ! empty( $doc[ $key ] ) && is_array( $doc[ $key ] ) ? $doc[ $key ] : array();
+			$data                        = isset( $data[0] ) || array() === $data ? array_values( array_filter( $data, 'is_array' ) ) : array( $data ); // "site" is one object; the lists hold one record each.
 			$old_sides[ $key . '_file' ] = (string) $this->get( $key . '_file' );
 			unset( $this->settings[ $key . '_file' ], $this->settings[ 'migrateplus_' . $key ] );
 			if ( ! $data ) {
 				continue;
 			}
 			$side_file = substr( $cache, 0, -5 ) . '-' . str_replace( '_', '-', $key ) . '.json';
-			if ( false === file_put_contents( $side_file, wp_json_encode( $data ) ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
+			$side_json = wp_json_encode( $data );
+			if ( false === $side_json || false === file_put_contents( $side_file, $side_json ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
+				$error = false === $side_json
+					// Values PHP cannot write back out, as for the records above.
+					? new WP_Error( 'migrateplus_json', __( 'This JSON file holds values that cannot be read: ', 'migrateplus' ) . json_last_error_msg() )
+					: new WP_Error( 'migrateplus_json_cache', __( 'Could not write the import cache to the uploads folder.', 'migrateplus' ) );
 				// No job will be made to delete the records cache, or what part of these was written.
 				wp_delete_file( $cache );
 				foreach ( array_merge( array( $side_file ), $written ) as $f ) {
-					wp_delete_file( $f );
+					if ( file_exists( $f ) ) {
+						wp_delete_file( $f );
+					}
 				}
-				return new WP_Error( 'migrateplus_json_cache', __( 'Could not write the import cache to the uploads folder.', 'migrateplus' ) );
+				return $error;
 			}
-			$written[]                                = $side_file;
-			$this->settings[ $key . '_file' ]         = $side_file;
-			$this->settings[ 'migrateplus_' . $key ]  = count( $data );
+			$written[]                               = $side_file;
+			$this->settings[ $key . '_file' ]        = $side_file;
+			$this->settings[ 'migrateplus_' . $key ] = count( $data );
 		}
 		// Only now that this file's caches are written: until then a failed refresh can fall back to the last copy.
 		foreach ( $old_sides as $old ) {
@@ -282,26 +293,90 @@ class MigratePlus_Source_JSON extends MigratePlus_Source_Base {
 		return $this->settings;
 	}
 
+	/**
+	 * The records cache: how many records there are (8 bytes), where each one's line starts
+	 * (8 bytes each, from the start of the file), then the records as JSON Lines.
+	 *
+	 * @param array[] $records Records.
+	 * @return string|WP_Error
+	 */
+	protected static function encode_lines( array $records ) {
+		$lines = array();
+		foreach ( $records as $record ) {
+			$json = wp_json_encode( $record );
+			if ( false === $json ) {
+				// Values PHP cannot write back out, such as a number too large to hold (1e400).
+				return new WP_Error( 'migrateplus_json', __( 'This JSON file holds values that cannot be read: ', 'migrateplus' ) . json_last_error_msg() );
+			}
+			$lines[] = $json . "\n";
+		}
+		$index = pack( 'J', count( $lines ) );
+		$at    = 8 + 8 * count( $lines );
+		foreach ( $lines as $line ) {
+			$index .= pack( 'J', $at );
+			$at    += strlen( $line );
+		}
+		return $index . implode( '', $lines );
+	}
+
 	/** @inheritDoc */
 	public function fetch( $cursor, $limit ) {
 		$cache = (string) $this->get( 'cache_file' );
 		if ( ! $cache || ! is_readable( $cache ) ) {
 			return new WP_Error( 'migrateplus_json_cache', __( 'Cached feed is missing. Start a new import.', 'migrateplus' ) );
 		}
-		// Decoded once per request: duplicate checks call this every 200 records.
-		static $decoded = array();
-		$key            = $cache . ':' . filemtime( $cache );
-		if ( ! isset( $decoded[ $key ] ) ) {
-			$decoded = array( $key => json_decode( (string) file_get_contents( $cache ), true ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$offset = null === $cursor ? 0 : max( 0, (int) $cursor );
+		$handle = fopen( $cache, 'rb' ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$head   = $handle ? (string) fread( $handle, 8 ) : ''; // phpcs:ignore WordPress.WP.AlternativeFunctions
+		if ( '[' === substr( $head, 0, 1 ) ) {
+			// A cache written before the index, by a job started on an older version: read whole.
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+			return self::fetch_from_list( json_decode( (string) file_get_contents( $cache ), true ), $offset, $limit ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 		}
-		$all = $decoded[ $key ];
+		$total   = 8 === strlen( $head ) ? (int) unpack( 'J', $head )[1] : -1;
+		$records = array();
+		if ( $total >= 0 && $offset < $total && fseek( $handle, 8 + 8 * $offset ) === 0 ) {
+			$start = unpack( 'J', (string) fread( $handle, 8 ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+			$want  = min( (int) $limit, $total - $offset );
+			if ( $start && fseek( $handle, (int) $start[1] ) === 0 ) {
+				for ( $i = 0; $i < $want; $i++ ) {
+					$record = json_decode( (string) fgets( $handle ), true );
+					if ( ! is_array( $record ) ) {
+						$total = -1;
+						break;
+					}
+					$records[] = $record;
+				}
+			}
+		}
+		if ( $handle ) {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		}
+		if ( $total < 0 || ( $offset < $total && ! $records ) ) {
+			return new WP_Error( 'migrateplus_json_cache', __( 'Cached feed is unreadable. Start a new import.', 'migrateplus' ) );
+		}
+		$next = $offset + count( $records );
+		return array(
+			'records' => array_map( array( 'MigratePlus_Util', 'flatten' ), $records ),
+			'next'    => $next < $total ? $next : null,
+			'total'   => $total,
+		);
+	}
+
+	/**
+	 * A batch from a records cache written whole, as a JSON list.
+	 *
+	 * @param mixed $all    The decoded cache.
+	 * @param int   $offset First record.
+	 * @param int   $limit  Batch size.
+	 * @return array|WP_Error As fetch().
+	 */
+	protected static function fetch_from_list( $all, $offset, $limit ) {
 		if ( ! is_array( $all ) ) {
 			return new WP_Error( 'migrateplus_json_cache', __( 'Cached feed is unreadable. Start a new import.', 'migrateplus' ) );
 		}
-		$offset = null === $cursor ? 0 : (int) $cursor;
-		$slice  = array_slice( $all, $offset, $limit );
-		$next   = $offset + count( $slice );
-
+		$slice = array_slice( $all, $offset, $limit );
+		$next  = $offset + count( $slice );
 		return array(
 			'records' => array_map( array( 'MigratePlus_Util', 'flatten' ), $slice ),
 			'next'    => $next < count( $all ) ? $next : null,

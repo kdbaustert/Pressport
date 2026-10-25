@@ -252,4 +252,219 @@ class Test_ACF_Sections extends WP_UnitTestCase {
 		$this->assertSame( 'New footer', get_field( 'field_mp_footer', 'option' ) );
 		$job->delete();
 	}
+	public function test_options_rollback_removes_a_value_never_saved_and_mixed_case_pages_match() {
+		if ( ! function_exists( 'acf_add_options_page' ) ) {
+			$this->markTestSkipped( 'Options pages need ACF PRO.' );
+		}
+		acf_add_options_page(
+			array(
+				'page_title' => 'Brand',
+				'menu_slug'  => 'Brand-Options',
+				'post_id'    => 'brand',
+			)
+		);
+		acf_import_field_group(
+			array(
+				'key'      => 'group_mp_brand',
+				'title'    => 'Brand',
+				'fields'   => array(
+					array(
+						'key'           => 'field_mp_tagline',
+						'label'         => 'Tagline',
+						'name'          => 'tagline',
+						'type'          => 'text',
+						'default_value' => 'Default tagline',
+					),
+				),
+				'location' => array(
+					array(
+						array(
+							'param'    => 'options_page',
+							'operator' => '==',
+							'value'    => 'Brand-Options',
+						),
+					),
+				),
+			)
+		);
+		// Nothing saved: the default is not a value to export.
+		$this->assertSame( array(), MigratePlus_ACF_Options::export( array() ) );
+
+		$file = $this->json_file(
+			array(
+				'migrateplus' => array(
+					'version' => '1',
+					'site'    => 'http://old.test',
+					'mapping' => array( 'fields' => array() ),
+				),
+				'items'       => array(),
+				'acf_options' => array(
+					array(
+						'page'    => 'Brand-Options',
+						'title'   => 'Brand',
+						'post_id' => 'brand',
+						'fields'  => array( 'tagline' => 'Imported' ),
+					),
+				),
+			)
+		);
+		$job  = $this->import_file( $file );
+		wp_delete_file( $file );
+		$this->assertSame( 'Imported', get_field( 'field_mp_tagline', 'brand' ) );
+		do {
+			$result = MigratePlus_Runner::rollback_batch( $job );
+		} while ( ! $result['done'] );
+		$this->assertNull( acf_get_metadata_by_field( 'brand', acf_get_field( 'field_mp_tagline' ) ) );
+		$job->delete();
+	}
+
+	/**
+	 * Fields that point at posts, on posts.
+	 */
+	protected function reference_group() {
+		acf_import_field_group(
+			array(
+				'key'      => 'group_mp_refs',
+				'title'    => 'References',
+				'fields'   => array(
+					array(
+						'key'       => 'field_mp_link',
+						'label'     => 'Link',
+						'name'      => 'link',
+						'type'      => 'page_link',
+						'post_type' => array( 'page' ),
+					),
+					array(
+						'key'       => 'field_mp_related',
+						'label'     => 'Related',
+						'name'      => 'related',
+						'type'      => 'relationship',
+						'post_type' => array( 'page' ),
+					),
+					array(
+						'key'        => 'field_mp_feature',
+						'label'      => 'Feature',
+						'name'       => 'feature',
+						'type'       => 'group',
+						'sub_fields' => array(
+							array(
+								'key'       => 'field_mp_feature_posts',
+								'label'     => 'Posts',
+								'name'      => 'posts',
+								'type'      => 'relationship',
+								'post_type' => array( 'page' ),
+							),
+						),
+					),
+				),
+				'location' => array(
+					array(
+						array(
+							'param'    => 'post_type',
+							'operator' => '==',
+							'value'    => 'post',
+						),
+					),
+				),
+			)
+		);
+	}
+
+	/**
+	 * A page imported from the old site's post with this id.
+	 */
+	protected function arrive( MigratePlus_Job $job, $source_id ) {
+		$page = self::factory()->post->create( array( 'post_type' => 'page' ) );
+		update_post_meta( $page, '_migrateplus_source_uid', MigratePlus_Importer::uid( $job, $source_id ) );
+		MigratePlus_ACF::link_pending( $page, MigratePlus_Importer::uid( $job, $source_id ) );
+		return $page;
+	}
+
+	protected function import_references( array $record, MigratePlus_Job $job ) {
+		$this->reference_group();
+		$post     = self::factory()->post->create();
+		$warnings = array();
+		MigratePlus_ACF::import(
+			$post,
+			$record,
+			array_combine( array_map( 'strval', array_keys( $record ) ), array_keys( $record ) ),
+			$job,
+			array(),
+			'http://old.test',
+			$warnings
+		);
+		$this->assertSame( array(), $warnings );
+		return $post;
+	}
+
+	protected function export_job() {
+		return MigratePlus_Job::create(
+			'json',
+			array(
+				'migrateplus_site'    => 'http://old.test',
+				'migrateplus_mapping' => array(),
+			)
+		);
+	}
+
+	public function test_a_page_link_to_a_post_later_in_the_file_is_linked_when_it_arrives() {
+		$job  = $this->export_job();
+		$post = $this->import_references(
+			array(
+				'field_mp_link' => array(
+					'id'    => 50,
+					'slug'  => 'later',
+					'title' => 'Later',
+				),
+			),
+			$job
+		);
+		$this->assertSame( array( 'field_mp_link|' . MigratePlus_Importer::uid( $job, 50 ) ), get_post_meta( $post, MigratePlus_ACF::PENDING_META, false ) );
+
+		$page = $this->arrive( $job, 50 );
+		$this->assertSame( $page, (int) get_field( 'field_mp_link', $post, false ) );
+		$this->assertSame( array(), get_post_meta( $post, MigratePlus_ACF::PENDING_META, false ) );
+		$job->delete();
+	}
+
+	public function test_relationship_posts_that_arrive_late_take_their_place_in_the_files_order() {
+		$job   = $this->export_job();
+		$there = self::factory()->post->create( array( 'post_type' => 'page' ) );
+		update_post_meta( $there, '_migrateplus_source_uid', MigratePlus_Importer::uid( $job, 62 ) );
+		$post = $this->import_references(
+			array(
+				'field_mp_related' => array(
+					array( 'id' => 61 ),
+					array( 'id' => 62 ),
+					array( 'id' => 63 ),
+				),
+			),
+			$job
+		);
+		$this->assertSame( array( $there ), array_map( 'intval', get_field( 'field_mp_related', $post, false ) ) );
+
+		// The last one first, then the first.
+		$last  = $this->arrive( $job, 63 );
+		$first = $this->arrive( $job, 61 );
+		$this->assertSame( array( $first, $there, $last ), array_map( 'intval', get_field( 'field_mp_related', $post, false ) ) );
+		$job->delete();
+	}
+
+	public function test_a_reference_inside_a_group_waits_for_its_post() {
+		$job  = $this->export_job();
+		$post = $this->import_references(
+			array(
+				'field_mp_feature' => array(
+					'posts' => array( array( 'id' => 71 ) ),
+				),
+			),
+			$job
+		);
+		$this->assertSame( array( 'field_mp_feature/field_mp_feature_posts#0|' . MigratePlus_Importer::uid( $job, 71 ) ), get_post_meta( $post, MigratePlus_ACF::PENDING_META, false ) );
+
+		$page = $this->arrive( $job, 71 );
+		$this->assertSame( array( $page ), array_map( 'intval', get_field( 'field_mp_feature', $post, false )['field_mp_feature_posts'] ) );
+		$this->assertSame( array(), get_post_meta( $post, MigratePlus_ACF::PENDING_META, false ) );
+		$job->delete();
+	}
 }

@@ -13,8 +13,11 @@ class MigratePlus_Replace {
 	// Not under STATE_PREFIX: cleanup() deletes everything there after a day.
 	const LOG_PREFIX = 'migrateplus_replacelog_';
 	const LOG_INDEX  = 'migrateplus_replacelog_ids';
-	const PAGE_SIZE  = 500;
-	const SAMPLES    = 20; // Example changes kept per table.
+	// One batch of a run at a time: a second request for the same run waits its turn rather than
+	// replacing in rows the first has not saved its progress past.
+	const LOCK_PREFIX = 'migrateplus_replacelock_';
+	const PAGE_SIZE   = 500;
+	const SAMPLES     = 20; // Example changes kept per table.
 	// A run whose last batch started longer ago than this has nobody driving it: it can be resumed or rolled back.
 	const IDLE = 2 * MINUTE_IN_SECONDS;
 	// Rollback files hold every original value a run changed, password hashes and secrets included, so they don't stay forever.
@@ -168,13 +171,78 @@ class MigratePlus_Replace {
 	}
 
 	/**
-	 * Work through rows until the time budget runs out or every table is done.
+	 * Work through rows until the time budget runs out or every table is done,
+	 * saving progress after each page. While another request runs a batch of
+	 * the same run, nothing is done: the state comes back as saved, with
+	 * 'busy' set.
 	 *
 	 * @param array $state   State (updated in place).
 	 * @param int   $seconds Time budget.
 	 * @return array State.
 	 */
 	public static function run_batch( array &$state, $seconds = 10 ) {
+		$token = self::lock( $state['id'], $seconds );
+		// What the last batch saved, not what this request was handed: it may have loaded the state before that batch ended.
+		wp_cache_delete( self::STATE_PREFIX . $state['id'], 'options' );
+		$saved = self::load_state( $state['id'] );
+		if ( $saved ) {
+			$state = $saved;
+		}
+		if ( ! $token ) {
+			$state['busy'] = true;
+			return $state;
+		}
+		unset( $state['busy'] );
+		try {
+			return self::run_locked_batch( $state, $seconds );
+		} finally {
+			self::unlock( $state['id'], $token );
+		}
+	}
+
+	/**
+	 * Take a run's batch lock.
+	 *
+	 * @param string $id      Run id.
+	 * @param int    $seconds The batch's time budget; a lock older than it and a minute has nobody behind it.
+	 * @return string|false The lock's token, false while another batch holds it.
+	 */
+	protected static function lock( $id, $seconds ) {
+		global $wpdb;
+		$name  = self::LOCK_PREFIX . sanitize_key( $id );
+		$token = ( time() + (int) $seconds + MINUTE_IN_SECONDS ) . ':' . wp_generate_password( 8, false );
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery -- the options API has no atomic insert.
+		$taken = $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')", $name, $token ) );
+		if ( ! $taken ) {
+			$held = (string) $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", $name ) );
+			if ( '' !== $held && (int) $held < time() ) {
+				// Expired: take it over, unless another request just did.
+				$taken = $wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s AND option_value = %s", $token, $name, $held ) );
+			}
+		}
+		// phpcs:enable
+		return $taken ? $token : false;
+	}
+
+	/**
+	 * Release a lock taken with lock(), if it is still this request's.
+	 *
+	 * @param string $id    Run id.
+	 * @param string $token Token lock() returned.
+	 */
+	protected static function unlock( $id, $token ) {
+		global $wpdb;
+		$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s", self::LOCK_PREFIX . sanitize_key( $id ), $token ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+	}
+
+	/**
+	 * The work of run_batch(), once it holds the run's lock.
+	 *
+	 * @param array $state   State (updated in place).
+	 * @param int   $seconds Time budget.
+	 * @return array State.
+	 */
+	protected static function run_locked_batch( array &$state, $seconds ) {
 		global $wpdb;
 		$until = microtime( true ) + $seconds;
 		$args  = $state['args'];
@@ -282,6 +350,9 @@ class MigratePlus_Replace {
 			if ( $count < self::PAGE_SIZE ) {
 				self::next_table( $state );
 			}
+			// Saved page by page: a request that dies later in the batch resumes after this page,
+			// so a replacement that matches its own result ("a" => "ab") is never applied twice.
+			self::save_state( $state );
 		}
 
 		unset( $result );
@@ -604,19 +675,31 @@ class MigratePlus_Replace {
 	 * @return array
 	 */
 	public static function matcher( $search, $replace, $case_insensitive, $whole_urls = true ) {
-		$pattern = null;
-		if ( $whole_urls && preg_match( '~^(?:[a-z][a-z0-9+.-]*:)?//[^/\s]|^[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:[/:?#]|$)~i', $search ) ) {
+		$before = '';
+		$after  = '';
+		$whole  = $whole_urls && preg_match( '~^(?:[a-z][a-z0-9+.-]*:)?//[^/\s]|^[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:[/:?#]|$)~i', $search );
+		if ( $whole ) {
 			// A bare domain must not be the tail of a longer host name (notold.test, sub.old.test).
 			$before = preg_match( '~^[a-z0-9]~i', $search ) && ! preg_match( '~^[a-z][a-z0-9+.-]*:~i', $search ) ? '(?<![a-z0-9.-])' : '';
 			// Nor may the match run on into more host or path characters (old.test.example.com, /blog → /blogging).
-			$after   = preg_match( '~[a-z0-9_-]$~i', $search ) ? '(?![a-z0-9_-]|\.[a-z0-9])' : '';
+			$after = preg_match( '~[a-z0-9_-]$~i', $search ) ? '(?![a-z0-9_-]|\.[a-z0-9])' : '';
+		}
+		// JSON escapes slashes ("https:\/\/old.test" in Elementor's data and other JSON in meta): that form is
+		// found too, and replaced by the replacement escaped the same way.
+		$escaped = false !== strpos( $search, '/' ) && false === strpos( $search, '\\/' ) ? str_replace( '/', '\\/', $search ) : '';
+		$pattern = null;
+		if ( '' !== $escaped ) {
+			$pattern = '~' . $before . '(?:(?P<plain>' . preg_quote( $search, '~' ) . ')|(?P<json>' . preg_quote( $escaped, '~' ) . '))' . $after . '~' . ( $case_insensitive ? 'i' : '' );
+		} elseif ( $whole ) {
 			$pattern = '~' . $before . preg_quote( $search, '~' ) . $after . '~' . ( $case_insensitive ? 'i' : '' );
 		}
 		return array(
-			'search'  => $search,
-			'replace' => $replace,
-			'ci'      => (bool) $case_insensitive,
-			'pattern' => $pattern,
+			'search'          => $search,
+			'replace'         => $replace,
+			'ci'              => (bool) $case_insensitive,
+			'pattern'         => $pattern,
+			'escaped'         => $escaped,
+			'escaped_replace' => '' !== $escaped ? str_replace( '/', '\\/', $replace ) : '',
 		);
 	}
 
@@ -632,10 +715,11 @@ class MigratePlus_Replace {
 		$n = 0;
 		if ( $match['pattern'] ) {
 			$replace = $match['replace'];
+			$json    = isset( $match['escaped_replace'] ) ? $match['escaped_replace'] : '';
 			$out     = preg_replace_callback(
 				$match['pattern'],
-				static function () use ( $replace ) {
-					return $replace;
+				static function ( $m ) use ( $replace, $json ) {
+					return isset( $m['json'] ) && '' !== $m['json'] ? $json : $replace;
 				},
 				$text,
 				-1,
@@ -660,12 +744,13 @@ class MigratePlus_Replace {
 	 */
 	public static function replace_value( $value, array $match, &$count, &$unsafe = 0 ) {
 		if ( is_string( $value ) ) {
-			if ( false === ( $match['ci'] ? stripos( $value, $match['search'] ) : strpos( $value, $match['search'] ) ) ) {
+			if ( ! self::contains( $value, $match ) ) {
 				return $value;
 			}
 			if ( is_serialized( $value ) ) {
-				// C: objects of classes left unloaded would come back empty: keep the whole value as it is.
-				if ( preg_match( '/(?:^|[;{}])C:\d+:"/', $value ) ) {
+				// C: objects of classes left unloaded would come back empty, and E: enums would not
+				// unserialize at all: keep the whole value as it is.
+				if ( preg_match( '/(?:^|[;{}])[CE]:\d+:"/', $value ) ) {
 					++$unsafe;
 					return $value;
 				}
@@ -681,16 +766,43 @@ class MigratePlus_Replace {
 		}
 		if ( is_array( $value ) ) {
 			foreach ( $value as $key => $item ) {
+				if ( is_string( $key ) && self::contains( $key, $match ) ) {
+					++$unsafe; // Keys are left as they are: renaming one could collide with another.
+				}
 				$value[ $key ] = self::replace_value( $item, $match, $count, $unsafe );
 			}
 			return $value;
 		}
 		if ( $value instanceof stdClass ) {
 			foreach ( get_object_vars( $value ) as $key => $item ) {
+				if ( self::contains( (string) $key, $match ) ) {
+					++$unsafe;
+				}
 				$value->$key = self::replace_value( $item, $match, $count, $unsafe );
 			}
+			return $value;
 		}
-		return $value; // Numbers, booleans, and objects of classes left unloaded (kept byte for byte).
+		if ( is_object( $value ) && self::contains( serialize( $value ), $match ) ) { // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions
+			++$unsafe; // An object of a class left unloaded: kept byte for byte, matches and all.
+		}
+		return $value; // Numbers, booleans, and objects of classes left unloaded.
+	}
+
+	/**
+	 * Whether text holds the search, as typed or JSON-escaped. A quick test
+	 * before the real match: whole-URL rules may still turn it down.
+	 *
+	 * @param string $text  Text.
+	 * @param array  $match From matcher().
+	 * @return bool
+	 */
+	protected static function contains( $text, array $match ) {
+		foreach ( array_filter( array( $match['search'], isset( $match['escaped'] ) ? $match['escaped'] : '' ), 'strlen' ) as $needle ) {
+			if ( false !== ( $match['ci'] ? stripos( $text, $needle ) : strpos( $text, $needle ) ) ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**

@@ -32,7 +32,6 @@ require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-acf.php';
 require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-woo.php';
 require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-menus.php';
 require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-terms.php';
-require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-users.php';
 require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-acf-definitions.php';
 require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-acf-options.php';
 require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-site.php';
@@ -86,7 +85,25 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 register_activation_hook( __FILE__, array( 'MigratePlus_Upgrade', 'activate' ) );
 register_deactivation_hook(
 	__FILE__,
-	static function () {
-		wp_clear_scheduled_hook( 'migrateplus_cleanup' );
+	static function ( $network_wide = false ) {
+		// Deactivated for a whole network: every site has its own cron event and exports.
+		$sites = is_multisite() && $network_wide ? get_sites(
+			array(
+				'fields' => 'ids',
+				'number' => 0,
+			)
+		) : array( get_current_blog_id() );
+		foreach ( $sites as $site ) {
+			$switch = get_current_blog_id() !== (int) $site;
+			if ( $switch ) {
+				switch_to_blog( (int) $site );
+			}
+			wp_clear_scheduled_hook( 'migrateplus_cleanup' );
+			// Finished exports copy the site's content, and maybe its users and orders: none stays behind.
+			MigratePlus_Exporter::cleanup( true );
+			if ( $switch ) {
+				restore_current_blog();
+			}
+		}
 	}
 );

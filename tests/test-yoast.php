@@ -221,4 +221,169 @@ class Test_Yoast extends WP_UnitTestCase {
 		$this->assertSame( array( 'company_name' => 'Before import' ), get_option( 'wpseo_titles' ) );
 		$job->delete();
 	}
+	/**
+	 * Answer every download with a small PNG, as test-media.php does.
+	 */
+	protected function serve_png() {
+		add_filter(
+			'pre_http_request',
+			static function ( $pre, $args ) {
+				$image = imagecreatetruecolor( 4, 4 );
+				ob_start();
+				imagepng( $image );
+				$body = ob_get_clean();
+				if ( ! empty( $args['stream'] ) ) {
+					file_put_contents( $args['filename'], $body ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+				}
+				return array(
+					'headers'  => array( 'content-type' => 'image/png' ),
+					'body'     => empty( $args['stream'] ) ? $body : '',
+					'response' => array(
+						'code'    => 200,
+						'message' => 'OK',
+					),
+					'cookies'  => array(),
+					'filename' => isset( $args['filename'] ) ? $args['filename'] : null,
+				);
+			},
+			10,
+			2
+		);
+	}
+
+	public function test_settings_point_logos_and_social_images_at_this_sites_copies_and_drop_the_person() {
+		$this->serve_png();
+		$job      = MigratePlus_Job::create( 'json', array( 'migrateplus_site' => 'http://old.test' ) );
+		$settings = array(
+			'wpseo_titles' => array(
+				'company_logo'              => 'http://old.test/logo.png',
+				'company_logo_id'           => 55,
+				'company_logo_meta'         => array( 'url' => 'http://old.test/logo.png' ),
+				'company_or_person_user_id' => 7,
+				'social-image-url-post'     => 'http://old.test/social.png',
+				'social-image-id-post'      => 56,
+			),
+			'wpseo_social' => array(
+				'og_default_image'    => '',
+				'og_default_image_id' => 57,
+			),
+		);
+		delete_option( 'wpseo_titles' );
+		delete_option( 'wpseo_social' );
+		$prev     = array();
+		$warnings = array();
+
+		MigratePlus_Yoast::import_settings( $settings, $prev, $job, $warnings );
+		$logo   = MigratePlus_Media::find_existing( 'http://old.test/logo.png' );
+		$social = MigratePlus_Media::find_existing( 'http://old.test/social.png' );
+		$this->assertSame(
+			array(
+				'company_logo'          => wp_get_attachment_url( $logo ),
+				'social-image-url-post' => wp_get_attachment_url( $social ),
+				'company_logo_id'       => $logo,
+				'social-image-id-post'  => $social,
+			),
+			get_option( 'wpseo_titles' )
+		);
+		$this->assertSame( array( 'og_default_image' => '' ), get_option( 'wpseo_social' ) );
+		$this->assertSame( array( 'The person Yoast SEO says the site represents is a user of the old site, so this site keeps its choice.' ), $warnings );
+
+		// Without an import to download into, neither the old ids nor the old URLs are kept.
+		delete_option( 'wpseo_titles' );
+		MigratePlus_Yoast::import_settings( array( 'wpseo_titles' => $settings['wpseo_titles'] ), $prev );
+		$this->assertSame( array(), get_option( 'wpseo_titles' ) );
+
+		wp_delete_attachment( $logo, true );
+		wp_delete_attachment( $social, true );
+		$job->delete();
+	}
+
+	public function test_post_canonical_and_redirect_point_at_this_site_and_image_ids_stay_behind() {
+		$job      = MigratePlus_Job::create( 'json', array( 'migrateplus_site' => 'http://old.test' ) );
+		$post     = self::factory()->post->create();
+		$warnings = array();
+		MigratePlus_Yoast::import_post(
+			$post,
+			array(
+				'canonical'          => 'http://old.test/guides/tents/',
+				'redirect'           => 'http://old.test/new-home/',
+				'opengraph-image-id' => '5',
+			),
+			$job,
+			array( 'rewrite_links' => 1 ),
+			$warnings
+		);
+		$this->assertSame( home_url( '/guides/tents/' ), get_post_meta( $post, '_yoast_wpseo_canonical', true ) );
+		$this->assertSame( home_url( '/new-home/' ), get_post_meta( $post, '_yoast_wpseo_redirect', true ) );
+		$this->assertSame( '', get_post_meta( $post, '_yoast_wpseo_opengraph-image-id', true ) );
+		$job->delete();
+	}
+
+	/**
+	 * Last in the file: it declares a stand-in for Yoast's term meta store, and
+	 * the tests above it cover the path taken without one.
+	 */
+	public function test_term_fields_merge_with_the_ones_yoast_has_and_social_images_download() {
+		if ( ! class_exists( 'WPSEO_Taxonomy_Meta' ) ) {
+			// Like Yoast's own, set_values() keeps exactly the fields it is given.
+			$store = new class() {
+				public static function get_term_meta( $term, $taxonomy ) {
+					$all = (array) get_option( 'wpseo_taxonomy_meta', array() );
+					return isset( $all[ $taxonomy ][ $term ] ) ? $all[ $taxonomy ][ $term ] : array();
+				}
+
+				public static function set_values( $term_id, $taxonomy, array $values ) {
+					$all                          = (array) get_option( 'wpseo_taxonomy_meta', array() );
+					$all[ $taxonomy ][ $term_id ] = $values;
+					update_option( 'wpseo_taxonomy_meta', $all );
+				}
+			};
+			class_alias( get_class( $store ), 'WPSEO_Taxonomy_Meta' );
+		}
+		$this->serve_png();
+		$job  = MigratePlus_Job::create( 'json', array( 'migrateplus_site' => 'http://old.test' ) );
+		$term = self::factory()->category->create( array( 'name' => 'Tents' ) );
+		update_option(
+			'wpseo_taxonomy_meta',
+			array(
+				'category' => array(
+					$term => array(
+						'wpseo_title'   => 'Old title',
+						'wpseo_focuskw' => 'tents',
+					),
+				),
+			)
+		);
+		$warnings = array();
+
+		MigratePlus_Yoast::import_term(
+			$term,
+			'category',
+			array(
+				'wpseo_title'              => 'Tents we like',
+				'wpseo_opengraph-image'    => 'http://old.test/og.png',
+				'wpseo_opengraph-image-id' => '91',
+				'wpseo_canonical'          => 'http://old.test/category/tents/',
+			),
+			$job,
+			array(
+				'import_featured_image' => 1,
+				'rewrite_links'         => 1,
+			),
+			$warnings
+		);
+		$image = MigratePlus_Media::find_existing( 'http://old.test/og.png' );
+		$this->assertSame(
+			array(
+				'wpseo_title'              => 'Tents we like',
+				'wpseo_focuskw'            => 'tents',
+				'wpseo_opengraph-image-id' => (string) $image,
+				'wpseo_opengraph-image'    => wp_get_attachment_url( $image ),
+				'wpseo_canonical'          => home_url( '/category/tents/' ),
+			),
+			get_option( 'wpseo_taxonomy_meta' )['category'][ $term ]
+		);
+		wp_delete_attachment( $image, true );
+		$job->delete();
+	}
 }

@@ -188,7 +188,8 @@ class Test_Orders extends WP_UnitTestCase {
 		// Importing again skips it; "update" refreshes the order, not its items.
 		$file  = $this->json_file( $doc );
 		$again = $this->import_file( $file );
-		$this->assertCount( 1, $again->imported_orders() + $job->imported_orders() );
+		$this->assertSame( array(), $again->imported_orders() );
+		$this->assertCount( 1, array_merge( $again->imported_orders(), $job->imported_orders() ) );
 		$this->assertStringContainsString( 'Already imported: order #', implode( "\n", array_column( $again->data['log'], 'm' ) ) );
 		$again->delete();
 		wp_delete_file( $file );
@@ -212,5 +213,244 @@ class Test_Orders extends WP_UnitTestCase {
 		);
 		$this->assertSame( 0, MigratePlus_Orders::count( $args ) );
 		$this->assertSame( array(), MigratePlus_Orders::export_batch( $args, null, 50 )['items'] );
+	}
+
+	protected function orders_doc() {
+		$doc                        = $this->export_doc(
+			array(
+				'post_types'     => array(),
+				'include_orders' => 1,
+			)
+		);
+		$doc['migrateplus']['site'] = 'http://old.test';
+		return $doc;
+	}
+
+	protected function log_of( MigratePlus_Job $job ) {
+		return implode( "\n", array_column( $job->data['log'], 'm' ) );
+	}
+
+	protected function rollback( MigratePlus_Job $job ) {
+		do {
+			$result = MigratePlus_Runner::rollback_batch( $job );
+		} while ( ! $result['done'] );
+		$this->assertSame( '', $result['error'] );
+		$job->delete();
+	}
+
+	public function test_imported_orders_leave_total_sales_as_they_were() {
+		list( $product ) = $this->order_with_everything();
+		$sold            = (int) get_post_meta( $product->get_id(), 'total_sales', true );
+		$this->assertSame( 2, $sold );
+		// Orders only: the line finds the same product by SKU, whose count already holds the original order.
+		$file = $this->json_file( $this->orders_doc() );
+		$job  = $this->import_file( $file );
+		wp_delete_file( $file );
+		$this->assertCount( 1, $job->imported_orders() );
+		$this->assertSame( $sold, (int) get_post_meta( $product->get_id(), 'total_sales', true ) );
+		$this->rollback( $job );
+		$this->assertSame( $sold, (int) get_post_meta( $product->get_id(), 'total_sales', true ) );
+	}
+
+	public function test_a_refunded_order_keeps_its_partial_refund() {
+		list( , , $order )           = $this->order_with_everything();
+		$doc                         = $this->orders_doc();
+		$doc['orders'][0]['status']  = 'refunded';
+		$doc['orders'][0]['refunds'] = array_slice( $doc['orders'][0]['refunds'], 0, 1 );
+		$file                        = $this->json_file( $doc );
+		$order->delete( true );
+		$job = $this->import_file( $file );
+		wp_delete_file( $file );
+		$new = wc_get_order( $job->imported_orders()[0] );
+		$this->assertSame( 'refunded', $new->get_status() );
+		$this->assertSame(
+			array( 20.0 ),
+			array_map(
+				static function ( $refund ) {
+					return (float) $refund->get_amount();
+				},
+				$new->get_refunds()
+			)
+		);
+		$this->assertStringNotContainsString( 'refund could not be added', $this->log_of( $job ) );
+		$this->rollback( $job );
+	}
+
+	public function test_refunds_keep_who_made_them_when_and_for_which_line() {
+		list( , , $order ) = $this->order_with_everything();
+		$refunder          = get_current_user_id();
+		$line              = array_values( $order->get_items( 'line_item' ) )[0];
+		wc_create_refund(
+			array(
+				'order_id'     => $order->get_id(),
+				'amount'       => '100',
+				'reason'       => 'One tent back',
+				'date_created' => '2024-03-05 09:00:00',
+				'line_items'   => array(
+					$line->get_id() => array(
+						'qty'          => 1,
+						'refund_total' => 100,
+					),
+				),
+			)
+		);
+		$file = $this->json_file( $this->orders_doc() );
+		$order->delete( true );
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$job = $this->import_file( $file );
+		wp_delete_file( $file );
+		$new  = wc_get_order( $job->imported_orders()[0] );
+		$back = null;
+		foreach ( $new->get_refunds() as $refund ) {
+			if ( 'One tent back' === $refund->get_reason() ) {
+				$back = $refund;
+			}
+		}
+		$this->assertInstanceOf( 'WC_Order_Refund', $back );
+		$this->assertSame( $refunder, $back->get_refunded_by() );
+		$this->assertSame( '2024-03-05 09:00:00', $back->get_date_created()->date( 'Y-m-d H:i:s' ) );
+		$new_line = array_values( $new->get_items( 'line_item' ) )[0];
+		$this->assertSame( -1, $new->get_qty_refunded_for_item( $new_line->get_id() ) );
+		$this->assertSame( 100.0, (float) $new->get_total_refunded_for_item( $new_line->get_id() ) );
+		$this->rollback( $job );
+	}
+
+	public function test_an_order_that_fails_part_way_is_marked_for_rollback_and_the_rest_import() {
+		list( , , $order )                    = $this->order_with_everything();
+		$doc                                  = $this->orders_doc();
+		$second                               = $doc['orders'][0];
+		$second['id']                         = 9999;
+		$second['number']                     = '9999';
+		$doc['orders'][0]['items'][0]['name'] = 'Explodes';
+		$doc['orders'][]                      = $second;
+		$file                                 = $this->json_file( $doc );
+		$order->delete( true );
+		$boom = static function ( $item_id, $item ) {
+			if ( 'Explodes' === $item->get_name() ) {
+				throw new Error( 'Out of memory' ); // An Error, which WooCommerce's own catch lets through.
+			}
+		};
+		add_action( 'woocommerce_new_order_item', $boom, 10, 2 );
+		$job = $this->import_file( $file );
+		remove_action( 'woocommerce_new_order_item', $boom, 10 );
+		wp_delete_file( $file );
+		$this->assertSame( 'complete', $job->data['status'] );
+		$this->assertStringContainsString( 'could not be imported: Out of memory', $this->log_of( $job ) );
+		$this->assertStringContainsString( 'Created order #9999', $this->log_of( $job ) );
+		$this->assertCount( 2, $job->imported_orders() );
+		$this->rollback( $job );
+	}
+
+	public function test_a_duplicate_gets_its_own_order_key() {
+		list( , , $order ) = $this->order_with_everything();
+		$key               = $order->get_order_key();
+		$file              = $this->json_file( $this->orders_doc() );
+		$order->delete( true );
+		$first = $this->import_file( $file );
+		$copy  = $this->import_file( $file, array( 'duplicate' => 'create' ) );
+		wp_delete_file( $file );
+		$this->assertSame( $key, wc_get_order( $first->imported_orders()[0] )->get_order_key() );
+		$copy_key = wc_get_order( $copy->imported_orders()[0] )->get_order_key();
+		$this->assertNotSame( $key, $copy_key );
+		$this->assertStringStartsWith( 'wc_order_', $copy_key );
+		$this->rollback( $copy );
+		$this->rollback( $first );
+	}
+
+	public function test_trashed_imported_orders_are_still_found() {
+		list( , , $order ) = $this->order_with_everything();
+		$file              = $this->json_file( $this->orders_doc() );
+		$order->delete( true );
+		$job = $this->import_file( $file );
+		$ids = $job->imported_orders();
+		wc_get_order( $ids[0] )->delete( false );
+		$this->assertSame( 'trash', wc_get_order( $ids[0] )->get_status() );
+		$this->assertSame( $ids, $job->imported_orders() );
+		$again = $this->import_file( $file );
+		wp_delete_file( $file );
+		$this->assertStringContainsString( 'Already imported: order #', $this->log_of( $again ) );
+		$again->delete();
+		$this->rollback( $job );
+		$this->assertFalse( wc_get_order( $ids[0] ) );
+	}
+
+	public function test_order_details_woocommerce_turns_down_are_reported() {
+		list( , , $order )                         = $this->order_with_everything();
+		$doc                                       = $this->orders_doc();
+		$doc['orders'][0]['billing']['email']      = 'not-an-email';
+		$doc['orders'][0]['billing']['first_name'] = 'Cath';
+		$file                                      = $this->json_file( $doc );
+		$order->delete( true );
+		$job = $this->import_file( $file );
+		wp_delete_file( $file );
+		$this->assertStringContainsString( 'Some of the order\'s details were not set: Invalid billing email address', $this->log_of( $job ) );
+		$this->assertSame( 'Cath', wc_get_order( $job->imported_orders()[0] )->get_billing_first_name() );
+		$this->rollback( $job );
+	}
+
+	public function test_the_old_order_number_and_gateway_references_travel() {
+		list( , , $order ) = $this->order_with_everything();
+		$order->update_meta_data( '_stripe_intent_id', 'pi_123' );
+		$order->update_meta_data( '_some_plugin_cache', 'stale' );
+		$order->save();
+		$number = $order->get_order_number();
+		$doc    = $this->orders_doc();
+		$this->assertSame( 'pi_123', $doc['orders'][0]['meta']['_stripe_intent_id'] );
+		$this->assertArrayNotHasKey( '_some_plugin_cache', $doc['orders'][0]['meta'] );
+		// A line saying it already took stock must not arrive: the import moves none.
+		$doc['orders'][0]['items'][0]['meta'][] = array(
+			'key'   => '_reduced_stock',
+			'value' => '2',
+		);
+		$file                                   = $this->json_file( $doc );
+		$order->delete( true );
+		$job = $this->import_file( $file );
+		wp_delete_file( $file );
+		$new = wc_get_order( $job->imported_orders()[0] );
+		$this->assertSame( 'pi_123', $new->get_meta( '_stripe_intent_id' ) );
+		$this->assertSame( $number, $new->get_meta( '_migrateplus_source_order_number' ) );
+		$this->assertSame( '', array_values( $new->get_items( 'line_item' ) )[0]->get_meta( '_reduced_stock' ) );
+		$notes = array_column( array_map( 'get_object_vars', wc_get_order_notes( array( 'order_id' => $new->get_id() ) ) ), 'content' );
+		$this->assertContains( 'Imported from order #' . $number . ' on the old site.', $notes );
+		$this->rollback( $job );
+	}
+
+	public function test_webhooks_are_not_delivered_for_imported_orders() {
+		list( , , $order ) = $this->order_with_everything();
+		$file              = $this->json_file( $this->orders_doc() );
+		$order->delete( true );
+		$asked  = array();
+		$listen = static function () use ( &$asked ) {
+			$asked[] = apply_filters( 'woocommerce_webhook_should_deliver', true, null, 0 );
+		};
+		add_action( 'woocommerce_new_order', $listen );
+		$job = $this->import_file( $file );
+		remove_action( 'woocommerce_new_order', $listen );
+		wp_delete_file( $file );
+		$this->assertSame( array( false ), $asked );
+		$this->assertTrue( apply_filters( 'woocommerce_webhook_should_deliver', true, null, 0 ) );
+		$this->rollback( $job );
+	}
+
+	public function test_a_customer_is_matched_by_email_only_and_otherwise_the_order_is_a_guest_order() {
+		list( , $customer, $order ) = $this->order_with_everything();
+		$file                       = $this->json_file( $this->orders_doc() );
+		$order->delete( true );
+		wp_delete_user( $customer );
+		// The new site's "cathy" is another person.
+		self::factory()->user->create(
+			array(
+				'user_login' => 'cathy',
+				'user_email' => 'cathy@agency.test',
+			)
+		);
+		$job = $this->import_file( $file );
+		wp_delete_file( $file );
+		$new = wc_get_order( $job->imported_orders()[0] );
+		$this->assertSame( 0, $new->get_customer_id() );
+		$this->assertSame( 'Cathy', $new->get_billing_first_name() );
+		$this->assertSame( 'Perth', $new->get_shipping_city() );
+		$this->assertStringContainsString( 'Customer "cathy@old.test" was not found on this site, so the order is a guest order with the billing and shipping details from the file.', $this->log_of( $job ) );
+		$this->rollback( $job );
 	}
 }

@@ -32,6 +32,22 @@ class MigratePlus_ACF {
 	const LAYOUT_TYPES = array( 'tab', 'message', 'accordion' );
 
 	/**
+	 * Field types whose post references wait for a post later in the file: the
+	 * reference fields, and the rows that can hold one (a clone's storage is
+	 * the cloned fields', so its references are not followed).
+	 *
+	 * @var string[]
+	 */
+	const DEFER_TYPES = array( 'post_object', 'relationship', 'page_link', 'group', 'repeater', 'flexible_content' );
+
+	/**
+	 * Post types a reference never resolves to.
+	 *
+	 * @var string[]
+	 */
+	const NOT_REFERENCED = array( 'revision', 'nav_menu_item' );
+
+	/**
 	 * Whether ACF (free or Pro) is active.
 	 *
 	 * @return bool
@@ -114,87 +130,6 @@ class MigratePlus_ACF {
 	}
 
 	/**
-	 * Top-level ACF fields shown on the user profile, grouped by field group.
-	 *
-	 * @return array[] { key, name, label, type, group }
-	 */
-	public static function fields_for_user() {
-		if ( ! self::active() ) {
-			return array();
-		}
-		$out = array();
-		foreach ( (array) acf_get_field_groups( array( 'user_form' => 'edit' ) ) as $group ) {
-			if ( isset( $group['active'] ) && ! $group['active'] ) {
-				continue;
-			}
-			foreach ( (array) acf_get_fields( $group ) as $field ) {
-				if ( empty( $field['name'] ) || in_array( $field['type'], self::LAYOUT_TYPES, true ) ) {
-					continue;
-				}
-				$out[] = array(
-					'key'   => $field['key'],
-					'name'  => $field['name'],
-					'label' => $field['label'] ? $field['label'] : $field['name'],
-					'type'  => $field['type'],
-					'group' => $group['title'],
-				);
-			}
-		}
-		return $out;
-	}
-
-	/**
-	 * Save a user's exported ACF values ({ field name => portable value }), as
-	 * import_term_fields() saves a term's.
-	 *
-	 * @param int             $user_id  User id.
-	 * @param array           $values   Exported values.
-	 * @param MigratePlus_Job $job      Job.
-	 * @param array           $opts     Job options.
-	 * @param string[]        $warnings Warnings (by reference).
-	 * @return int Fields saved.
-	 */
-	public static function import_user_fields( $user_id, array $values, MigratePlus_Job $job, array $opts, array &$warnings ) {
-		if ( ! self::active() ) {
-			return 0;
-		}
-		$by_name = array();
-		foreach ( self::fields_for_user() as $f ) {
-			$by_name[ $f['name'] ] = $f['key'];
-		}
-		$ctx   = array(
-			'post_id'      => 'user_' . (int) $user_id,
-			'job_id'       => $job->data['id'],
-			'job'          => $job,
-			'base'         => isset( $job->data['settings']['migrateplus_site'] ) ? (string) $job->data['settings']['migrateplus_site'] : '',
-			'create_terms' => ! empty( $opts['create_terms'] ),
-			'defer'        => false,
-			'pending'      => array(),
-			'warnings'     => array(),
-		);
-		$saved = 0;
-		foreach ( $values as $name => $raw ) {
-			if ( null === $raw || '' === $raw || array() === $raw ) {
-				continue;
-			}
-			$field = isset( $by_name[ $name ] ) ? acf_get_field( $by_name[ $name ] ) : false;
-			if ( ! $field ) {
-				/* translators: %s: field name */
-				$warnings[] = sprintf( __( 'ACF field "%s" is not on the user profile.', 'migrateplus' ), $name );
-				continue;
-			}
-			$value = self::convert( $field, $raw, $ctx );
-			if ( update_field( $field['key'], wp_slash( $value ), 'user_' . (int) $user_id ) || null !== $value ) {
-				++$saved;
-			}
-		}
-		foreach ( array_unique( $ctx['warnings'] ) as $w ) {
-			$warnings[] = $w;
-		}
-		return $saved;
-	}
-
-	/**
 	 * Save a term's exported ACF values ({ field name => portable value }).
 	 * Post references that are not on the site yet are linked when the post they
 	 * name arrives (see link_pending()).
@@ -221,6 +156,7 @@ class MigratePlus_ACF {
 			'job'          => $job,
 			'base'         => isset( $job->data['settings']['migrateplus_site'] ) ? (string) $job->data['settings']['migrateplus_site'] : '',
 			'create_terms' => ! empty( $opts['create_terms'] ),
+			'rewrite'      => ! empty( $opts['rewrite_links'] ),
 			'warnings'     => array(),
 		);
 		$saved = 0;
@@ -234,14 +170,16 @@ class MigratePlus_ACF {
 				$warnings[] = sprintf( __( 'ACF field "%s" is not on this taxonomy.', 'migrateplus' ), $name );
 				continue;
 			}
-			$ctx['defer']   = in_array( $field['type'], array( 'post_object', 'relationship' ), true );
+			$ctx['defer']   = in_array( $field['type'], self::DEFER_TYPES, true );
 			$ctx['pending'] = array();
+			$ctx['waits']   = array();
+			$ctx['path']    = array();
 			$value          = self::convert( $field, $raw, $ctx );
 			// Slashed as from a form post, like a post's fields (see import()).
 			if ( update_field( $field['key'], wp_slash( $value ), 'term_' . (int) $term_id ) || null !== $value ) {
 				++$saved;
 			}
-			self::set_term_pending( (int) $term_id, $field['key'], $ctx['pending'] );
+			self::set_term_pending( (int) $term_id, $field['key'], $ctx['waits'] );
 		}
 		foreach ( array_unique( $ctx['warnings'] ) as $w ) {
 			$warnings[] = $w;
@@ -430,6 +368,7 @@ class MigratePlus_ACF {
 			'job'          => $job,
 			'base'         => (string) $base,
 			'create_terms' => ! empty( $opts['create_terms'] ),
+			'rewrite'      => ! empty( $opts['rewrite_links'] ),
 			'warnings'     => array(),
 		);
 		$saved = 0;
@@ -447,10 +386,12 @@ class MigratePlus_ACF {
 				$warnings[] = sprintf( __( 'ACF field "%s" was not found.', 'migrateplus' ), $selector );
 				continue;
 			}
-			// Only top-level relationship fields wait for posts later in the file; a row inside a
-			// repeater or group has no stable place to add the post to afterwards.
-			$ctx['defer']   = in_array( $field['type'], array( 'post_object', 'relationship' ), true );
+			// Post references wait for posts later in the file, inside repeater, group and flexible
+			// content rows too: the pending row records the way down to the sub field (see set_pending()).
+			$ctx['defer']   = in_array( $field['type'], self::DEFER_TYPES, true );
 			$ctx['pending'] = array();
+			$ctx['waits']   = array();
+			$ctx['path']    = array();
 			$value          = self::convert( $field, $raw, $ctx );
 			$value          = apply_filters( 'migrateplus_acf_value', $value, $field, $raw, $post_id, $job );
 			// ACF expects slashed data, as from a form post: post meta goes to update_metadata(),
@@ -458,7 +399,7 @@ class MigratePlus_ACF {
 			if ( update_field( $field['key'], wp_slash( $value ), $post_id ) || null !== $value ) {
 				++$saved;
 			}
-			self::set_pending( (int) $post_id, $field['key'], $ctx['pending'] );
+			self::set_pending( (int) $post_id, $field['key'], $ctx['waits'] );
 		}
 		foreach ( array_unique( $ctx['warnings'] ) as $w ) {
 			$warnings[] = $w;
@@ -482,8 +423,12 @@ class MigratePlus_ACF {
 		switch ( $type ) {
 			case 'number':
 			case 'range':
-				$s = trim( MigratePlus_Util::stringify( $value ) );
-				$s = str_replace( array( ',', ' ' ), array( '', '' ), $s );
+				// Spaces may group thousands; a comma is left alone, since "1,5" may be one and a half or fifteen.
+				$s = str_replace( ' ', '', trim( MigratePlus_Util::stringify( $value ) ) );
+				if ( '' !== $s && ! is_numeric( $s ) ) {
+					/* translators: 1: field label, 2: value */
+					$ctx['warnings'][] = sprintf( __( 'ACF "%1$s": "%2$s" is not a number, so it was left empty.', 'migrateplus' ), $label, $s );
+				}
 				return is_numeric( $s ) ? $s + 0 : '';
 
 			case 'true_false':
@@ -532,22 +477,33 @@ class MigratePlus_ACF {
 			case 'page_link':
 				$types = isset( $field['post_type'] ) ? array_filter( (array) $field['post_type'] ) : array();
 				$ids   = array();
+				$list  = 'relationship' === $type || $multi;
+				$slot  = 0; // Position among the posts kept, so one that arrives later takes its place in the order.
 				foreach ( self::items( $value ) as $item ) {
 					$id = self::resolve_post( $item, $types, isset( $ctx['job'] ) ? $ctx['job'] : null );
 					if ( $id ) {
 						$ids[] = $id;
+						++$slot;
 					} elseif ( 'page_link' === $type && is_string( $item ) && preg_match( '#^https?://#', $item ) ) {
-						$ids[] = $item; // Page links may store plain URLs.
+						$ids[] = ! empty( $ctx['rewrite'] ) ? MigratePlus_Menus::rewrite_url( $item, $ctx['base'] ) : $item; // Page links may store plain URLs.
+						++$slot;
 					} elseif ( ! empty( $ctx['defer'] ) && is_array( $item ) && ! empty( $item['id'] ) ) {
 						// An exported post later in the file: linked when it is imported.
-						$ctx['pending'][] = MigratePlus_Importer::uid( $ctx['job'], $item['id'] );
+						$uid              = MigratePlus_Importer::uid( $ctx['job'], $item['id'] );
+						$ctx['pending'][] = $uid;
+						$ctx['waits'][]   = array(
+							'uid'  => $uid,
+							'path' => isset( $ctx['path'] ) ? $ctx['path'] : array(),
+							'pos'  => $list ? $slot : null,
+						);
+						++$slot;
 					} else {
 						/* translators: 1: field label, 2: value */
 						$ctx['warnings'][] = sprintf( __( 'ACF "%1$s": no post found for "%2$s".', 'migrateplus' ), $label, MigratePlus_Util::stringify( $item ) );
 					}
 				}
 				$ids = array_values( array_unique( $ids ) );
-				if ( 'relationship' === $type || $multi ) {
+				if ( $list ) {
 					return $ids;
 				}
 				return $ids ? $ids[0] : '';
@@ -594,17 +550,14 @@ class MigratePlus_ACF {
 
 			case 'link':
 				$value = self::maybe_json( $value );
-				if ( is_array( $value ) ) {
-					return array(
-						'url'    => isset( $value['url'] ) ? esc_url_raw( $value['url'] ) : '',
-						'title'  => isset( $value['title'] ) ? (string) $value['title'] : '',
-						'target' => isset( $value['target'] ) ? (string) $value['target'] : '',
-					);
+				$url   = is_array( $value ) ? ( isset( $value['url'] ) ? (string) $value['url'] : '' ) : trim( (string) $value );
+				if ( ! empty( $ctx['rewrite'] ) ) {
+					$url = MigratePlus_Menus::rewrite_url( $url, $ctx['base'] );
 				}
 				return array(
-					'url'    => esc_url_raw( trim( (string) $value ) ),
-					'title'  => '',
-					'target' => '',
+					'url'    => esc_url_raw( $url ),
+					'title'  => is_array( $value ) && isset( $value['title'] ) ? (string) $value['title'] : '',
+					'target' => is_array( $value ) && isset( $value['target'] ) ? (string) $value['target'] : '',
 				);
 
 			case 'google_map':
@@ -620,6 +573,13 @@ class MigratePlus_ACF {
 				return is_array( $value ) ? $value : array( 'address' => (string) $value );
 
 			case 'clone': // Stores its cloned fields' values, read and written like a group's.
+				$defer        = ! empty( $ctx['defer'] );
+				$ctx['defer'] = false; // Not a value of its own to find the sub field in later.
+				$row          = self::maybe_json( $value );
+				$out          = is_array( $row ) ? self::convert_row( (array) $field['sub_fields'], $row, $ctx ) : array();
+				$ctx['defer'] = $defer;
+				return $out;
+
 			case 'group':
 				$row = self::maybe_json( $value );
 				return is_array( $row ) ? self::convert_row( (array) $field['sub_fields'], $row, $ctx ) : array();
@@ -633,12 +593,15 @@ class MigratePlus_ACF {
 				if ( $rows && array_keys( $rows ) !== range( 0, count( $rows ) - 1 ) ) {
 					$rows = array( $rows ); // A single row given as an object.
 				}
-				$out = array();
+				$out  = array();
+				$path = isset( $ctx['path'] ) ? $ctx['path'] : array();
 				foreach ( $rows as $row ) {
 					if ( is_array( $row ) ) {
-						$out[] = self::convert_row( (array) $field['sub_fields'], $row, $ctx );
+						$ctx['path'] = array_merge( $path, array( count( $out ) ) );
+						$out[]       = self::convert_row( (array) $field['sub_fields'], $row, $ctx );
 					}
 				}
+				$ctx['path'] = $path;
 				return $out;
 
 			case 'flexible_content':
@@ -647,7 +610,8 @@ class MigratePlus_ACF {
 				foreach ( isset( $field['layouts'] ) ? (array) $field['layouts'] : array() as $layout ) {
 					$layouts[ $layout['name'] ] = $layout;
 				}
-				$out = array();
+				$out  = array();
+				$path = isset( $ctx['path'] ) ? $ctx['path'] : array();
 				foreach ( is_array( $rows ) ? $rows : array() as $row ) {
 					$name = is_array( $row ) ? ( isset( $row['acf_fc_layout'] ) ? $row['acf_fc_layout'] : ( isset( $row['layout'] ) ? $row['layout'] : '' ) ) : '';
 					if ( ! isset( $layouts[ $name ] ) ) {
@@ -655,8 +619,10 @@ class MigratePlus_ACF {
 						$ctx['warnings'][] = sprintf( __( 'ACF "%1$s": unknown layout "%2$s".', 'migrateplus' ), $label, $name );
 						continue;
 					}
-					$out[] = array( 'acf_fc_layout' => $name ) + self::convert_row( (array) $layouts[ $name ]['sub_fields'], $row, $ctx );
+					$ctx['path'] = array_merge( $path, array( count( $out ) ) );
+					$out[]       = array( 'acf_fc_layout' => $name ) + self::convert_row( (array) $layouts[ $name ]['sub_fields'], $row, $ctx );
 				}
+				$ctx['path'] = $path;
 				return $out;
 
 			case 'wysiwyg':
@@ -671,7 +637,12 @@ class MigratePlus_ACF {
 				if ( is_array( $value ) && ! in_array( $type, array( 'text', 'textarea', 'wysiwyg', 'email', 'url', 'password', 'oembed', 'color_picker' ), true ) ) {
 					return $value; // Unknown / third-party field type: pass structured data through.
 				}
-				return MigratePlus_Util::stringify( $value );
+				$value = MigratePlus_Util::stringify( $value );
+				if ( ! empty( $ctx['rewrite'] ) && 'url' === $type ) {
+					return MigratePlus_Menus::rewrite_url( trim( $value ), $ctx['base'] );
+				}
+				// Links in an editor field, by the rules links in post content follow.
+				return ! empty( $ctx['rewrite'] ) && 'wysiwyg' === $type ? MigratePlus_Importer::rewrite_links( $value, $ctx['base'] ) : $value;
 		}
 	}
 
@@ -707,7 +678,10 @@ class MigratePlus_ACF {
 				}
 			}
 			if ( null !== $found ) {
+				$path               = isset( $ctx['path'] ) ? $ctx['path'] : array();
+				$ctx['path']        = array_merge( $path, array( $sub['key'] ) );
 				$out[ $sub['key'] ] = self::convert( $sub, $found, $ctx );
+				$ctx['path']        = $path;
 			}
 		}
 		return $out;
@@ -797,45 +771,95 @@ class MigratePlus_ACF {
 	}
 
 	/**
-	 * Remember the posts a relationship field still waits for, as "field_key|source_uid"
-	 * rows. A re-import replaces the field's old rows.
+	 * Remember the posts a field still waits for, one row each:
+	 * "<field key>[/<row>/<sub field key>...][#<position>]|<source uid>". The
+	 * path leads from the field's value down to a sub field in its rows; the
+	 * position is where the post goes among those of a list. A re-import
+	 * replaces the field's old rows.
 	 *
-	 * @param int      $post_id    Post id.
-	 * @param string   $field_key  ACF field key.
-	 * @param string[] $source_ids Source uids (MigratePlus_Importer::uid()) not imported yet.
+	 * @param int     $post_id   Post id.
+	 * @param string  $field_key ACF field key.
+	 * @param array[] $waits     { uid, path, pos } of each post not imported yet (convert() collects them).
 	 */
-	protected static function set_pending( $post_id, $field_key, array $source_ids ) {
+	protected static function set_pending( $post_id, $field_key, array $waits ) {
 		foreach ( (array) get_post_meta( $post_id, self::PENDING_META, false ) as $row ) {
-			if ( 0 === strpos( (string) $row, $field_key . '|' ) ) {
+			if ( self::pending_field( (string) $row ) === $field_key ) {
 				delete_post_meta( $post_id, self::PENDING_META, $row );
 			}
 		}
-		foreach ( array_unique( $source_ids ) as $source_id ) {
-			add_post_meta( $post_id, self::PENDING_META, $field_key . '|' . $source_id );
+		foreach ( self::pending_rows( $field_key, $waits ) as $row ) {
+			add_post_meta( $post_id, self::PENDING_META, $row );
 		}
 	}
 
 	/**
-	 * Like set_pending(), for a term's relationship fields (term meta).
+	 * Like set_pending(), for a term's fields (term meta).
 	 *
-	 * @param int      $term_id    Term id.
-	 * @param string   $field_key  ACF field key.
-	 * @param string[] $source_ids Source uids (MigratePlus_Importer::uid()) not imported yet.
+	 * @param int     $term_id   Term id.
+	 * @param string  $field_key ACF field key.
+	 * @param array[] $waits     { uid, path, pos } of each post not imported yet.
 	 */
-	protected static function set_term_pending( $term_id, $field_key, array $source_ids ) {
+	protected static function set_term_pending( $term_id, $field_key, array $waits ) {
 		foreach ( (array) get_term_meta( $term_id, self::PENDING_META, false ) as $row ) {
-			if ( 0 === strpos( (string) $row, $field_key . '|' ) ) {
+			if ( self::pending_field( (string) $row ) === $field_key ) {
 				delete_term_meta( $term_id, self::PENDING_META, $row );
 			}
 		}
-		foreach ( array_unique( $source_ids ) as $source_id ) {
-			add_term_meta( $term_id, self::PENDING_META, $field_key . '|' . $source_id );
+		foreach ( self::pending_rows( $field_key, $waits ) as $row ) {
+			add_term_meta( $term_id, self::PENDING_META, $row );
 		}
 	}
 
 	/**
-	 * A post has just been imported: add it to the relationship fields, on posts
-	 * and on terms, that were waiting for it.
+	 * The PENDING_META rows for a field's waiting posts.
+	 *
+	 * @param string  $field_key ACF field key.
+	 * @param array[] $waits     { uid, path, pos }.
+	 * @return string[]
+	 */
+	protected static function pending_rows( $field_key, array $waits ) {
+		$rows = array();
+		foreach ( $waits as $wait ) {
+			$path   = $wait['path'] ? '/' . implode( '/', $wait['path'] ) : '';
+			$pos    = null !== $wait['pos'] ? '#' . (int) $wait['pos'] : '';
+			$rows[] = $field_key . $path . $pos . '|' . $wait['uid'];
+		}
+		return array_values( array_unique( $rows ) );
+	}
+
+	/**
+	 * A PENDING_META row taken apart. Rows written before paths and positions are "<field key>|<uid>".
+	 *
+	 * @param string $row Row.
+	 * @return array { field: string, path: string[], pos: int|null, place: string (the row without its position and uid) }
+	 */
+	protected static function parse_pending( $row ) {
+		$head = substr( $row, 0, (int) strrpos( $row, '|' ) );
+		$pos  = null;
+		if ( preg_match( '/^(.*)#(\d+)$/', $head, $m ) ) {
+			$head = $m[1];
+			$pos  = (int) $m[2];
+		}
+		$parts = explode( '/', $head );
+		return array(
+			'field' => array_shift( $parts ),
+			'path'  => $parts,
+			'pos'   => $pos,
+			'place' => $head,
+		);
+	}
+
+	/**
+	 * @param string $row A PENDING_META row.
+	 * @return string The field key it belongs to.
+	 */
+	protected static function pending_field( $row ) {
+		return self::parse_pending( $row )['field'];
+	}
+
+	/**
+	 * A post has just been imported: add it to the fields, on posts and on
+	 * terms, that were waiting for it.
 	 *
 	 * @param int    $post_id   The imported post.
 	 * @param string $source_id Its source uid (MigratePlus_Importer::uid()), so only references from the same source match.
@@ -850,7 +874,8 @@ class MigratePlus_ACF {
 			$wpdb->prepare( "SELECT post_id, meta_value FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value LIKE %s", self::PENDING_META, $like )
 		);
 		foreach ( (array) $rows as $row ) {
-			if ( self::link_waiting_field( $row->meta_value, (int) $post_id, (int) $row->post_id ) ) {
+			$all = (array) get_post_meta( (int) $row->post_id, self::PENDING_META, false );
+			if ( self::link_waiting_field( $row->meta_value, (int) $post_id, (int) $row->post_id, $all ) ) {
 				delete_post_meta( (int) $row->post_id, self::PENDING_META, $row->meta_value );
 			}
 		}
@@ -858,34 +883,117 @@ class MigratePlus_ACF {
 			$wpdb->prepare( "SELECT term_id, meta_value FROM {$wpdb->termmeta} WHERE meta_key = %s AND meta_value LIKE %s", self::PENDING_META, $like )
 		);
 		foreach ( (array) $rows as $row ) {
-			if ( self::link_waiting_field( $row->meta_value, (int) $post_id, 'term_' . (int) $row->term_id ) ) {
+			$all = (array) get_term_meta( (int) $row->term_id, self::PENDING_META, false );
+			if ( self::link_waiting_field( $row->meta_value, (int) $post_id, 'term_' . (int) $row->term_id, $all ) ) {
 				delete_term_meta( (int) $row->term_id, self::PENDING_META, $row->meta_value );
 			}
 		}
 	}
 
 	/**
-	 * Add a just-imported post to one waiting relationship field.
+	 * Add a just-imported post to one waiting field: at its place in the order
+	 * of a list, and down the row path of a sub field.
 	 *
-	 * @param string     $pending  A PENDING_META value ("<field key>|<uid>").
+	 * @param string     $pending  A PENDING_META value (see set_pending()).
 	 * @param int        $post_id  The imported post.
 	 * @param int|string $selector Where the field lives: a post id, or "term_<id>".
+	 * @param string[]   $all      Every PENDING_META row of that post or term.
 	 * @return bool Whether the pending row is settled and can go.
 	 */
-	protected static function link_waiting_field( $pending, $post_id, $selector ) {
-		$field_key = substr( $pending, 0, strrpos( $pending, '|' ) );
-		$field     = acf_get_field( $field_key );
-		if ( $field ) {
-			$current = get_field( $field_key, $selector, false );
-			if ( 'relationship' === $field['type'] || ! empty( $field['multiple'] ) ) {
-				$ids   = array_map( 'intval', is_array( $current ) ? $current : array_filter( array( $current ) ) );
-				$ids[] = (int) $post_id;
-				update_field( $field_key, array_values( array_unique( $ids ) ), $selector );
-			} else {
-				update_field( $field_key, (int) $post_id, $selector );
+	protected static function link_waiting_field( $pending, $post_id, $selector, array $all = array() ) {
+		$wait  = self::parse_pending( $pending );
+		$field = acf_get_field( $wait['field'] );
+		if ( ! $field ) {
+			return true;
+		}
+		// Posts listed before this one that are still to come are not in the list yet.
+		$index = $wait['pos'];
+		if ( null !== $index ) {
+			foreach ( $all as $row ) {
+				$other = self::parse_pending( (string) $row );
+				if ( (string) $row !== $pending && $other['place'] === $wait['place'] && null !== $other['pos'] && $other['pos'] < $wait['pos'] ) {
+					--$index;
+				}
 			}
 		}
+		$current = get_field( $wait['field'], $selector, false );
+		if ( ! $wait['path'] ) {
+			update_field( $wait['field'], wp_slash( self::place_post( $field, $current, $post_id, $index ) ), $selector );
+			return true;
+		}
+		$sub = self::sub_field_at( $field, $wait['path'] );
+		if ( ! $sub || ! is_array( $current ) ) {
+			return true; // The field or its rows are not what they were: nothing to put the post into.
+		}
+		$node = &$current;
+		foreach ( $wait['path'] as $segment ) {
+			if ( ! is_array( $node ) ) {
+				return true;
+			}
+			if ( ! array_key_exists( $segment, $node ) ) {
+				$node[ $segment ] = null;
+			}
+			$node = &$node[ $segment ];
+		}
+		$node = self::place_post( $sub, $node, $post_id, $index );
+		unset( $node );
+		update_field( $wait['field'], wp_slash( $current ), $selector );
 		return true;
+	}
+
+	/**
+	 * A reference field's raw value with a post added: the post for a single
+	 * one, inserted at its place for a list.
+	 *
+	 * @param array    $field   The reference field.
+	 * @param mixed    $current Its raw value.
+	 * @param int      $post_id Post to add.
+	 * @param int|null $index   Where in a list, or null for the end.
+	 * @return int|array
+	 */
+	protected static function place_post( array $field, $current, $post_id, $index ) {
+		if ( 'relationship' !== $field['type'] && empty( $field['multiple'] ) ) {
+			return (int) $post_id;
+		}
+		$list = is_array( $current ) ? array_values( $current ) : ( null === $current || false === $current || '' === $current ? array() : array( $current ) );
+		$list = array_map(
+			static function ( $item ) {
+				return is_numeric( $item ) ? (int) $item : $item; // A page link may hold a URL.
+			},
+			$list
+		);
+		if ( in_array( (int) $post_id, $list, true ) ) {
+			return $list;
+		}
+		array_splice( $list, null === $index ? count( $list ) : max( 0, min( $index, count( $list ) ) ), 0, array( (int) $post_id ) );
+		return $list;
+	}
+
+	/**
+	 * The sub field a pending row's path leads to: row numbers are passed over, field keys followed.
+	 *
+	 * @param array    $field Top-level field.
+	 * @param string[] $path  Path.
+	 * @return array|null
+	 */
+	protected static function sub_field_at( array $field, array $path ) {
+		foreach ( $path as $segment ) {
+			if ( ctype_digit( (string) $segment ) ) {
+				continue;
+			}
+			$next = null;
+			foreach ( self::sub_fields( $field ) as $sub ) {
+				if ( $sub['key'] === $segment ) {
+					$next = $sub;
+					break;
+				}
+			}
+			if ( ! $next ) {
+				return null;
+			}
+			$field = $next;
+		}
+		return $field;
 	}
 
 	/**
@@ -917,7 +1025,9 @@ class MigratePlus_ACF {
 		if ( is_numeric( $item ) && get_userdata( (int) $item ) ) {
 			return (int) $item;
 		}
-		return (int) MigratePlus_Importer::resolve_author( (string) $item, false );
+		// Authors are no longer matched by name, so a plain value names a user by email or login only.
+		$user = is_email( (string) $item ) ? get_user_by( 'email', (string) $item ) : get_user_by( 'login', (string) $item );
+		return $user ? (int) $user->ID : 0;
 	}
 
 	/**
@@ -931,8 +1041,9 @@ class MigratePlus_ACF {
 	 */
 	public static function resolve_post( $value, array $types, $job = null ) {
 		$common = array(
-			// Not 'any': that leaves out post types hidden from search.
-			'post_type'        => $types ? $types : array_keys( get_post_types() ),
+			// Not 'any': that leaves out post types hidden from search. Nor revisions or menu items,
+			// which share their post's slug and title but are never what a reference means.
+			'post_type'        => $types ? $types : array_values( array_diff( array_keys( get_post_types() ), self::NOT_REFERENCED ) ),
 			'post_status'      => 'any',
 			'posts_per_page'   => 1,
 			'fields'           => 'ids',
@@ -1013,7 +1124,7 @@ class MigratePlus_ACF {
 		// 2. A local post id.
 		if ( ctype_digit( $value ) ) {
 			$post = get_post( (int) $value );
-			if ( $post && ( ! $types || in_array( $post->post_type, $types, true ) ) ) {
+			if ( $post && ( $types ? in_array( $post->post_type, $types, true ) : ! in_array( $post->post_type, self::NOT_REFERENCED, true ) ) ) {
 				return (int) $post->ID;
 			}
 		}

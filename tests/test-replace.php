@@ -97,6 +97,25 @@ class Test_Replace extends WP_UnitTestCase {
 		$this->assertStringContainsString( 's:9:"https://x"', $out );
 	}
 
+	public function test_json_escaped_urls_are_replaced_with_their_escaping_kept() {
+		$count = 0;
+		$out   = MigratePlus_Replace::replace_value( '[{"url":"https:\/\/old.test\/a","link":"https://old.test/b","other":"https:\/\/old.testing.com"}]', MigratePlus_Replace::matcher( 'https://old.test', 'https://new.test', false ), $count );
+		$this->assertSame( '[{"url":"https:\/\/new.test\/a","link":"https://new.test/b","other":"https:\/\/old.testing.com"}]', $out );
+		$this->assertSame( 2, $count );
+	}
+
+	public function test_matches_in_keys_unloaded_objects_and_enums_count_as_unsafe() {
+		$match  = MigratePlus_Replace::matcher( 'http://old.test', 'https://x', false );
+		$count  = 0;
+		$unsafe = 0;
+		$keyed  = 'a:2:{s:19:"http://old.test/key";s:1:"x";i:0;O:8:"Some_Cls":1:{s:1:"u";s:15:"http://old.test";}}';
+		$enum   = 'a:2:{i:0;E:11:"Suit:Hearts";i:1;s:15:"http://old.test";}';
+		$this->assertSame( $keyed, MigratePlus_Replace::replace_value( $keyed, $match, $count, $unsafe ) );
+		$this->assertSame( $enum, MigratePlus_Replace::replace_value( $enum, $match, $count, $unsafe ) );
+		$this->assertSame( 0, $count );
+		$this->assertSame( 3, $unsafe );
+	}
+
 	public function test_corrupt_serialized_data_is_left_alone() {
 		$value = 'a:1:{s:99:"http://old.test";}';
 		$this->assertSame( $value, $this->replace( $value, 'http://old.test' ) );
@@ -164,6 +183,83 @@ class Test_Replace extends WP_UnitTestCase {
 
 		$this->assertWPError( MigratePlus_Replace::rollback_batch( $history[0]['id'] ), 'A run cannot be rolled back twice.' );
 		MigratePlus_Replace::forget( $history[0]['id'] );
+	}
+
+	public function test_a_batch_waits_while_another_request_runs_the_same_run() {
+		global $wpdb;
+		$post_id = self::factory()->post->create( array( 'post_content' => 'Go to http://old.test/a' ) );
+		$state   = MigratePlus_Replace::start(
+			array(
+				'search'  => 'http://old.test',
+				'replace' => 'https://new.example',
+				'tables'  => array( $wpdb->posts ),
+			)
+		);
+		$wpdb->insert(
+			$wpdb->options,
+			array(
+				'option_name'  => MigratePlus_Replace::LOCK_PREFIX . $state['id'],
+				'option_value' => ( time() + 60 ) . ':other',
+				'autoload'     => 'no',
+			)
+		);
+
+		MigratePlus_Replace::run_batch( $state );
+		$this->assertTrue( $state['busy'] );
+		$this->assertSame( 0, $state['done'] );
+		$this->assertSame( 'Go to http://old.test/a', get_post( $post_id )->post_content );
+
+		$wpdb->delete( $wpdb->options, array( 'option_name' => MigratePlus_Replace::LOCK_PREFIX . $state['id'] ) );
+		while ( ! $state['complete'] ) {
+			MigratePlus_Replace::run_batch( $state );
+		}
+		clean_post_cache( $post_id );
+		$this->assertArrayNotHasKey( 'busy', $state );
+		$this->assertSame( 'Go to https://new.example/a', get_post( $post_id )->post_content );
+		MigratePlus_Replace::forget( $state['id'] );
+	}
+
+	public function test_a_run_resumed_after_its_request_died_never_replaces_twice() {
+		global $wpdb;
+		for ( $i = 0; $i < 520; $i++ ) {
+			add_option( 'mp_resume_' . $i, 'http://old.test', '', false );
+		}
+		// The replacement holds the search text, so a row replaced twice would end in /blog/blog.
+		$state = MigratePlus_Replace::start(
+			array(
+				'search'  => 'http://old.test',
+				'replace' => 'http://old.test/blog',
+				'tables'  => array( $wpdb->options ),
+			)
+		);
+		$died  = false;
+		$die   = static function ( $query ) use ( &$died, $wpdb ) {
+			if ( ! $died && false !== strpos( $query, "FROM `{$wpdb->options}` WHERE (`option_id`) > (" ) ) {
+				$died = true;
+				throw new RuntimeException( 'Request died' );
+			}
+			return $query;
+		};
+		add_filter( 'query', $die );
+		try {
+			MigratePlus_Replace::run_batch( $state );
+			$this->fail( 'The second page was never read.' );
+		} catch ( RuntimeException $e ) {
+			$this->assertSame( 'Request died', $e->getMessage() );
+		}
+		remove_filter( 'query', $die );
+
+		$state = MigratePlus_Replace::load_state( $state['id'] );
+		while ( ! $state['complete'] ) {
+			MigratePlus_Replace::run_batch( $state );
+		}
+		wp_cache_flush();
+		$values = array();
+		for ( $i = 0; $i < 520; $i++ ) {
+			$values[ get_option( 'mp_resume_' . $i ) ] = true;
+		}
+		$this->assertSame( array( 'http://old.test/blog' ), array_keys( $values ) );
+		MigratePlus_Replace::forget( $state['id'] );
 	}
 
 	public function test_interrupted_run_can_be_rolled_back_once_idle() {

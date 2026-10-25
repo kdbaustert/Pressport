@@ -322,4 +322,51 @@ class MigratePlus_Util {
 		}
 		return null === $value ? '' : (string) $value;
 	}
+
+	/**
+	 * Change an option that several requests may change at once (the list of jobs,
+	 * the export history, the saved mappings). Read, change and write happen under a
+	 * short lock, with the value read fresh from the table, so two requests that each
+	 * add an entry can't both write their own copy and lose the other's.
+	 *
+	 * @param string   $option  Option name (not autoloaded).
+	 * @param callable $change  Gets the current value; returns the new one, or null to leave it as it is.
+	 * @param mixed    $default Value when the option does not exist.
+	 * @return mixed The value now saved.
+	 */
+	public static function update_option_locked( $option, callable $change, $default = array() ) {
+		global $wpdb;
+		// Under migrateplus_lock_, which uninstall clears with the batch locks.
+		$name  = 'migrateplus_lock_opt_' . md5( $option );
+		$token = ( time() + 10 ) . ':' . wp_generate_password( 8, false );
+		$held  = false;
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery -- the options API has no atomic insert.
+		for ( $try = 0; $try < 50 && ! $held; $try++ ) {
+			$held = (bool) $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')", $name, $token ) );
+			if ( ! $held ) {
+				$current = (string) $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", $name ) );
+				// Left by a request that died while it held the lock.
+				if ( '' !== $current && (int) $current < time() ) {
+					$held = (bool) $wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s AND option_value = %s", $token, $name, $current ) );
+				}
+			}
+			if ( ! $held ) {
+				usleep( 100000 );
+			}
+		}
+		// After five seconds the change goes ahead without the lock: a lost race is better than a lost change.
+		wp_cache_delete( $option, 'options' );
+		wp_cache_delete( 'notoptions', 'options' );
+		$value = $change( get_option( $option, $default ) );
+		if ( null !== $value ) {
+			update_option( $option, $value, false );
+		} else {
+			$value = get_option( $option, $default );
+		}
+		if ( $held ) {
+			$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s", $name, $token ) );
+		}
+		// phpcs:enable
+		return $value;
+	}
 }

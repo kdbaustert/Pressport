@@ -232,4 +232,73 @@ class Test_Upgrade extends WP_UnitTestCase {
 		$this->assertSame( array( 'a', 'b' ), get_post_meta( $before, 'tag', false ) );
 		$job->delete();
 	}
+
+	public function failed_writes() {
+		return array(
+			'option copy' => array( 'INSERT INTO', 'migrateplus_kept' ),
+			'meta rename' => array( 'UPDATE', 'CONCAT' ),
+		);
+	}
+
+	/**
+	 * A write that fails keeps the old copy and leaves the move to be tried again on the next load.
+	 *
+	 * @dataProvider failed_writes
+	 *
+	 * @param string $verb   Start of the query that fails.
+	 * @param string $needle Text in it.
+	 */
+	public function test_maybe_run_tries_again_when_a_write_failed( $verb, $needle ) {
+		global $wpdb;
+		delete_option( MigratePlus_Upgrade::FLAG );
+		update_option( 'pressport_kept', 'value', false );
+		$post = self::factory()->post->create();
+		add_post_meta( $post, '_pressport_job_id', 'abc' );
+		$fail = static function ( $query ) use ( $verb, $needle ) {
+			return 0 === strpos( ltrim( $query ), $verb ) && false !== strpos( $query, $needle ) ? 'SELECT broken FROM' : $query;
+		};
+		add_filter( 'query', $fail );
+		$errors = $wpdb->suppress_errors( true );
+		MigratePlus_Upgrade::maybe_run();
+		$wpdb->suppress_errors( $errors );
+		remove_filter( 'query', $fail );
+		$this->assertFalse( get_option( MigratePlus_Upgrade::FLAG ) );
+		if ( 'INSERT INTO' === $verb ) {
+			$this->assertSame( 'value', get_option( 'pressport_kept' ) );
+		}
+
+		MigratePlus_Upgrade::maybe_run();
+		$this->assertSame( '1', (string) get_option( MigratePlus_Upgrade::FLAG ) );
+		$this->assertSame( 'value', get_option( 'migrateplus_kept' ) );
+		$this->assertSame( 'abc', get_post_meta( $post, '_migrateplus_job_id', true ) );
+	}
+
+	public function test_a_new_install_keeps_the_object_cache() {
+		wp_cache_set( 'probe', 'kept', 'migrateplus_test' );
+		MigratePlus_Upgrade::run();
+		$this->assertSame( 'kept', wp_cache_get( 'probe', 'migrateplus_test' ) );
+	}
+
+	/**
+	 * The old folder's index.php and .htaccess keep guarding a file that could not be moved.
+	 */
+	public function test_guard_files_stay_while_a_file_is_left_in_the_old_folder() {
+		$old = $this->old_dir();
+		$new = MigratePlus_Util::ensure_storage_dir();
+		wp_mkdir_p( $old );
+		foreach ( array( 'index.php', '.htaccess' ) as $guard ) {
+			file_put_contents( $old . $guard, 'guard' ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		}
+		file_put_contents( $old . 'upgrade-test-moved.json', '[]' ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		// The same name in both folders: this one can't be moved.
+		file_put_contents( $old . 'upgrade-test-stuck.json', '[]' ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		file_put_contents( $new . 'upgrade-test-stuck.json', '{}' ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+
+		MigratePlus_Upgrade::run();
+
+		$this->assertFileExists( $new . 'upgrade-test-moved.json' );
+		$this->assertFileExists( $old . 'upgrade-test-stuck.json' );
+		$this->assertFileExists( $old . 'index.php' );
+		$this->assertFileExists( $old . '.htaccess' );
+	}
 }

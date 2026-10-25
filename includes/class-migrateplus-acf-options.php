@@ -36,7 +36,7 @@ class MigratePlus_ACF_Options {
 				if ( ! $field ) {
 					continue;
 				}
-				$raw = get_field( $field['key'], $page['post_id'], false );
+				$raw = self::stored_value( $field, $page['post_id'] );
 				if ( null === $raw || '' === $raw || ( false === $raw && 'true_false' !== $field['type'] ) ) {
 					continue;
 				}
@@ -159,7 +159,7 @@ class MigratePlus_ACF_Options {
 	 * @return array Result.
 	 */
 	protected static function import_page( array $record, MigratePlus_Job $job, array $opts ) {
-		$slug   = isset( $record['page'] ) ? sanitize_key( $record['page'] ) : '';
+		$slug   = isset( $record['page'] ) ? self::page_slug( MigratePlus_Util::stringify( $record['page'] ) ) : '';
 		$title  = isset( $record['title'] ) ? MigratePlus_Util::stringify( $record['title'] ) : $slug;
 		$values = isset( $record['fields'] ) && is_array( $record['fields'] ) ? $record['fields'] : array();
 		$page   = '' !== $slug ? acf_get_options_page( $slug ) : false;
@@ -182,6 +182,7 @@ class MigratePlus_ACF_Options {
 			'job'          => $job,
 			'base'         => isset( $job->data['settings']['migrateplus_site'] ) ? (string) $job->data['settings']['migrateplus_site'] : '',
 			'create_terms' => ! empty( $opts['create_terms'] ),
+			'rewrite'      => ! empty( $opts['rewrite_links'] ),
 			'defer'        => false,
 			'pending'      => array(),
 			'warnings'     => array(),
@@ -196,7 +197,7 @@ class MigratePlus_ACF_Options {
 				continue;
 			}
 			if ( ! isset( $job->data['side_prev']['acf_options'][ $post_id ][ $field['key'] ] ) ) {
-				$prev = get_field( $field['key'], $post_id, false );
+				$prev = self::stored_value( $field, $post_id );
 				$job->data['side_prev']['acf_options'][ $post_id ][ $field['key'] ] = null === $prev ? array( 'none' => true ) : array( 'value' => $prev );
 			}
 			$value = MigratePlus_ACF::convert( $field, $raw, $ctx );
@@ -234,6 +235,42 @@ class MigratePlus_ACF_Options {
 			}
 		}
 		unset( $job->data['side_prev']['acf_options'] );
+	}
+
+	/**
+	 * A field's saved value, unformatted, or null when none is saved. Unlike
+	 * get_field(), never the field's default: a rollback would save the default
+	 * where there was nothing, and an export would carry it as a value.
+	 *
+	 * @param array      $field   Field.
+	 * @param int|string $post_id Where it is saved ("options", "options_page").
+	 * @return mixed
+	 */
+	protected static function stored_value( array $field, $post_id ) {
+		if ( ! function_exists( 'acf_get_metadata_by_field' ) ) {
+			return get_field( $field['key'], $post_id, false ); // ACF before 6.4.
+		}
+		if ( null === acf_get_metadata_by_field( $post_id, $field ) ) {
+			return null;
+		}
+		return get_field( $field['key'], $post_id, false );
+	}
+
+	/**
+	 * The options page an export names, as this site registers it: options pages
+	 * registered in code keep their slug's case ("Site-Options"), which
+	 * sanitize_key() would lower.
+	 *
+	 * @param string $slug Slug from the file.
+	 * @return string
+	 */
+	protected static function page_slug( $slug ) {
+		$slug  = trim( $slug );
+		$pages = function_exists( 'acf_get_options_pages' ) ? acf_get_options_pages() : array();
+		if ( '' !== $slug && is_array( $pages ) && array_key_exists( $slug, $pages ) ) {
+			return $slug;
+		}
+		return sanitize_key( $slug ); // As older versions read it, and lowercase slugs are the norm.
 	}
 
 	/**

@@ -25,6 +25,13 @@ defined( 'ABSPATH' ) || exit;
 class MigratePlus_Terms {
 
 	/**
+	 * Term meta holding the uid of a parent that was not imported yet.
+	 *
+	 * @var string
+	 */
+	const PARENT_META = '_migrateplus_parent_uid';
+
+	/**
 	 * Every term of the taxonomies on the exported post types, parents before
 	 * children, as portable data.
 	 *
@@ -55,6 +62,63 @@ class MigratePlus_Terms {
 	}
 
 	/**
+	 * One page of the terms export() returns, taxonomy by taxonomy, for an export
+	 * written a page at a time. A page is ordered parents first, but a parent can
+	 * sit on an earlier or a later page than its child: the import links a child
+	 * to a parent that arrives after it (see adopt_waiting_children()).
+	 *
+	 * @param array $args   Export args (post_types, exclude_meta, include_acf).
+	 * @param mixed $cursor { tax, offset } from the last batch, or null for the first.
+	 * @param int   $limit  Terms per page.
+	 * @return array { items: array[], next: array|null }
+	 */
+	public static function export_batch( array $args, $cursor, $limit ) {
+		$limit  = max( 1, (int) $limit );
+		$taxes  = self::taxonomies_for( $args['post_types'] );
+		$index  = is_array( $cursor ) && isset( $cursor['tax'] ) ? (int) $cursor['tax'] : 0;
+		$offset = is_array( $cursor ) && isset( $cursor['offset'] ) ? (int) $cursor['offset'] : 0;
+		$total  = count( $taxes );
+		$items  = array();
+		$room   = $limit;
+		while ( $index < $total && $room > 0 ) {
+			$tax = get_taxonomy( $taxes[ $index ] );
+			if ( ! $tax || ! self::user_can( $tax->cap->manage_terms ) ) {
+				++$index;
+				$offset = 0;
+				continue;
+			}
+			$want  = $room;
+			$terms = get_terms(
+				array(
+					'taxonomy'   => $tax->name,
+					'hide_empty' => false,
+					'orderby'    => 'term_id',
+					'order'      => 'ASC',
+					'number'     => $want,
+					'offset'     => $offset,
+				)
+			);
+			$terms = is_wp_error( $terms ) ? array() : $terms;
+			foreach ( self::parents_first( $terms ) as $term ) {
+				$items[] = self::export_term( $term, $tax, $args );
+			}
+			$room   -= count( $terms );
+			$offset += count( $terms );
+			if ( count( $terms ) < $want ) {
+				++$index;
+				$offset = 0;
+			}
+		}
+		return array(
+			'items' => $items,
+			'next'  => $index < $total ? array(
+				'tax'    => $index,
+				'offset' => $offset,
+			) : null,
+		);
+	}
+
+	/**
 	 * How many terms an export with these args would carry.
 	 *
 	 * @param array $args Export args.
@@ -67,7 +131,12 @@ class MigratePlus_Terms {
 			if ( ! $tax || ! self::user_can( $tax->cap->manage_terms ) ) {
 				continue;
 			}
-			$n      = wp_count_terms( array( 'taxonomy' => $taxonomy, 'hide_empty' => false ) );
+			$n      = wp_count_terms(
+				array(
+					'taxonomy'   => $taxonomy,
+					'hide_empty' => false,
+				)
+			);
 			$total += is_wp_error( $n ) ? 0 : (int) $n;
 		}
 		return $total;
@@ -115,9 +184,16 @@ class MigratePlus_Terms {
 			}
 		}
 		// Orphans of a parent get_terms() did not return (a filtered list) still export, at the end.
-		return count( $out ) === count( $terms ) ? $out : array_merge( $out, array_udiff( $terms, $out, static function ( $a, $b ) {
-			return $a->term_id - $b->term_id;
-		} ) );
+		return count( $out ) === count( $terms ) ? $out : array_merge(
+			$out,
+			array_udiff(
+				$terms,
+				$out,
+				static function ( $a, $b ) {
+					return $a->term_id - $b->term_id;
+				}
+			)
+		);
 	}
 
 	/**
@@ -274,9 +350,20 @@ class MigratePlus_Terms {
 		$existing = self::find_term( $record, $uid );
 		$parent   = $tax->hierarchical ? self::find_parent( $record, $job ) : 0;
 		$warnings = array();
-		if ( $tax->hierarchical && ! empty( $record['parent'] ) && ! $parent ) {
-			/* translators: %s: term name */
-			$warnings[] = sprintf( __( 'Its parent is not on this site, so "%s" sits at the top level.', 'migrateplus' ), $label );
+		// A parent not here yet may come later in the file: the term waits for it under its uid.
+		$waits_for = $tax->hierarchical && ! empty( $record['parent'] ) && ! $parent ? self::uid(
+			$job,
+			array(
+				'taxonomy' => $taxonomy,
+				'id'       => $record['parent'],
+			)
+		) : '';
+		if ( '' !== $waits_for ) {
+			$warnings[] = $existing
+				/* translators: %s: term name */
+				? sprintf( __( 'Its parent is not on this site yet, so "%s" keeps the parent it has here until that parent is imported.', 'migrateplus' ), $label )
+				/* translators: %s: term name */
+				: sprintf( __( 'Its parent is not on this site yet, so "%s" sits at the top level until that parent is imported.', 'migrateplus' ), $label );
 		}
 
 		if ( $dry ) {
@@ -285,11 +372,14 @@ class MigratePlus_Terms {
 			return self::result( $existing ? 'updated' : 'created', $existing, self::with_warnings( $message, $warnings ), ! empty( $warnings ) );
 		}
 
-		$slug    = isset( $record['slug'] ) ? sanitize_title( MigratePlus_Util::stringify( $record['slug'] ) ) : '';
-		$fields  = array(
+		$slug   = isset( $record['slug'] ) ? sanitize_title( MigratePlus_Util::stringify( $record['slug'] ) ) : '';
+		$fields = array(
 			'description' => isset( $record['description'] ) ? MigratePlus_Util::stringify( $record['description'] ) : '',
 			'parent'      => $parent,
 		);
+		if ( $existing && '' !== $waits_for ) {
+			unset( $fields['parent'] ); // Left out, wp_update_term() keeps the parent the term has.
+		}
 		if ( '' !== $slug ) {
 			$fields['slug'] = $slug;
 		}
@@ -320,6 +410,14 @@ class MigratePlus_Terms {
 		if ( '' !== $uid && ! get_term_meta( $term_id, '_migrateplus_source_uid', true ) ) {
 			add_term_meta( $term_id, '_migrateplus_source_uid', $uid );
 		}
+		if ( '' !== $waits_for ) {
+			update_term_meta( $term_id, self::PARENT_META, $waits_for );
+		} else {
+			delete_term_meta( $term_id, self::PARENT_META );
+		}
+		if ( $tax->hierarchical && '' !== $uid ) {
+			self::adopt_waiting_children( $term_id, $taxonomy, $uid );
+		}
 
 		self::import_meta( $term_id, isset( $record['meta'] ) && is_array( $record['meta'] ) ? $record['meta'] : array() );
 		if ( ! empty( $record['image'] ) ) {
@@ -332,7 +430,7 @@ class MigratePlus_Terms {
 			$warnings[] = __( 'The term carries ACF fields but Advanced Custom Fields is not active.', 'migrateplus' );
 		}
 		if ( ! empty( $record['yoast'] ) && is_array( $record['yoast'] ) ) {
-			MigratePlus_Yoast::import_term( $term_id, $taxonomy, $record['yoast'] );
+			MigratePlus_Yoast::import_term( $term_id, $taxonomy, $record['yoast'], $job, $opts, $warnings );
 		}
 
 		/* translators: 1: Created/Updated, 2: term name, 3: taxonomy */
@@ -347,7 +445,7 @@ class MigratePlus_Terms {
 	 * @param array           $record Term record.
 	 * @return string '' without an id.
 	 */
-	protected static function uid( MigratePlus_Job $job, array $record ) {
+	public static function uid( MigratePlus_Job $job, array $record ) {
 		if ( ! isset( $record['id'] ) || ! isset( $record['taxonomy'] ) ) {
 			return '';
 		}
@@ -356,13 +454,18 @@ class MigratePlus_Terms {
 
 	/**
 	 * The term a record names on this site: by the uid it was imported with, then
-	 * by its "Parent > Child" path, then by its slug.
+	 * by its exact slug, then by its "Parent > Child" path. Names are compared
+	 * exactly along the path, and the term found must carry the record's name:
+	 * term_exists() matches the sanitized name first, so "C", "C#" and "C++"
+	 * (all "c") would otherwise land on one term, renamed by each update.
 	 *
-	 * @param array  $record Term record.
-	 * @param string $uid    From uid().
+	 * Menus and Yoast's primary term look terms up through here too.
+	 *
+	 * @param array  $record Term record: taxonomy, and any of slug, path, name.
+	 * @param string $uid    From uid(), or ''.
 	 * @return int 0 when it is not here.
 	 */
-	protected static function find_term( array $record, $uid ) {
+	public static function find_term( array $record, $uid ) {
 		$taxonomy = sanitize_key( MigratePlus_Util::stringify( $record['taxonomy'] ) );
 		if ( '' !== $uid ) {
 			$ids = get_terms(
@@ -378,16 +481,84 @@ class MigratePlus_Terms {
 				return (int) $ids[0];
 			}
 		}
-		$path = isset( $record['path'] ) ? MigratePlus_Util::stringify( $record['path'] ) : '';
-		if ( '' !== $path ) {
-			$ids = MigratePlus_Importer::resolve_terms( $taxonomy, array( $path ), false );
-			if ( $ids ) {
-				return (int) $ids[0];
-			}
-		}
 		$slug = isset( $record['slug'] ) ? sanitize_title( MigratePlus_Util::stringify( $record['slug'] ) ) : '';
 		$term = '' !== $slug ? get_term_by( 'slug', $slug, $taxonomy ) : false;
-		return $term instanceof WP_Term ? (int) $term->term_id : 0;
+		if ( $term instanceof WP_Term ) {
+			return (int) $term->term_id;
+		}
+		$path = isset( $record['path'] ) ? MigratePlus_Util::stringify( $record['path'] ) : '';
+		$id   = '' !== $path ? self::term_at_path( $taxonomy, $path ) : 0;
+		$name = isset( $record['name'] ) ? html_entity_decode( trim( MigratePlus_Util::stringify( $record['name'] ) ), ENT_QUOTES, 'UTF-8' ) : '';
+		if ( $id && '' !== $name && html_entity_decode( (string) get_term_field( 'name', $id, $taxonomy, 'raw' ), ENT_QUOTES, 'UTF-8' ) !== $name ) {
+			return 0;
+		}
+		return $id;
+	}
+
+	/**
+	 * The term at a "Parent > Child" path, each step matched by its exact name
+	 * under the step before it. A non-hierarchical taxonomy's path is the name.
+	 *
+	 * @param string $taxonomy Taxonomy.
+	 * @param string $path     Path.
+	 * @return int 0 when a step is not here.
+	 */
+	protected static function term_at_path( $taxonomy, $path ) {
+		$hierarchical = is_taxonomy_hierarchical( $taxonomy );
+		$parts        = $hierarchical ? array_map( 'trim', preg_split( '/\s*>\s*/', $path ) ) : array( trim( $path ) );
+		$parent       = 0;
+		foreach ( array_filter( $parts, 'strlen' ) as $part ) {
+			$part = html_entity_decode( $part, ENT_QUOTES, 'UTF-8' );
+			$args = array(
+				'taxonomy'   => $taxonomy,
+				'hide_empty' => false,
+				'name'       => $part,
+			);
+			if ( $hierarchical ) {
+				$args['parent'] = $parent;
+			}
+			// The query compares names as the database collation does ("c" is "C"): only an exact name counts.
+			$terms = get_terms( $args );
+			$found = 0;
+			foreach ( is_wp_error( $terms ) ? array() : $terms as $term ) {
+				if ( html_entity_decode( $term->name, ENT_QUOTES, 'UTF-8' ) === $part ) {
+					$found = (int) $term->term_id;
+					break;
+				}
+			}
+			if ( ! $found ) {
+				return 0;
+			}
+			$parent = $found;
+		}
+		return $parent;
+	}
+
+	/**
+	 * Terms imported before their parent wait for it: now that it is here, they move under it.
+	 *
+	 * @param int    $term_id  The term just imported.
+	 * @param string $taxonomy Its taxonomy.
+	 * @param string $uid      Its uid.
+	 */
+	protected static function adopt_waiting_children( $term_id, $taxonomy, $uid ) {
+		$children = get_terms(
+			array(
+				'taxonomy'   => $taxonomy,
+				'hide_empty' => false,
+				'fields'     => 'ids',
+				'meta_key'   => self::PARENT_META, // phpcs:ignore WordPress.DB.SlowDBQuery
+				'meta_value' => $uid, // phpcs:ignore WordPress.DB.SlowDBQuery
+			)
+		);
+		foreach ( is_wp_error( $children ) ? array() : $children as $child ) {
+			if ( (int) $child === (int) $term_id ) {
+				continue;
+			}
+			if ( ! is_wp_error( wp_update_term( (int) $child, $taxonomy, array( 'parent' => (int) $term_id ) ) ) ) {
+				delete_term_meta( (int) $child, self::PARENT_META );
+			}
+		}
 	}
 
 	/**
