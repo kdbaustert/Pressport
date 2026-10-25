@@ -24,7 +24,7 @@
 	/* The outcome bars and their keys: brighter than the accents above. */
 	--pp-out-created: #00b15a;
 	--pp-out-updated: #ffc400;
-	--pp-out-skipped: #b0bec5;
+	--pp-out-skipped: #ffb000;
 	--pp-out-failed: #e62845;
 	--pp-r-lg: 12px;
 	--pp-r: 8px;
@@ -342,6 +342,16 @@
 .migrateplus-dups-chips { grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); }
 .migrateplus-legend li.is-copied { border-top-color: var(--pp-tide); }
 .migrateplus-legend li.is-replaced { border-top-color: var(--pp-hull); }
+/* Each record and its status in a scroll box, like a database table picker. */
+.migrateplus-dups-roll { margin: 0 0 12px; padding: 0; max-height: 180px; overflow-y: auto; list-style: none; background: var(--pp-paper); border: 1px solid var(--pp-line); border-radius: var(--pp-r-sm); }
+.migrateplus-dups-roll li { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin: 0; padding: 6px 12px; font-size: 12px; }
+.migrateplus-dups-roll li + li { border-top: 1px solid var(--pp-line-2); }
+.migrateplus-dups-roll-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.migrateplus-dups-roll-status { flex: none; color: var(--pp-muted); }
+.migrateplus-dups-roll-status::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--pp-out-skipped); }
+.migrateplus-dups-roll-status.is-updated::before { background: var(--pp-out-updated); }
+.migrateplus-dups-roll-status.is-copied::before { background: var(--pp-tide); }
+.migrateplus-dups-roll-status.is-replaced::before { background: var(--pp-hull); }
 .migrateplus-dups-plan { font-weight: 600; }
 .migrateplus-dups-tools, .migrateplus-dups-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 12px; }
 .migrateplus-dups-tools input[type="search"] { min-width: 220px; }
@@ -432,6 +442,20 @@
 .migrateplus-chip:focus-visible { outline: none; box-shadow: var(--pp-focus); }
 .migrateplus-chip.is-active { background: var(--pp-ink); border-color: var(--pp-ink); color: #fff; }
 .migrateplus-chip-count { font-variant-numeric: tabular-nums; opacity: .7; }
+/* The log's level chips carry their level's color: a dot at rest, the whole chip when active. */
+.migrateplus-chip-success::before, .migrateplus-chip-skipped::before,
+.migrateplus-chip-warning::before, .migrateplus-chip-error::before {
+	content: ""; width: 8px; height: 8px; border-radius: 50%;
+}
+.migrateplus-chip-success::before { background: var(--pp-out-created); }
+.migrateplus-chip-skipped::before { background: var(--pp-out-skipped); }
+.migrateplus-chip-warning::before { background: var(--pp-buoy); }
+.migrateplus-chip-error::before { background: var(--pp-out-failed); }
+.migrateplus-chip.is-active::before { background: currentColor; }
+.migrateplus-chip-success.is-active { background: var(--pp-out-created); border-color: var(--pp-out-created); }
+.migrateplus-chip-skipped.is-active { background: var(--pp-out-skipped); border-color: var(--pp-out-skipped); color: var(--pp-ink); }
+.migrateplus-chip-warning.is-active { background: var(--pp-buoy); border-color: var(--pp-buoy); }
+.migrateplus-chip-error.is-active { background: var(--pp-out-failed); border-color: var(--pp-out-failed); }
 .migrateplus-app input.migrateplus-search {
 	margin-left: auto; width: 220px; min-height: 32px; padding-left: 30px;
 	background: var(--pp-paper) no-repeat 9px 50% / 14px url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%2366708a' stroke-width='1.6'%3E%3Ccircle cx='7' cy='7' r='5'/%3E%3Cpath d='m11 11 3.5 3.5'/%3E%3C/svg%3E");
@@ -442,6 +466,7 @@
 .migrateplus-log time { color: #98a1b3; }
 .migrateplus-log span { word-break: break-word; }
 .migrateplus-log li.migrateplus-log-success { border-left-color: #00b15a; }
+.migrateplus-log li.migrateplus-log-skipped { border-left-color: var(--pp-out-skipped); color: var(--pp-muted); }
 .migrateplus-log li.migrateplus-log-warning { border-left-color: var(--pp-buoy); background: #fffdf6; }
 .migrateplus-log li.migrateplus-log-error { border-left-color: #e62845; color: #8a2a20; background: #fff8f7; }
 .migrateplus-log li.migrateplus-log-empty { display: block; color: var(--pp-muted); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 16px 20px; }
@@ -523,7 +548,8 @@
 .migrateplus-toggles.is-flush { margin-top: 0; padding-top: 0; border-top: 0; }
 .migrateplus-toggle.is-disabled label { cursor: default; opacity: .6; }
 .migrateplus-check-chip { position: relative; display: inline-flex; cursor: pointer; }
-.migrateplus-check-chip input { position: absolute; opacity: 0; pointer-events: none; }
+.migrateplus-check-chip input { position: absolute; opacity: 0 !important; pointer-events: none; }
+.migrateplus-check-chip input:disabled + span { opacity: .55; cursor: default; }
 .migrateplus-check-chip span { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border: 1px solid var(--pp-line); border-radius: 999px; background: var(--pp-paper); font-weight: 500; color: var(--pp-ink-2); }
 .migrateplus-check-chip:hover span { border-color: var(--pp-ink-2); }
 .migrateplus-check-chip input:checked + span { background: var(--pp-tide-wash); border-color: var(--pp-tide); color: var(--pp-tide-dark); }

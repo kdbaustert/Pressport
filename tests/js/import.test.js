@@ -93,7 +93,8 @@ describe('Import', () => {
     await env.flush()
     assert.deepEqual(env.requests.map(r => r.action), ['preview', 'duplicates', 'save', 'run'])
     assert.equal(json(env.sent('save')[0], 'options').author, 0)
-    assert.equal(env.modal.title(), 'Import complete')
+    assert.equal(env.modal.isOpen(), false)
+    assert.equal(env.$('.migrateplus-run h2').textContent, 'Import complete')
   })
 
   it('offers Review mapping and a dry run for a file of several post types', async () => {
@@ -166,7 +167,8 @@ describe('Import', () => {
     const opts = json(env.sent('save')[0], 'options')
     assert.equal(opts.dry_run, 1)
     assert.equal(opts.skip_existing, 1)
-    assert.equal(env.modal.title(), 'Dry run complete')
+    assert.equal(env.modal.isOpen(), false)
+    assert.equal(env.$('.migrateplus-run h2').textContent, 'Dry run complete. Nothing was saved.')
   })
 
   it('offers to import anyway when the duplicates check fails', async () => {
@@ -213,7 +215,8 @@ describe('Import', () => {
     env.clock.tick(1)
     await env.flush()
     assert.equal(env.sent('run').length, 2)
-    assert.equal(env.modal.title(), 'Dry run complete')
+    assert.equal(env.modal.isOpen(), false)
+    assert.equal(env.$('.migrateplus-run h2').textContent, 'Dry run complete. Nothing was saved.')
   })
 
   it('stops after three retries and says why', async () => {
@@ -245,7 +248,8 @@ describe('Import', () => {
     env.clock.tick(2000)
     await env.flush()
     assert.equal(env.sent('run').length, 2)
-    assert.equal(env.modal.title(), 'Dry run complete')
+    assert.equal(env.modal.isOpen(), false)
+    assert.equal(env.$('.migrateplus-run h2').textContent, 'Dry run complete. Nothing was saved.')
   })
 
   it('ends the server message with a full stop before the advice', async () => {
@@ -289,11 +293,26 @@ describe('Import', () => {
     assert.equal(env.sent('run').length, 2)
   })
 
+  it('filters the log to skipped records', async () => {
+    const finished = done(true)
+    finished.job.log = [
+      { t: 1700000000, l: 'success', m: 'Created "Dune" (#7).' },
+      { t: 1700000001, l: 'skipped', m: 'Not updated: "Emma" (#8) is unchanged.' },
+    ]
+    const env = await mappingStep({ run: finished })
+    env.click(env.byText('button', 'Dry run'))
+    await env.flush()
+    env.click(env.$('#migrateplus-log-filter-skipped'))
+    const lines = env.$$('.migrateplus-log li')
+    assert.equal(lines.length, 1)
+    assert.match(lines[0].textContent, /Not updated: "Emma"/)
+    assert.equal(env.$('#migrateplus-log-filter-skipped .migrateplus-chip-count').textContent, '1')
+  })
+
   it('starts the next import with the log filters cleared', async () => {
     const env = await mappingStep({ run: done(true) })
     env.click(env.byText('button', 'Dry run'))
     await env.flush()
-    env.click(env.modal.button('Close'))
     env.click(env.$('#migrateplus-log-filter-error'))
     env.type(env.$('#migrateplus-log-search'), 'Dune')
     env.click(env.byText('button', 'Import'))
@@ -407,7 +426,8 @@ describe('Duplicates', () => {
     await env.flush()
     assert.deepEqual(env.requests.map(r => r.action), ['preview', 'duplicates', 'save', 'run'])
     assert.equal(env.$('.migrateplus-dups-table'), null)
-    assert.equal(env.modal.title(), 'Import complete')
+    assert.equal(env.modal.isOpen(), false)
+    assert.equal(env.$('.migrateplus-run h2').textContent, 'Import complete')
   })
 
   it('starts every row at Skip, unless records imported before are updated, which updates the ones that differ', async () => {
@@ -439,6 +459,18 @@ describe('Duplicates', () => {
     assert.deepEqual(chips(env), ['New: 2', 'Will update: 1', 'Skipped: 1', 'Imported as copies: 1', 'Update details: 0', 'Replace file: 1'])
     assert.equal(plan(env), 'Import 2 new items, update 1, import 1 as a copy, replace 1 file, skip 1.')
     assert.equal(env.$('.migrateplus-actionbar-status').textContent, plan(env))
+  })
+
+  it('lists each record with its status under the cards and follows the choices', async () => {
+    const env = await duplicatesScreen()
+    const roll = () => env.$$('.migrateplus-dups-roll li').map(li => [...li.children].map(n => n.textContent).join(' — '))
+    assert.deepEqual(roll(), ['Dune — Skipped', 'Emma — Skipped', 'Kindred — Skipped', 'cover.jpg — Skipped'])
+
+    env.choose(choice(env, 0), 'update')
+    env.choose(choice(env, 1), 'copy')
+    env.choose(choice(env, 4), 'update')
+    assert.deepEqual(roll(), ['Dune — Will update', 'Emma — Imported as copy', 'Kindred — Skipped', 'cover.jpg — Update details'])
+    assert.equal(env.$$('.migrateplus-dups-roll li .migrateplus-dups-roll-status.is-updated').length, 2)
   })
 
   it('applies the bulk buttons to the rows the filter and search show, and no others', async () => {
@@ -525,7 +557,8 @@ describe('Duplicates', () => {
     assert.deepEqual(opts.copy_ids, [42])
     assert.deepEqual(opts.skip_ids, [])
     assert.equal(opts.duplicate_rest, '')
-    assert.equal(env.modal.title(), 'Import complete')
+    assert.equal(env.modal.isOpen(), false)
+    assert.equal(env.$('.migrateplus-run h2').textContent, 'Import complete')
   })
 
   it('picks an author for each post before what to do with it, but none for media', async () => {
@@ -667,15 +700,16 @@ describe('Upload', () => {
 })
 
 describe('Opening an import from History', () => {
-  it('takes the job out of the address once it has read it', async () => {
+  it('keeps the job in the address but takes out the resume flag, so a reload reopens without resuming', async () => {
     const env = boot({
       url: 'https://example.test/wp-admin/admin.php?page=migrateplus&job=books&resume=1',
       data: { openJob: 'books', resume: true },
       routes: { job: { job: job({ status: 'running' }) }, run: done(false) },
     })
-    assert.equal(env.window.location.search, '?page=migrateplus')
     await env.flush()
-    assert.equal(env.modal.title(), 'Import complete')
+    assert.equal(env.window.location.search, '?page=migrateplus&job=books')
+    assert.equal(env.modal.isOpen(), false)
+    assert.equal(env.$('.migrateplus-run h2').textContent, 'Import complete')
   })
 
   it('opens a draft at the mapping step, and deletes it when another file is chosen', async () => {
@@ -685,9 +719,16 @@ describe('Opening an import from History', () => {
     })
     await env.flush()
     assert.ok(env.$('.migrateplus-map-table'))
+    assert.equal(env.window.location.search, '?page=migrateplus&job=books')
     env.click(env.byText('button', 'Choose another file'))
     await env.flush()
     assert.equal(env.sent('delete')[0].fields.job, 'books')
     assert.ok(env.$('.migrateplus-import-drop'))
+    assert.equal(env.window.location.search, '?page=migrateplus')
+  })
+
+  it('puts the job of a fresh upload in the address, so a refresh comes back to its step', async () => {
+    const env = await mappingStep()
+    assert.equal(env.window.location.search, '?page=migrateplus&job=books')
   })
 })

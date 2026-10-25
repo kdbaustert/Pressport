@@ -1196,7 +1196,7 @@
 			actions: [ { label: __( 'Cancel', 'migrateplus' ), onClick: cancel } ],
 		} );
 		const withCreds = ( data ) => Object.assign( {}, creds, data );
-		const poll = () => api( 'pull_run', withCreds( { export: exportId } ) ).then( ( p ) => {
+		const poll = () => apiWithRetry( 'pull_run', withCreds( { export: exportId } ) ).then( ( p ) => {
 			if ( cancelled ) {
 				return;
 			}
@@ -1206,7 +1206,7 @@
 				return poll();
 			}
 			modal.update( { message: __( 'Export done. Downloading the file and reading the first records…', 'migrateplus' ), percent: null } );
-			return api( 'pull_fetch', withCreds( { export: exportId, filename: p.filename || '' } ) ).then( ( data ) => {
+			return apiWithRetry( 'pull_fetch', withCreds( { export: exportId, filename: p.filename || '' } ) ).then( ( data ) => {
 				if ( cancelled ) {
 					// The file arrived before the cancel reached it: don't leave its job in History.
 					api( 'delete', { job: data.job.id } ).catch( () => {} );
@@ -1215,7 +1215,8 @@
 				adoptPreview( data );
 			} );
 		} );
-		api( 'pull_start', withCreds( { post_types: types.join( ',' ) } ) ).then( ( start ) => {
+		// Retried like an import batch: one dropped request shouldn't end a long pull.
+		apiWithRetry( 'pull_start', withCreds( { post_types: types.join( ',' ) } ) ).then( ( start ) => {
 			if ( cancelled ) {
 				return;
 			}
@@ -1534,6 +1535,34 @@
 		return out;
 	}
 
+	/** The summary card a duplicate counts under, as the choices stand. */
+	function outcomeOf( it ) {
+		const v = choiceOf( it );
+		return it.media && 'update' === v ? 'details' : v;
+	}
+
+	/** Each listed record and the status its choice gives it, in a scroll box under the cards. */
+	function DuplicateRoll( { items } ) {
+		if ( ! items.length ) {
+			return null;
+		}
+		const labels = {
+			update: __( 'Will update', 'migrateplus' ),
+			skip: __( 'Skipped', 'migrateplus' ),
+			copy: __( 'Imported as copy', 'migrateplus' ),
+			details: __( 'Update details', 'migrateplus' ),
+			replace: __( 'Replace file', 'migrateplus' ),
+		};
+		const css = { update: 'updated', skip: 'skipped', copy: 'copied', details: 'updated', replace: 'replaced' };
+		return createElement( 'ul', { className: 'migrateplus-dups-roll', 'aria-label': __( 'Each record already on this site and what happens to it', 'migrateplus' ) },
+			items.map( ( it ) => {
+				const o = outcomeOf( it );
+				return createElement( 'li', { key: it.index },
+					createElement( 'span', { className: 'migrateplus-dups-roll-title' }, it.title || __( '(untitled)', 'migrateplus' ) ),
+					createElement( 'span', { className: 'migrateplus-dups-roll-status is-' + css[ o ] }, labels[ o ] ) );
+			} ) );
+	}
+
 	/** Whether a duplicate passes the screen's filter and title search. */
 	function duplicateShown( it, filter, query ) {
 		const pass = {
@@ -1612,6 +1641,7 @@
 					createElement( 'li', { key: i, className: 'is-' + key + ( value ? '' : ' is-zero' ) },
 						createElement( 'strong', null, value.toLocaleString() ),
 						createElement( 'span', null, label ) ) ) ),
+				createElement( DuplicateRoll, { items } ),
 				createElement( 'p', { className: 'migrateplus-dups-plan', 'aria-live': 'polite' }, duplicatePlan( c ) ),
 				createElement( 'p', { className: 'migrateplus-muted' }, __( 'An update also writes the custom fields, terms and images. WordPress keeps a revision of each post or page it updates, so the old version can be restored from the editor. A replaced file cannot be rolled back.', 'migrateplus' ) )
 			),
@@ -2057,6 +2087,7 @@
 		state.savedNotice = data.savedMapping ? { type: 'info', text: sprintf( __( 'This file has the same fields as the saved mapping “%s”, so it is selected below. Choose Apply to use it, or map the fields yourself.', 'migrateplus' ), data.savedMapping ) } : null;
 		// Set either way: an export dropped and cancelled before would otherwise hide the steps of the next file.
 		state.direct = isExport( data.job );
+		syncJobUrl();
 		if ( state.direct ) {
 			render();
 			modal.update( { title: __( 'Checking for duplicates', 'migrateplus' ), message: __( 'Looking for items in this file that are already on this site…', 'migrateplus' ), percent: null, detail: '', actions: [] } );
@@ -2074,6 +2105,7 @@
 			api( 'delete', { job: state.job.id } ).catch( () => {} );
 		}
 		state.job = null;
+		syncJobUrl();
 	}
 
 	// Step 2
@@ -2895,7 +2927,7 @@
 
 	/** The run's log, newest first, with filters and search. */
 	function RunLog( { job } ) {
-		const counts = { all: 0, error: 0, warning: 0, success: 0 };
+		const counts = { all: 0, error: 0, warning: 0, success: 0, skipped: 0 };
 		( job.log || [] ).forEach( ( e ) => {
 			counts.all++;
 			if ( counts[ e.l ] !== undefined ) {
@@ -2909,7 +2941,7 @@
 		const filterChip = ( key, label ) => createElement( 'button', {
 			type: 'button',
 			id: 'migrateplus-log-filter-' + key,
-			className: 'migrateplus-chip' + ( state.logFilter === key ? ' is-active' : '' ),
+			className: 'migrateplus-chip migrateplus-chip-' + key + ( state.logFilter === key ? ' is-active' : '' ),
 			'aria-pressed': state.logFilter === key ? 'true' : 'false',
 			onClick: () => {
 				state.logFilter = key;
@@ -2921,7 +2953,7 @@
 			createElement( 'header', { className: 'migrateplus-log-head' },
 				createElement( 'h2', null, __( 'Log', 'migrateplus' ) ),
 				createElement( 'div', { className: 'migrateplus-chips', role: 'group', 'aria-label': __( 'Filter log', 'migrateplus' ) },
-					filterChip( 'all', __( 'All', 'migrateplus' ) ), filterChip( 'success', __( 'Saved', 'migrateplus' ) ), filterChip( 'warning', __( 'Warnings', 'migrateplus' ) ), filterChip( 'error', __( 'Errors', 'migrateplus' ) ) ),
+					filterChip( 'all', __( 'All', 'migrateplus' ) ), filterChip( 'success', __( 'Saved', 'migrateplus' ) ), filterChip( 'skipped', __( 'Skipped', 'migrateplus' ) ), filterChip( 'warning', __( 'Warnings', 'migrateplus' ) ), filterChip( 'error', __( 'Errors', 'migrateplus' ) ) ),
 				createElement( 'input', { type: 'search', id: 'migrateplus-log-search', className: 'migrateplus-search', placeholder: __( 'Search the log', 'migrateplus' ), 'aria-label': __( 'Search the log', 'migrateplus' ), value: state.logQuery, onChange: ( e ) => {
 					state.logQuery = e.target.value;
 					render();
@@ -2979,13 +3011,10 @@
 		const total = job.total ? Number( job.total ) : 0;
 		const processed = Number( s.processed ) || 0;
 		const dry = Number( job.options.dry_run ) === 1;
-		const done = [ 'complete', 'rolled_back' ].includes( job.status );
 		const pausing = state.paused && state.running;
 
 		let percent = null;
-		if ( done ) {
-			percent = 100;
-		} else if ( total ) {
+		if ( total ) {
 			percent = Math.min( 100, ( processed / total ) * 100 );
 		}
 
@@ -2993,7 +3022,7 @@
 			? sprintf( __( '%1$s of %2$s records processed', 'migrateplus' ), processed.toLocaleString(), total.toLocaleString() )
 			: sprintf( __( '%s records processed', 'migrateplus' ), processed.toLocaleString() );
 		const clock = state.runClock;
-		if ( ! done && ! state.paused && total && clock && processed > clock.processed ) {
+		if ( ! state.paused && total && clock && processed > clock.processed ) {
 			const rate = ( processed - clock.processed ) / ( ( Date.now() - clock.t ) / 1000 );
 			if ( rate > 0 ) {
 				/* translators: 1: records processed, 2: time left, e.g. 3m 05s */
@@ -3007,32 +3036,7 @@
 		let note = '';
 		let actions;
 		const close = () => modal.close();
-		if ( done ) {
-			title = dry ? __( 'Dry run complete', 'migrateplus' ) : __( 'Import complete', 'migrateplus' );
-			if ( job.status === 'rolled_back' ) {
-				title = __( 'Rolled back', 'migrateplus' );
-			}
-			message = dry ? __( 'Nothing was saved. Review the numbers below, then run the real import.', 'migrateplus' ) : __( 'All records have been processed.', 'migrateplus' );
-			tone = Number( s.failed ) > 0 ? '' : 'success';
-			if ( Number( s.failed ) > 0 ) {
-				/* translators: %s: number of records that failed */
-				note = sprintf( _n( '%s record failed. See the log for details.', '%s records failed. See the log for details.', Number( s.failed ), 'migrateplus' ), s.failed );
-			}
-			actions = dry
-				? [
-					{ label: __( 'Run the real import', 'migrateplus' ), primary: true, onClick: () => start( false ) },
-					{ label: __( 'Adjust mapping', 'migrateplus' ), onClick: () => {
-						modal.close();
-						state.step = 'map';
-						render();
-					} },
-					{ label: __( 'Close', 'migrateplus' ), onClick: close },
-				]
-				: [
-					{ label: __( 'View imported content', 'migrateplus' ), primary: true, href: contentUrl( job ) },
-					{ label: __( 'Close', 'migrateplus' ), onClick: close },
-				];
-		} else if ( state.error ) {
+		if ( state.error ) {
 			title = dry ? __( 'Dry run stopped', 'migrateplus' ) : __( 'Import stopped', 'migrateplus' );
 			message = __( 'Progress is saved. Fix the problem, then resume to pick up where it stopped.', 'migrateplus' );
 			tone = 'error';
@@ -3120,6 +3124,10 @@
 				}
 				if ( data.done ) {
 					state.running = false;
+					// No completion modal: the page behind it shows the finished run in full.
+					if ( modal.isOpen() && 'run' === modal.kind() ) {
+						modal.close();
+					}
 					render();
 					return;
 				}
@@ -3168,17 +3176,25 @@
 			window.location.href = D.importUrl;
 			return;
 		}
-		dropJobFromUrl();
+		syncJobUrl();
 		render();
 	}
 
-	/** Take ?job= and &resume=1 out of the address, so a reload doesn't open or resume that import again. */
-	function dropJobFromUrl() {
+	/**
+	 * Keep the open job's id in the address, and no more: a refresh then comes back to this
+	 * job's screen, while &resume=1 never survives a load, so a reload after Pause can't resume.
+	 */
+	function syncJobUrl() {
 		const url = new URL( window.location.href );
-		if ( ! url.searchParams.has( 'job' ) && ! url.searchParams.has( 'resume' ) ) {
+		const id = state.job ? String( state.job.id ) : '';
+		if ( ( url.searchParams.get( 'job' ) || '' ) === id && ! url.searchParams.has( 'resume' ) ) {
 			return;
 		}
-		url.searchParams.delete( 'job' );
+		if ( id ) {
+			url.searchParams.set( 'job', id );
+		} else {
+			url.searchParams.delete( 'job' );
+		}
 		url.searchParams.delete( 'resume' );
 		window.history.replaceState( window.history.state, '', url.toString() );
 	}
@@ -4497,6 +4513,7 @@
 			state.direct = false;
 			state.error = '';
 			state.paused = ! resume;
+			syncJobUrl();
 			if ( resume && ! [ 'complete', 'rolled_back' ].includes( data.job.status ) ) {
 				modal.open( { kind: 'run' } );
 			}
@@ -4504,7 +4521,10 @@
 			if ( resume ) {
 				runLoop();
 			}
-		} ).catch( ( err ) => modalError( __( 'Could not open the import', 'migrateplus' ), err ) );
+		} ).catch( ( err ) => {
+			syncJobUrl(); // A job that can't load any more must not stick in the address.
+			modalError( __( 'Could not open the import', 'migrateplus' ), err );
+		} );
 	}
 
 	window.addEventListener( 'beforeunload', ( e ) => {
@@ -4525,7 +4545,6 @@
 	} else if ( 'replace' === state.tab ) {
 		loadReplaceRuns();
 	} else if ( D.openJob ) {
-		dropJobFromUrl(); // Read once: a reload after Pause must not resume, nor one after "Import" reopen this job.
-		openJob( D.openJob, D.resume );
+		openJob( D.openJob, D.resume ); // Its answer syncs the address, so a reload reopens the job but never resumes it.
 	}
 }() );

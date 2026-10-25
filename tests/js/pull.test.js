@@ -1,6 +1,6 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { boot, job, fail, noNativeDialogs } from './helpers.js'
+import { boot, job, fail, offline, noNativeDialogs } from './helpers.js'
 
 afterEach(noNativeDialogs)
 
@@ -79,6 +79,33 @@ describe('Pull', () => {
     assert.equal(env.modal.title(), 'Import 12 items?')
   })
 
+  it('retries after a network failure mid-pull instead of stopping', async () => {
+    const env = boot({
+      routes: {
+        pull_check: oldSite,
+        pull_start: { export: 'exp123', total: 12 },
+        pull_run: (fields, calls) =>
+          calls ? { done: 12, total: 12, complete: true, filename: 'pull.json' } : offline,
+        pull_fetch: fetched,
+        duplicates: { count: 0, total: 12 },
+      },
+    })
+
+    await connect(env, { url: 'https://old.test', user: 'kenny', pass: 'abcd efgh ijkl' })
+    await env.until(() => env.byText('button', 'Pull 12 items'))
+    env.click(env.byText('button', 'Pull 12 items'))
+    await env.flush()
+    assert.equal(env.sent('pull_run').length, 1)
+
+    env.clock.tick(1999)
+    await env.flush()
+    assert.equal(env.sent('pull_run').length, 1)
+    env.clock.tick(1)
+    await env.flush()
+    assert.equal(env.sent('pull_run').length, 2)
+    assert.equal(env.modal.title(), 'Import 12 items?')
+  })
+
   it('connects with the pull key instead, sending no username or password', async () => {
     const env = boot({ routes: { pull_check: oldSite } })
 
@@ -126,6 +153,7 @@ describe('Pull', () => {
 
     await connect(env, { url: 'https://old.test', user: 'kenny', pass: 'abcd efgh ijkl' })
 
+    await env.until(() => env.$('.migrateplus-pull .notice-error'))
     assert.equal(env.modal.isOpen(), false)
     assert.match(env.$('.migrateplus-pull .notice-error').textContent, /Could not reach the old site/)
     assert.ok(pullForm(env), 'still disconnected')

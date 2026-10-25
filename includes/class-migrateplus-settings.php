@@ -311,7 +311,7 @@ class MigratePlus_Settings {
 			'<span class="migrateplus-number"><input type="number" id="migrateplus_%1$s" name="%2$s[%1$s]" value="%3$d" min="%4$d" max="%5$d"> %6$s</span>',
 			esc_attr( $args['key'] ),
 			esc_attr( self::OPTION ),
-			max( (int) $args['choices'][0], min( (int) $args['choices'][1], (int) self::get( $args['key'] ) ) ),
+			(int) max( (int) $args['choices'][0], min( (int) $args['choices'][1], (int) self::get( $args['key'] ) ) ),
 			(int) $args['choices'][0],
 			(int) $args['choices'][1],
 			esc_html( $args['suffix'] )

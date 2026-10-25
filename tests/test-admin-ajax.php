@@ -642,9 +642,9 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 						'author_name'  => 'Guest Writer',
 					),
 					array(
-						'title'       => 'Two',
-						'post_type'   => 'post',
-						'author_name' => 'Maya Lindqvist',
+						'title'        => 'Two',
+						'post_type'    => 'post',
+						'author_name'  => 'Maya Lindqvist',
 						'author_login' => 'maya',
 					),
 					array(
@@ -1721,7 +1721,7 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 		$this->assertSame( '/migrateplus/v1/site', $query['rest_route'] );
 		$this->assertStringStartsWith( 'https://old.test/?', $calls[0]['url'] );
 		$headers = $calls[0]['args']['headers'];
-		$this->assertSame( 'Basic ' . base64_encode( 'kenny:abcd efgh ijkl' ), $headers['Authorization'] );
+		$this->assertSame( 'Basic ' . base64_encode( 'kenny:abcd efgh ijkl' ), $headers['Authorization'] ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode -- asserting the Basic auth header.
 		$this->assertGreaterThanOrEqual( 30, $calls[0]['args']['timeout'] );
 	}
 

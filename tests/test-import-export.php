@@ -838,8 +838,8 @@ class Test_Import_Export extends WP_UnitTestCase {
 		$items[1]['author_login'] = 'maya';
 		$items[2]['author_login'] = 'maya';
 		$items[3]['author_name']  = 'Guest Writer';
-		$file = $this->export_file( $items );
-		$job  = $this->import_file(
+		$file                     = $this->export_file( $items );
+		$job                      = $this->import_file(
 			$file,
 			array(
 				'author'     => $all,
@@ -869,12 +869,12 @@ class Test_Import_Export extends WP_UnitTestCase {
 			),
 			MigratePlus_Mappings::clean_author_map(
 				array(
-					'maya'                    => $editor,
-					'Guest Writer'            => (string) $editor,
-					'guest'                   => $subscriber,
-					'gone'                    => 999999,
-					''                        => $editor,
-					str_repeat( 'a', 201 )    => $editor,
+					'maya'                 => $editor,
+					'Guest Writer'         => (string) $editor,
+					'guest'                => $subscriber,
+					'gone'                 => 999999,
+					''                     => $editor,
+					str_repeat( 'a', 201 ) => $editor,
 				)
 			)
 		);

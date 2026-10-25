@@ -322,6 +322,11 @@ export function boot({ data = {}, routes = {}, url = site + '/wp-admin/admin.php
     async flush() {
       for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r))
     },
+    // Flushes until what the test waits for has rendered. Bounded, so a render
+    // that never comes still fails the assertion instead of hanging.
+    async until(rendered) {
+      for (let i = 0; i < 100 && !rendered(); i++) await new Promise(r => setImmediate(r))
+    },
     click,
     // Whether leaving the page now would ask first.
     leaveWarns: () => !window.dispatchEvent(new window.Event('beforeunload', { cancelable: true })),

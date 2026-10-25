@@ -81,7 +81,7 @@ class MigratePlus_Rest {
 		}
 		return new WP_Error(
 			'migrateplus_rest_forbidden',
-			__( 'This needs a user allowed to run Migrate Plus. Connect with an application password of such an account, or with the old site\'s pull key.', 'migrateplus' ),
+			__( 'This needs a user allowed to run Migrate Plus. Connect with an application password for such an account, or with this site\'s pull key.', 'migrateplus' ),
 			array( 'status' => rest_authorization_required_code() )
 		);
 	}

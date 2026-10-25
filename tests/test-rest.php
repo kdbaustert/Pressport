@@ -6,7 +6,6 @@
  *
  * @package MigratePlus
  */
-
 class Test_Rest extends WP_UnitTestCase {
 
 	/** @var WP_REST_Server */
@@ -58,8 +57,8 @@ class Test_Rest extends WP_UnitTestCase {
 	 * @return string The key.
 	 */
 	protected function store_pull_key( $user ) {
-		$saved             = (array) get_option( MigratePlus_Settings::OPTION, array() );
-		$saved['pull_key'] = 'a-stored-pull-key';
+		$saved                  = (array) get_option( MigratePlus_Settings::OPTION, array() );
+		$saved['pull_key']      = 'a-stored-pull-key';
 		$saved['pull_key_user'] = $user;
 		update_option( MigratePlus_Settings::OPTION, $saved );
 		MigratePlus_Settings::flush_cache();

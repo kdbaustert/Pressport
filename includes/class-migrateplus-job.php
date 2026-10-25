@@ -309,7 +309,7 @@ class MigratePlus_Job {
 	/**
 	 * Append a log line.
 	 *
-	 * @param string $level   info|success|warning|error.
+	 * @param string $level   info|success|skipped|warning|error.
 	 * @param string $message Message.
 	 */
 	public function log( $level, $message ) {

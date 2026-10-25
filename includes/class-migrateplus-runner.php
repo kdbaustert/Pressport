@@ -445,9 +445,9 @@ class MigratePlus_Runner {
 		$changes = empty( $match['image'] ) ? (array) $match['changes'] : (array) $match['image']['changes'];
 		// Products carry more than changes_for() reads, so their rows show no Differs or Unchanged.
 		$compared = ! empty( $match['image'] ) || ! MigratePlus_Woo::is_product_type( get_post_type( $match['post_id'] ) );
-		$media   = empty( $match['image'] ) ? null : array_intersect_key( $match['image'], array_flip( array( 'current', 'current_full', 'imported', 'is_image' ) ) );
-		$view    = get_permalink( $match['post_id'] );
-		$edit    = current_user_can( 'edit_post', $match['post_id'] ) ? get_edit_post_link( $match['post_id'], 'raw' ) : '';
+		$media    = empty( $match['image'] ) ? null : array_intersect_key( $match['image'], array_flip( array( 'current', 'current_full', 'imported', 'is_image' ) ) );
+		$view     = get_permalink( $match['post_id'] );
+		$edit     = current_user_can( 'edit_post', $match['post_id'] ) ? get_edit_post_link( $match['post_id'], 'raw' ) : '';
 		return array(
 			'index'          => $index,
 			'title'          => self::record_title( $record, (array) $job->data['mapping'], $index ),
@@ -582,8 +582,8 @@ class MigratePlus_Runner {
 				if ( ! isset( $found[ $who['key'] ] ) ) {
 					// Between environments of one site the same people exist with the same logins,
 					// so an account here with the record's old login is offered as the match.
-					$match                 = '' !== $who['login'] ? get_user_by( 'login', $who['login'] ) : false;
-					$match                 = $match && MigratePlus_Mappings::may_write_posts( $match->ID ) ? $match : false;
+					$match                = '' !== $who['login'] ? get_user_by( 'login', $who['login'] ) : false;
+					$match                = $match && MigratePlus_Mappings::may_write_posts( $match->ID ) ? $match : false;
 					$found[ $who['key'] ] = $who + array(
 						'count' => 0,
 						'match' => $match ? array(
@@ -750,7 +750,7 @@ class MigratePlus_Runner {
 			if ( ! empty( $result['comments'] ) ) {
 				$job->data['comments_total'] += (int) $result['comments'];
 			}
-			$level = 'failed' === $result['action'] ? 'error' : ( ! empty( $result['warning'] ) ? 'warning' : ( 'skipped' === $result['action'] ? 'info' : 'success' ) );
+			$level = 'failed' === $result['action'] ? 'error' : ( ! empty( $result['warning'] ) ? 'warning' : ( 'skipped' === $result['action'] ? 'skipped' : 'success' ) );
 			$job->log( $level, $result['message'] );
 			$results[] = $result;
 
@@ -806,7 +806,7 @@ class MigratePlus_Runner {
 				// Counted with the records', so the finished line and WP-CLI's exit status report them.
 				++$job->data['stats']['failed'];
 			}
-			$job->log( 'failed' === $result['action'] ? 'error' : ( ! empty( $result['warning'] ) ? 'warning' : ( 'skipped' === $result['action'] ? 'info' : 'success' ) ), $result['message'] );
+			$job->log( 'failed' === $result['action'] ? 'error' : ( ! empty( $result['warning'] ) ? 'warning' : ( 'skipped' === $result['action'] ? 'skipped' : 'success' ) ), $result['message'] );
 		}
 		foreach ( $job->data['sections'] as $i => $section ) {
 			if ( $side['type'] === $section['type'] ) {
