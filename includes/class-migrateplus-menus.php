@@ -26,11 +26,33 @@ defined( 'ABSPATH' ) || exit;
 class MigratePlus_Menus {
 
 	/**
+	 * How many menus an export would carry.
+	 *
+	 * @param array $args Export args.
+	 * @return int
+	 */
+	public static function count( array $args = array() ) { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- every side section counts with the export args.
+		return self::user_can( 'edit_theme_options' ) ? count( wp_get_nav_menus() ) : 0;
+	}
+
+	/**
+	 * Whether the person exporting may do something; WP-CLI without --user runs
+	 * with the shell account's access.
+	 *
+	 * @param string $capability Capability.
+	 * @return bool
+	 */
+	protected static function user_can( $capability ) {
+		return ! get_current_user_id() || current_user_can( $capability );
+	}
+
+	/**
 	 * Every menu on this site as portable data.
 	 *
+	 * @param array $args Export args (unused: menus have no filters).
 	 * @return array[] { id, name, slug, description, locations, items }
 	 */
-	public static function export() {
+	public static function export( array $args = array() ) { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found -- every side section exports with the export args.
 		$locations = array();
 		foreach ( get_nav_menu_locations() as $location => $menu_id ) {
 			if ( $menu_id ) {
@@ -131,6 +153,20 @@ class MigratePlus_Menus {
 	 */
 	public static function pending( MigratePlus_Job $job ) {
 		return ! empty( $job->data['settings']['menus_file'] ) && ! empty( $job->data['options']['import_menus'] );
+	}
+
+	/**
+	 * The menus stage, as MigratePlus_Runner::run_side() drives one: all menus in
+	 * one request (they hold no files to download).
+	 *
+	 * @param MigratePlus_Job $job Job.
+	 * @return array { done: true, results: array[] }
+	 */
+	public static function import_batch( MigratePlus_Job $job ) {
+		return array(
+			'done'    => true,
+			'results' => self::import( $job ),
+		);
 	}
 
 	/**
@@ -617,6 +653,7 @@ class MigratePlus_Menus {
 			'message' => $message,
 			'warning' => $warn,
 			'menu'    => true,
+			'section' => 'nav_menu',
 		);
 	}
 }

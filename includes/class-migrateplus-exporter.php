@@ -39,13 +39,93 @@ class MigratePlus_Exporter {
 			'include_acf'      => (int) $s['export_include_acf'],
 			'include_meta'     => (int) $s['export_include_meta'],
 			'include_terms'    => (int) $s['export_include_terms'],
+			'include_term_data' => (int) $s['export_include_term_data'],
 			'include_image'    => (int) $s['export_include_image'],
 			'include_woo'      => (int) $s['export_include_woo'],
 			'include_comments' => (int) $s['export_include_comments'],
 			'include_menus'    => (int) $s['export_include_menus'],
+			'include_users'    => (int) $s['export_include_users'],
+			'include_acf_definitions' => (int) $s['export_include_acf_definitions'],
+			'include_acf_options' => (int) $s['export_include_acf_options'],
+			'include_site_settings' => (int) $s['export_include_site_settings'],
+			'site_sections'    => array_keys( MigratePlus_Site::sections() ), // Which parts of the site settings; all of them to start.
+			'include_orders'   => (int) $s['export_include_orders'],
+			'include_yoast'    => (int) $s['export_include_yoast'],
 			'exclude_meta'     => self::meta_patterns( $s['export_exclude_meta'] ),
 			'gzip'             => MigratePlus_Util::zlib_available() ? (int) $s['export_gzip'] : 0,
 		);
+	}
+
+	/**
+	 * The sections an export can carry next to its items, in the order the file
+	 * holds them (import order). Each class exports with the export args and
+	 * counts what it would export; a batched one exports a page at a time
+	 * (export_batch( args, cursor, limit ) => { items, next }) because there can
+	 * be too many to hold at once.
+	 *
+	 * @return array[] key => { arg, class, label, batched }
+	 */
+	public static function side_providers() {
+		return array(
+			'terms'           => array(
+				'arg'     => 'include_term_data',
+				'class'   => 'MigratePlus_Terms',
+				'label'   => __( 'terms', 'migrateplus' ),
+				'batched' => false,
+			),
+			'users'           => array(
+				'arg'     => 'include_users',
+				'class'   => 'MigratePlus_Users',
+				'label'   => __( 'users', 'migrateplus' ),
+				'batched' => false,
+			),
+			'acf_definitions' => array(
+				'arg'     => 'include_acf_definitions',
+				'class'   => 'MigratePlus_ACF_Definitions',
+				'label'   => __( 'ACF definitions', 'migrateplus' ),
+				'batched' => false,
+			),
+			'acf_options'     => array(
+				'arg'     => 'include_acf_options',
+				'class'   => 'MigratePlus_ACF_Options',
+				'label'   => __( 'ACF options pages', 'migrateplus' ),
+				'batched' => false,
+			),
+			'site_settings'   => array(
+				'arg'     => 'include_site_settings',
+				'class'   => 'MigratePlus_Site',
+				'label'   => __( 'site settings', 'migrateplus' ),
+				'batched' => false,
+			),
+			'menus'           => array(
+				'arg'     => 'include_menus',
+				'class'   => 'MigratePlus_Menus',
+				'label'   => __( 'navigation menus', 'migrateplus' ),
+				'batched' => false,
+			),
+			'orders'          => array(
+				'arg'     => 'include_orders',
+				'class'   => 'MigratePlus_Orders',
+				'label'   => __( 'orders', 'migrateplus' ),
+				'batched' => true,
+			),
+		);
+	}
+
+	/**
+	 * How much each side section an export asks for would hold.
+	 *
+	 * @param array $args Sanitized args.
+	 * @return int[] key => count, only the sections that are on.
+	 */
+	public static function side_counts( array $args ) {
+		$out = array();
+		foreach ( self::side_providers() as $key => $side ) {
+			if ( ! empty( $args[ $side['arg'] ] ) && class_exists( $side['class'] ) ) {
+				$out[ $key ] = (int) call_user_func( array( $side['class'], 'count' ), $args );
+			}
+		}
+		return $out;
 	}
 
 	/**
@@ -73,7 +153,7 @@ class MigratePlus_Exporter {
 	 * @param string[] $patterns From meta_patterns().
 	 * @return bool
 	 */
-	protected static function meta_excluded( $key, array $patterns ) {
+	public static function meta_excluded( $key, array $patterns ) {
 		foreach ( $patterns as $pattern ) {
 			if ( '*' === substr( $pattern, -1 ) ? 0 === strpos( $key, substr( $pattern, 0, -1 ) ) : $key === $pattern ) {
 				return true;
@@ -95,7 +175,9 @@ class MigratePlus_Exporter {
 		}
 		$types = is_array( $args['post_types'] ) ? $args['post_types'] : explode( ',', (string) $args['post_types'] );
 		$types = array_values( array_unique( array_filter( array_map( 'sanitize_key', array_map( 'trim', array_map( 'strval', $types ) ) ) ) ) );
-		if ( ! $types ) {
+		// Users, orders and the site settings are content types of their own on the Export screen: a file can hold them alone.
+		$records_only = ! empty( $args['include_users'] ) || ! empty( $args['include_orders'] ) || ! empty( $args['include_site_settings'] ) || ! empty( $args['include_menus'] );
+		if ( ! $types && ! $records_only ) {
 			return new WP_Error( 'migrateplus_export_type', __( 'Choose at least one content type to export.', 'migrateplus' ) );
 		}
 		foreach ( $types as $type ) {
@@ -105,8 +187,11 @@ class MigratePlus_Exporter {
 			}
 		}
 		// The file is imported in this order. Media first, so featured images, ACF images and
-		// galleries further down reuse the files the media section downloaded (by their URL).
-		$types    = array_values( array_unique( array_merge( array_intersect( array( 'attachment' ), $types ), $types ) ) );
+		// galleries further down reuse the files the media section downloaded (by their URL);
+		// synced patterns next, so the content that embeds them finds them; navigation menus
+		// and templates last, after the pages they link to.
+		$first = array_merge( array( 'attachment' ), MigratePlus_Blocks::FIRST );
+		$types = array_values( array_unique( array_merge( array_intersect( $first, $types ), array_diff( $types, $first, MigratePlus_Blocks::LAST ), array_intersect( MigratePlus_Blocks::LAST, $types ) ) ) );
 		$allowed  = array( 'publish', 'draft', 'pending', 'private', 'future' );
 		$statuses = is_array( $args['statuses'] ) ? $args['statuses'] : explode( ',', (string) $args['statuses'] );
 		$statuses = array_values( array_intersect( array_map( 'sanitize_key', array_map( 'trim', $statuses ) ), array_merge( $allowed, array( 'any' ) ) ) );
@@ -128,10 +213,18 @@ class MigratePlus_Exporter {
 			'include_acf'      => empty( $args['include_acf'] ) ? 0 : 1,
 			'include_meta'     => empty( $args['include_meta'] ) ? 0 : 1,
 			'include_terms'    => empty( $args['include_terms'] ) ? 0 : 1,
+			'include_term_data' => empty( $args['include_term_data'] ) ? 0 : 1,
 			'include_image'    => empty( $args['include_image'] ) ? 0 : 1,
 			'include_woo'      => empty( $args['include_woo'] ) ? 0 : 1,
 			'include_comments' => empty( $args['include_comments'] ) ? 0 : 1,
 			'include_menus'    => empty( $args['include_menus'] ) ? 0 : 1,
+			'include_users'    => empty( $args['include_users'] ) ? 0 : 1,
+			'include_acf_definitions' => empty( $args['include_acf_definitions'] ) ? 0 : 1,
+			'include_acf_options' => empty( $args['include_acf_options'] ) ? 0 : 1,
+			'include_site_settings' => empty( $args['include_site_settings'] ) ? 0 : 1,
+			'site_sections'    => MigratePlus_Site::picked_sections( array( 'site_sections' => array_map( 'sanitize_key', array_map( 'strval', is_array( $args['site_sections'] ) ? $args['site_sections'] : array_filter( explode( ',', (string) $args['site_sections'] ) ) ) ) ) ),
+			'include_orders'   => empty( $args['include_orders'] ) ? 0 : 1,
+			'include_yoast'    => empty( $args['include_yoast'] ) ? 0 : 1,
 			'exclude_meta'     => self::meta_patterns( $args['exclude_meta'] ),
 			'gzip'             => empty( $args['gzip'] ) ? 0 : 1,
 		);
@@ -228,7 +321,12 @@ class MigratePlus_Exporter {
 			'meta_keys' => array(),
 			'acf_names' => array(),
 			'taxes'     => array(),
+			'yoast'     => 0, // Whether any item carried Yoast SEO fields.
 			'menus'     => 0,
+			'terms'     => 0,
+			'sides'     => array(), // Side section => how many it holds, once written.
+			'side_pos'  => 0, // The batched side section being exported, in batched_sides().
+			'side_cursor' => null, // Where its last page stopped.
 			'complete'  => false,
 		);
 
@@ -303,20 +401,36 @@ class MigratePlus_Exporter {
 	protected static function log_start( array $state ) {
 		$args     = $state['args'];
 		$labels   = array_map( array( __CLASS__, 'type_label' ), $args['post_types'] );
+		foreach ( array(
+			'include_users'         => __( 'Users', 'migrateplus' ),
+			'include_orders'        => __( 'Orders', 'migrateplus' ),
+			'include_site_settings' => __( 'Site settings', 'migrateplus' ),
+		) as $arg => $label ) {
+			if ( ! empty( $args[ $arg ] ) ) {
+				$labels[] = $label;
+			}
+		}
 		$user     = get_userdata( (int) $state['user'] );
 		$statuses = MigratePlus_Settings::export_statuses();
 		$included = array(
 			'include_terms'    => __( 'terms', 'migrateplus' ),
+			'include_term_data' => __( 'term data', 'migrateplus' ),
 			'include_image'    => __( 'featured images', 'migrateplus' ),
 			'include_meta'     => __( 'custom fields', 'migrateplus' ),
 			'include_acf'      => __( 'ACF fields', 'migrateplus' ),
 			'include_woo'      => __( 'WooCommerce data', 'migrateplus' ),
 			'include_comments' => __( 'approved comments', 'migrateplus' ),
+			'include_yoast'    => __( 'Yoast SEO fields', 'migrateplus' ),
 			'include_menus'    => __( 'navigation menus', 'migrateplus' ),
+			'include_users'    => __( 'users', 'migrateplus' ),
+			'include_acf_definitions' => __( 'ACF definitions', 'migrateplus' ),
+			'include_acf_options' => __( 'ACF options pages', 'migrateplus' ),
+			'include_site_settings' => __( 'site settings', 'migrateplus' ),
+			'include_orders'   => __( 'orders', 'migrateplus' ),
 		);
 		$products = array_filter( $args['post_types'], array( 'MigratePlus_Woo', 'is_product_type' ) );
 		foreach ( $included as $key => $label ) {
-			if ( empty( $args[ $key ] ) || ( 'include_woo' === $key && ! $products ) ) {
+			if ( empty( $args[ $key ] ) || ( 'include_woo' === $key && ! $products ) || ( 'include_yoast' === $key && ! MigratePlus_Yoast::active() ) ) {
 				unset( $included[ $key ] );
 			}
 		}
@@ -405,9 +519,18 @@ class MigratePlus_Exporter {
 				/* translators: 1: count, 2: file name, 3: size */
 				sprintf( __( 'Wrote %1$d items to %2$s (%3$s).', 'migrateplus' ), $entry['done'], $entry['filename'], size_format( $entry['size'] ) )
 			);
-			if ( ! empty( $state['menus'] ) ) {
-				/* translators: %d: number of menus */
-				$entry['log'][] = self::log_line( 'info', sprintf( _n( 'Included %d navigation menu.', 'Included %d navigation menus.', (int) $state['menus'], 'migrateplus' ), (int) $state['menus'] ) );
+			$providers = self::side_providers();
+			foreach ( isset( $state['sides'] ) ? (array) $state['sides'] : array() as $key => $n ) {
+				if ( ! $n || ! isset( $providers[ $key ] ) ) {
+					continue;
+				}
+				$entry['log'][] = self::log_line(
+					'info',
+					'site_settings' === $key
+						? __( 'Included the site settings.', 'migrateplus' )
+						/* translators: 1: count, 2: what (terms, users, orders...) */
+						: sprintf( __( 'Included %1$d %2$s.', 'migrateplus' ), (int) $n, $providers[ $key ]['label'] )
+				);
 			}
 		}
 		if ( count( $entry['log'] ) > MigratePlus_Job::MAX_LOG ) {
@@ -466,9 +589,12 @@ class MigratePlus_Exporter {
 		if ( $state['complete'] ) {
 			return $state;
 		}
-		// One post type per batch, in the order of args['post_types'].
+		// One post type per batch, in the order of args['post_types']; then the batched side sections.
 		$types = $state['args']['post_types'];
-		$type  = $types[ min( (int) $state['type_pos'], count( $types ) - 1 ) ];
+		if ( (int) $state['type_pos'] >= count( $types ) ) {
+			return self::run_side_batch( $state, $limit );
+		}
+		$type = $types[ (int) $state['type_pos'] ];
 		// Page by ID, not offset: posts deleted between batches would shift later ones out of the export.
 		$after = isset( $state['last_id'] ) ? (int) $state['last_id'] : 0;
 		$ids   = array_map( 'intval', $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND ID > %d ORDER BY ID ASC LIMIT %d", $type, $after, $limit ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
@@ -502,6 +628,7 @@ class MigratePlus_Exporter {
 			$state['meta_keys'] = array_values( array_unique( array_merge( $state['meta_keys'], array_keys( $item['meta'] ) ) ) );
 			$state['acf_names'] = array_values( array_unique( array_merge( $state['acf_names'], array_keys( $item['acf'] ) ) ) );
 			$state['taxes']     = array_values( array_unique( array_merge( $state['taxes'], array_keys( $item['terms'] ) ) ) );
+			$state['yoast']     = ! empty( $state['yoast'] ) || ! empty( $item['yoast'] ) ? 1 : 0;
 			++$state['done'];
 			$state['type_done'][ $type ] = ( isset( $state['type_done'][ $type ] ) ? $state['type_done'][ $type ] : 0 ) + 1;
 		}
@@ -520,13 +647,99 @@ class MigratePlus_Exporter {
 				$state['last_id'] = 0;
 			}
 			// Not when "done" reaches "total": that was counted at the start, and posts added since would end the export before its last types.
-			if ( $state['type_pos'] >= count( $types ) ) {
+			if ( $state['type_pos'] >= count( $types ) && ! self::batched_sides( $state ) ) {
 				self::finish( $state );
 			}
 		}
 		self::save_state( $state );
 		self::log_progress( $state, $log );
 		return $state;
+	}
+
+	/**
+	 * The side sections exported a page at a time, after the post types.
+	 *
+	 * @param array $state State.
+	 * @return string[] Keys of side_providers().
+	 */
+	protected static function batched_sides( array $state ) {
+		$out = array();
+		foreach ( self::side_providers() as $key => $side ) {
+			if ( $side['batched'] && ! empty( $state['args'][ $side['arg'] ] ) && class_exists( $side['class'] ) ) {
+				$out[] = $key;
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * The batched side section being exported, or '' once they are all written.
+	 *
+	 * @param array $state State.
+	 * @return string
+	 */
+	public static function current_side( array $state ) {
+		$sides = self::batched_sides( $state );
+		return (int) $state['type_pos'] >= count( $state['args']['post_types'] ) && isset( $sides[ (int) $state['side_pos'] ] ) ? $sides[ (int) $state['side_pos'] ] : '';
+	}
+
+	/**
+	 * One page of a batched side section (orders), to a work file of its own.
+	 *
+	 * @param array $state State (updated in place).
+	 * @param int   $limit Items per page.
+	 * @return array State.
+	 */
+	protected static function run_side_batch( array &$state, $limit ) {
+		$key = self::current_side( $state );
+		if ( '' === $key ) {
+			self::finish( $state );
+			self::save_state( $state );
+			self::log_progress( $state, array() );
+			return $state;
+		}
+		$side  = self::side_providers()[ $key ];
+		$page  = call_user_func( array( $side['class'], 'export_batch' ), $state['args'], $state['side_cursor'], $limit );
+		$lines = '';
+		$log   = array();
+		foreach ( $page['items'] as $item ) {
+			$json = wp_json_encode( $item, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
+			if ( false === $json ) {
+				/* translators: 1: section (orders), 2: JSON error */
+				self::fail( $state, sprintf( __( 'Could not write the %1$s to the export file: %2$s', 'migrateplus' ), $side['label'], json_last_error_msg() ) );
+				break;
+			}
+			$lines .= $json . "\n";
+		}
+		if ( empty( $state['error'] ) && '' !== $lines && false === file_put_contents( self::side_work_file( $state, $key ), $lines, FILE_APPEND ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
+			self::fail( $state );
+		} elseif ( empty( $state['error'] ) ) {
+			$state['sides'][ $key ] = ( isset( $state['sides'][ $key ] ) ? (int) $state['sides'][ $key ] : 0 ) + count( $page['items'] );
+			$state['side_cursor']   = $page['next'];
+			if ( count( $page['items'] ) ) {
+				/* translators: 1: count, 2: what (orders) */
+				$log[] = self::log_line( 'success', sprintf( __( 'Exported %1$d %2$s.', 'migrateplus' ), count( $page['items'] ), $side['label'] ) );
+			}
+			if ( null === $page['next'] ) {
+				++$state['side_pos'];
+				$state['side_cursor'] = null;
+				if ( '' === self::current_side( $state ) ) {
+					self::finish( $state );
+				}
+			}
+		}
+		self::save_state( $state );
+		self::log_progress( $state, $log );
+		return $state;
+	}
+
+	/**
+	 * @param array  $state State.
+	 * @param string $key   Side section.
+	 * @return string Path of its work file (one item per line).
+	 */
+	protected static function side_work_file( array $state, $key ) {
+		return substr( $state['work'], 0, -6 ) . '-' . str_replace( '_', '-', $key ) . '.jsonl';
 	}
 
 	/**
@@ -539,7 +752,17 @@ class MigratePlus_Exporter {
 		// Compressed while it is written, line by line like the plain file, so memory stays flat whatever its size.
 		$gzip = ! empty( $args['gzip'] ) && MigratePlus_Util::zlib_available();
 		// ".gz" after sanitizing: sanitize_file_name() would turn the inner ".json" into ".json_".
-		$name = sanitize_file_name( 'migrateplus-' . ( 1 === count( $args['post_types'] ) ? $args['post_types'][0] : 'content' ) . '-' . gmdate( 'Y-m-d-His' ) . '.json' ) . ( $gzip ? '.gz' : '' );
+		$kinds = $args['post_types'];
+		foreach ( array(
+			'include_users'         => 'users',
+			'include_orders'        => 'orders',
+			'include_site_settings' => 'site-settings',
+		) as $arg => $kind ) {
+			if ( ! empty( $args[ $arg ] ) ) {
+				$kinds[] = $kind;
+			}
+		}
+		$name  = sanitize_file_name( 'migrateplus-' . ( 1 === count( $kinds ) ? $kinds[0] : 'content' ) . '-' . gmdate( 'Y-m-d-His' ) . '.json' ) . ( $gzip ? '.gz' : '' );
 		$dest = MigratePlus_Util::storage_dir() . 'export-' . $state['id'] . '-' . $name;
 		$in   = fopen( $state['work'], 'rb' ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 		$out  = $gzip ? gzopen( $dest, 'wb6' ) : fopen( $dest, 'wb' ); // phpcs:ignore WordPress.WP.AlternativeFunctions
@@ -567,15 +790,35 @@ class MigratePlus_Exporter {
 		$header['counts']     = (object) $state['type_done'];
 		$header['count']      = $state['done'];
 		$header['mapping']    = self::mapping_for( $state );
-		$menus                = ! empty( $args['include_menus'] ) ? MigratePlus_Menus::export() : array();
-		$menus_json           = $menus ? wp_json_encode( $menus, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) : '';
-		if ( false === $menus_json ) {
-			fclose( $in ); // phpcs:ignore WordPress.WP.AlternativeFunctions
-			$gzip ? gzclose( $out ) : fclose( $out ); // phpcs:ignore WordPress.WP.AlternativeFunctions
-			wp_delete_file( $dest );
-			/* translators: %s: JSON error */
-			self::fail( $state, sprintf( __( 'Could not write the navigation menus to the export file: %s', 'migrateplus' ), json_last_error_msg() ) );
-			return;
+		// Side sections next to the items, each under its own top-level key, in import order.
+		// The batched ones were written page by page to work files of their own.
+		$sides      = array();
+		$sides_json = array();
+		$batched    = array();
+		foreach ( self::side_providers() as $key => $side ) {
+			if ( empty( $args[ $side['arg'] ] ) || ! class_exists( $side['class'] ) ) {
+				continue;
+			}
+			if ( $side['batched'] ) {
+				if ( ! empty( $state['sides'][ $key ] ) && file_exists( self::side_work_file( $state, $key ) ) ) {
+					$batched[ $key ] = self::side_work_file( $state, $key );
+				}
+				continue;
+			}
+			$data = call_user_func( array( $side['class'], 'export' ), $args );
+			if ( ! $data ) {
+				continue;
+			}
+			$sides[ $key ]      = $data;
+			$sides_json[ $key ] = wp_json_encode( $data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
+			if ( false === $sides_json[ $key ] ) {
+				fclose( $in ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+				$gzip ? gzclose( $out ) : fclose( $out ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+				wp_delete_file( $dest );
+				/* translators: 1: section (terms, menus), 2: JSON error */
+				self::fail( $state, sprintf( __( 'Could not write the %1$s to the export file: %2$s', 'migrateplus' ), $side['label'], json_last_error_msg() ) );
+				return;
+			}
 		}
 		// A full disk must not leave a cut-off file marked complete: every write is checked.
 		$write = static function ( $data ) use ( $out, $gzip ) {
@@ -591,7 +834,30 @@ class MigratePlus_Exporter {
 			$ok    = $write( ( $first ? '' : ",\n" ) . $line );
 			$first = false;
 		}
-		$ok = $ok && $write( "\n]" . ( $menus ? ",\n\"menus\":" . $menus_json : '' ) . "}\n" );
+		$ok = $ok && $write( "\n]" );
+		// Sections written whole, then the batched ones streamed from their work files, all in import order.
+		foreach ( self::side_providers() as $key => $side ) {
+			if ( isset( $sides_json[ $key ] ) ) {
+				$ok = $ok && $write( ",\n\"" . $key . '":' . $sides_json[ $key ] );
+			} elseif ( isset( $batched[ $key ] ) ) {
+				$ok    = $ok && $write( ",\n\"" . $key . "\":[\n" );
+				$side_in = fopen( $batched[ $key ], 'rb' ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+				$first = true;
+				while ( $ok && $side_in && false !== ( $line = fgets( $side_in ) ) ) { // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition
+					$line = rtrim( $line, "\r\n" );
+					if ( '' === $line ) {
+						continue;
+					}
+					$ok    = $write( ( $first ? '' : ",\n" ) . $line );
+					$first = false;
+				}
+				if ( $side_in ) {
+					fclose( $side_in ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+				}
+				$ok = $ok && $write( "\n]" );
+			}
+		}
+		$ok = $ok && $write( "}\n" );
 		fclose( $in ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 		$ok = ( $gzip ? gzclose( $out ) : fclose( $out ) ) && $ok; // phpcs:ignore WordPress.WP.AlternativeFunctions
 		if ( ! $ok ) {
@@ -600,9 +866,16 @@ class MigratePlus_Exporter {
 			return;
 		}
 		wp_delete_file( $state['work'] );
+		foreach ( $batched as $file ) {
+			wp_delete_file( $file );
+		}
 
-		$state['file']     = $dest;
-		$state['menus']    = count( $menus );
+		$state['file'] = $dest;
+		foreach ( $sides as $key => $data ) {
+			$state['sides'][ $key ] = count( $data );
+		}
+		$state['menus']    = isset( $sides['menus'] ) ? count( $sides['menus'] ) : 0;
+		$state['terms']    = isset( $sides['terms'] ) ? count( $sides['terms'] ) : 0;
 		$state['filename'] = $name;
 		$state['size']     = (int) filesize( $dest );
 		$state['complete'] = true;
@@ -660,6 +933,10 @@ class MigratePlus_Exporter {
 		if ( ! empty( $state['args']['include_comments'] ) ) {
 			$fields['comments'] = 'comments';
 		}
+		if ( ! empty( $state['yoast'] ) ) {
+			$fields['yoast'] = 'yoast';
+		}
+		$fields['source_url'] = 'link';
 		// One mapping for every post type in the file: media fields are only read for media, featured images for the rest.
 		$types = $state['args']['post_types'];
 		if ( in_array( 'attachment', $types, true ) ) {
@@ -750,7 +1027,8 @@ class MigratePlus_Exporter {
 
 		if ( ! empty( $args['include_terms'] ) ) {
 			foreach ( get_object_taxonomies( $post->post_type, 'objects' ) as $tax ) {
-				if ( 'post_format' === $tax->name || ( ! $tax->public && ! $tax->show_ui ) ) {
+				// Hidden taxonomies stay out, except the theme and area a template belongs to.
+				if ( 'post_format' === $tax->name || ( ! $tax->public && ! $tax->show_ui && ! in_array( $tax->name, MigratePlus_Blocks::HIDDEN_TAXONOMIES, true ) ) ) {
 					continue;
 				}
 				$terms = get_the_terms( $post, $tax->name );
@@ -808,6 +1086,13 @@ class MigratePlus_Exporter {
 
 		if ( ! empty( $args['include_comments'] ) ) {
 			$item['comments'] = self::export_comments( $post, $args );
+		}
+
+		if ( ! empty( $args['include_yoast'] ) && MigratePlus_Yoast::active() ) {
+			$seo = MigratePlus_Yoast::export_post( $post );
+			if ( $seo ) {
+				$item['yoast'] = $seo;
+			}
 		}
 
 		return apply_filters( 'migrateplus_export_item', $item, $post, $args );
@@ -1038,6 +1323,11 @@ class MigratePlus_Exporter {
 	 * @param array $state State.
 	 */
 	public static function delete( array $state ) {
+		foreach ( self::batched_sides( $state ) as $key ) {
+			if ( file_exists( self::side_work_file( $state, $key ) ) ) {
+				wp_delete_file( self::side_work_file( $state, $key ) );
+			}
+		}
 		foreach ( array( 'work', 'file' ) as $k ) {
 			if ( ! empty( $state[ $k ] ) && file_exists( $state[ $k ] ) ) {
 				wp_delete_file( $state[ $k ] );

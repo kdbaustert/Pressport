@@ -330,7 +330,9 @@ class Test_Import_Export extends WP_UnitTestCase {
 		$this->assertFalse( MigratePlus_Importer::importable_post_type( 'post' ) );
 		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
 		$this->assertTrue( MigratePlus_Importer::importable_post_type( 'post' ) );
-		$this->assertFalse( MigratePlus_Importer::importable_post_type( 'wp_template' ) );
+		// Templates have no admin screen but are content of the block editor; menu items travel with their menu.
+		$this->assertTrue( MigratePlus_Importer::importable_post_type( 'wp_template' ) );
+		$this->assertFalse( MigratePlus_Importer::importable_post_type( 'wp_global_styles' ) );
 		$this->assertFalse( MigratePlus_Importer::importable_post_type( 'nav_menu_item' ) );
 	}
 
@@ -1483,9 +1485,10 @@ class Test_Import_Export extends WP_UnitTestCase {
 		);
 		$args = MigratePlus_Exporter::sanitize_args(
 			array(
-				'post_type'     => 'post',
-				'after'         => '2099-01-01', // Nothing matches.
-				'include_menus' => 1,
+				'post_type'         => 'post',
+				'after'             => '2099-01-01', // Nothing matches.
+				'include_menus'     => 1,
+				'include_term_data' => 0, // Menus alone: the terms section has its own tests.
 			)
 		);
 		$this->assertSame( array( 'post' => 0 ), MigratePlus_Exporter::counts( $args ) );

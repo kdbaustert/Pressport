@@ -284,6 +284,7 @@ class MigratePlus_Mappings {
 			'rewrite_links'         => empty( $options['rewrite_links'] ) ? 0 : 1,
 			'import_comments'       => empty( $options['import_comments'] ) ? 0 : 1,
 			'import_menus'          => empty( $options['import_menus'] ) ? 0 : 1,
+			'import_term_data'      => empty( $options['import_term_data'] ) ? 0 : 1,
 			'dry_run'               => empty( $options['dry_run'] ) ? 0 : 1,
 		);
 	}

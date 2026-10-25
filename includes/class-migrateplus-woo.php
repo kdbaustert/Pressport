@@ -636,7 +636,7 @@ class MigratePlus_Woo {
 				'excluded_product_categories' => 'set_excluded_product_categories',
 			) as $key => $method ) {
 				if ( array_key_exists( $key, $woo ) ) {
-					$coupon->$method( MigratePlus_Importer::resolve_terms( 'product_cat', array_map( 'strval', (array) $woo[ $key ] ), ! empty( $opts['create_terms'] ), $warnings ) );
+					$coupon->$method( MigratePlus_Importer::resolve_terms( 'product_cat', array_map( 'strval', (array) $woo[ $key ] ), ! empty( $opts['create_terms'] ), $warnings, $job ) );
 				}
 			}
 			$coupon->save();

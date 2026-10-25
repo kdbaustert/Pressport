@@ -31,6 +31,15 @@ require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-media.php';
 require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-acf.php';
 require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-woo.php';
 require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-menus.php';
+require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-terms.php';
+require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-users.php';
+require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-acf-definitions.php';
+require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-acf-options.php';
+require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-site.php';
+require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-orders.php';
+require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-yoast.php';
+require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-blocks.php';
+require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-redirects.php';
 require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-exporter.php';
 require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-importer.php';
 require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-runner.php';
@@ -45,6 +54,9 @@ if ( is_admin() ) {
 	add_action( 'plugins_loaded', array( 'MigratePlus_Admin', 'init' ) );
 	add_action( 'plugins_loaded', array( 'MigratePlus_Settings', 'init' ) );
 }
+
+// Old addresses of imported posts send visitors to where the posts are now.
+MigratePlus_Redirects::init();
 
 // Let MigratePlus's own requests reach local/dev sites when the setting is on.
 add_filter( 'http_request_host_is_external', array( 'MigratePlus_Util', 'allow_local_host' ), 10, 3 );

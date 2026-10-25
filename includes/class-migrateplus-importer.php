@@ -53,6 +53,8 @@ class MigratePlus_Importer {
 			'featured_image_alt' => array( __( 'Featured image alt text', 'migrateplus' ), '' ),
 			'media_url'          => array( __( 'Media file URL', 'migrateplus' ), __( 'Media imports only: the file to download into the Media Library.', 'migrateplus' ) ),
 			'media_alt'          => array( __( 'Media alt text', 'migrateplus' ), __( 'Media imports only.', 'migrateplus' ) ),
+			'yoast'              => array( __( 'Yoast SEO fields', 'migrateplus' ), __( 'The Yoast SEO data of a Migrate Plus export: title, description, keyphrase, social images and primary category.', 'migrateplus' ) ),
+			'source_url'         => array( __( 'Original URL', 'migrateplus' ), __( 'The item\'s address on the old site. When it differs from its address here, visitors to the old one are redirected.', 'migrateplus' ) ),
 		);
 	}
 
@@ -135,6 +137,13 @@ class MigratePlus_Importer {
 			} elseif ( $match && ! empty( $opts['skip_existing'] ) ) {
 				/* translators: 1: title, 2: post id, 3: what matched (slug, SKU, file name) */
 				return self::result( 'skipped', $match['post_id'], sprintf( __( 'Already on this site: "%1$s" (#%2$d) has the same %3$s.', 'migrateplus' ), $label, $match['post_id'], $match['label'] ) );
+			}
+		}
+		if ( ! $existing && ! $force_new && MigratePlus_Blocks::is_template_type( $type ) ) {
+			// A theme's customised "single" template is the one with that slug: a second one would never show.
+			$existing = MigratePlus_Blocks::find_template( $type, self::slug_from( self::value( $record, $mapping, 'post_name' ) ) );
+			if ( $existing ) {
+				$opts['duplicate'] = 'update';
 			}
 		}
 		$updating = $existing && 'update' === $opts['duplicate'];
@@ -226,6 +235,7 @@ class MigratePlus_Importer {
 			update_post_meta( $post_id, '_migrateplus_source_uid', $uid );
 			update_post_meta( $post_id, '_migrateplus_source_id', wp_slash( $source_id ) );
 			MigratePlus_ACF::link_pending( $post_id, $uid );
+			MigratePlus_Blocks::link_pending( $post_id, $source_id, $job );
 			// Children imported before this post have been waiting for it as their parent.
 			$children = get_posts(
 				array(
@@ -299,7 +309,12 @@ class MigratePlus_Importer {
 				$warnings[] = sprintf( __( 'Taxonomy "%s" is not registered for this post type.', 'migrateplus' ), $taxonomy );
 				continue;
 			}
-			$term_ids = self::resolve_terms( $taxonomy, $names, ! empty( $opts['create_terms'] ), $warnings );
+			if ( 'wp_theme' === $taxonomy ) {
+				// A template belongs to the theme running here, whatever theme it was made for.
+				wp_set_object_terms( $post_id, get_stylesheet(), 'wp_theme', false );
+				continue;
+			}
+			$term_ids = self::resolve_terms( $taxonomy, $names, ! empty( $opts['create_terms'] ) || in_array( $taxonomy, MigratePlus_Blocks::HIDDEN_TAXONOMIES, true ), $warnings, $job );
 			if ( $term_ids ) {
 				wp_set_object_terms( $post_id, $term_ids, $taxonomy, false );
 			}
@@ -386,6 +401,21 @@ class MigratePlus_Importer {
 
 		$comments = empty( $mapping['fields']['comments'] ) ? null : MigratePlus_ACF::read( $record, $mapping['fields']['comments'] );
 		$added    = ! empty( $opts['import_comments'] ) && is_array( $comments ) && $comments ? self::import_comments( $post_id, $comments, $job, $warnings ) : 0;
+
+		// Yoast SEO fields, with or without Yoast here: they wait in the post's meta.
+		$seo = empty( $mapping['fields']['yoast'] ) ? null : MigratePlus_ACF::read( $record, $mapping['fields']['yoast'] );
+		if ( is_array( $seo ) && $seo ) {
+			MigratePlus_Yoast::import_post( $post_id, $seo, $job, $opts, $warnings );
+		}
+		// Blocks that name other content by the old site's ids (synced patterns, navigation links, images).
+		if ( '' !== $content && has_blocks( $content ) ) {
+			MigratePlus_Blocks::relink( $post_id, $job );
+		}
+		// The address it had on the old site, for a redirect when it is not the same here.
+		$source_url = MigratePlus_Util::stringify( self::value( $record, $mapping, 'source_url' ) );
+		if ( '' !== $source_url && ! empty( $opts['import_redirects'] ) && 'attachment' !== $type ) {
+			MigratePlus_Redirects::record( $post_id, $source_url, $job );
+		}
 
 		$action = $updating ? 'updated' : 'created';
 		do_action( 'migrateplus_after_import_record', $post_id, $record, $job, $action );
@@ -1093,7 +1123,8 @@ class MigratePlus_Importer {
 	 */
 	public static function importable_post_type( $type ) {
 		$object = get_post_type_object( $type );
-		if ( ! $object || ! $object->show_ui || in_array( $type, array( 'wp_block', 'wp_navigation', 'wp_template', 'wp_template_part', 'wp_global_styles', 'nav_menu_item' ), true ) ) {
+		// Templates and template parts have no admin screen (the Site Editor edits them), but are content.
+		if ( ! $object || ( ! $object->show_ui && ! MigratePlus_Blocks::is_template_type( $type ) ) || in_array( $type, array( 'wp_global_styles', 'nav_menu_item' ), true ) ) {
 			return false;
 		}
 		return ( defined( 'WP_CLI' ) && WP_CLI ) || current_user_can( $object->cap->edit_posts );
@@ -1317,13 +1348,14 @@ class MigratePlus_Importer {
 	/**
 	 * Resolve term names (or "Parent > Child" paths) into term ids.
 	 *
-	 * @param string   $taxonomy Taxonomy.
-	 * @param string[] $names    Names.
-	 * @param bool     $create   Create missing terms.
-	 * @param string[] $warnings Warnings for terms left out (by reference).
+	 * @param string               $taxonomy Taxonomy.
+	 * @param string[]             $names    Names.
+	 * @param bool                 $create   Create missing terms.
+	 * @param string[]             $warnings Warnings for terms left out (by reference).
+	 * @param MigratePlus_Job|null $job      Terms created here are tagged with the job, so rollback removes them.
 	 * @return int[]
 	 */
-	public static function resolve_terms( $taxonomy, array $names, $create, &$warnings = array() ) {
+	public static function resolve_terms( $taxonomy, array $names, $create, &$warnings = array(), $job = null ) {
 		$ids          = array();
 		$hierarchical = is_taxonomy_hierarchical( $taxonomy );
 		foreach ( $names as $name ) {
@@ -1346,6 +1378,8 @@ class MigratePlus_Importer {
 							$warnings[] = sprintf( __( 'Term "%1$s" (%2$s) could not be created: %3$s', 'migrateplus' ), $part, $taxonomy, $term->get_error_message() );
 						}
 						$term = $existing ? array( 'term_id' => (int) $existing ) : null;
+					} elseif ( $job instanceof MigratePlus_Job && empty( $job->data['options']['dry_run'] ) ) {
+						add_term_meta( (int) $term['term_id'], '_migrateplus_job_id', $job->data['id'] );
 					}
 				} elseif ( ! $term ) {
 					/* translators: 1: term name, 2: taxonomy */

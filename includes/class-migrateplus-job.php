@@ -41,6 +41,13 @@ class MigratePlus_Job {
 			'rewrite_links'         => (int) $s['rewrite_links'],
 			'import_comments'       => (int) $s['import_comments'],
 			'import_menus'          => (int) $s['import_menus'],
+			'import_term_data'      => (int) $s['import_term_data'],
+			'import_users'          => (int) $s['import_users'],
+			'import_acf_definitions' => (int) $s['import_acf_definitions'],
+			'import_acf_options'    => (int) $s['import_acf_options'],
+			'import_site_settings'  => (int) $s['import_site_settings'],
+			'import_orders'         => (int) $s['import_orders'],
+			'import_redirects'      => (int) $s['import_redirects'],
 			'dry_run'               => 0,
 		);
 	}
@@ -80,16 +87,20 @@ class MigratePlus_Job {
 		);
 		// Posts created across every run: "Run again" resets stats, but the earlier posts can still be rolled back.
 		// Comments added to posts the import only updated count too: rollback removes them.
-		// sections: the post types (and menus) of a MigratePlus export, with how many of each are done.
-		// stage: "menus" once the records are done and the file's menus are next.
+		// sections: the parts of a MigratePlus export (terms, users, post types, menus...), with how many of each are done.
+		// stage: the part being imported; '' before the first batch resolves it (see MigratePlus_Runner::next_stage()).
+		// stage_pos: items of the current side stage already imported, so a batch resumes where the last one stopped.
 		// menu_locations: theme location => [ menu before, menu the import set ], for rollback.
+		// side_prev: option and ACF values a side section overwrote, restored on rollback.
 		// cursor_skip: records of the batch at "cursor" already imported, by a batch that was cut short.
 		$this->data += array(
 			'created_total'  => 0,
 			'comments_total' => 0,
 			'sections'       => array(),
-			'stage'          => 'records',
+			'stage'          => '',
+			'stage_pos'      => 0,
 			'menu_locations' => array(),
+			'side_prev'      => array(),
 			'cursor_skip'    => 0,
 		);
 	}
@@ -98,7 +109,8 @@ class MigratePlus_Job {
 	 * Start the sections, and a batch that was cut short, over, for a run from the first record.
 	 */
 	public function reset_sections() {
-		$this->data['stage']       = 'records';
+		$this->data['stage']       = '';
+		$this->data['stage_pos']   = 0;
 		$this->data['cursor_skip'] = 0;
 		foreach ( $this->data['sections'] as $i => $section ) {
 			$this->data['sections'][ $i ]['done'] = 0;
@@ -169,7 +181,7 @@ class MigratePlus_Job {
 	 * Delete the job record and any cached source files.
 	 */
 	public function delete() {
-		foreach ( array( 'file', 'cache_file', 'menus_file' ) as $key ) {
+		foreach ( array_merge( array( 'file', 'cache_file' ), self::side_file_keys() ) as $key ) {
 			$path = isset( $this->data['settings'][ $key ] ) ? $this->data['settings'][ $key ] : '';
 			if ( $path && 0 === strpos( wp_normalize_path( $path ), wp_normalize_path( MigratePlus_Util::storage_dir() ) ) && file_exists( $path ) ) {
 				wp_delete_file( $path );
@@ -178,6 +190,35 @@ class MigratePlus_Job {
 		delete_option( 'migrateplus_job_' . $this->data['id'] );
 		$ids = array_diff( (array) get_option( self::INDEX_OPTION, array() ), array( $this->data['id'] ) );
 		update_option( self::INDEX_OPTION, array_values( $ids ), false );
+	}
+
+	/**
+	 * Whether the job's file carries side sections (terms, users, ACF options,
+	 * site settings or menus) next to its records.
+	 *
+	 * @return bool
+	 */
+	public function has_side_sections() {
+		foreach ( self::side_file_keys() as $key ) {
+			if ( ! empty( $this->data['settings'][ $key ] ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * The settings keys that hold a side section's cache file ("terms_file"...).
+	 *
+	 * @return string[]
+	 */
+	public static function side_file_keys() {
+		return array_map(
+			static function ( $key ) {
+				return $key . '_file';
+			},
+			MigratePlus_Runner::side_keys()
+		);
 	}
 
 	/**
@@ -207,14 +248,33 @@ class MigratePlus_Job {
 	}
 
 	/**
-	 * Number of posts (menu items included), comments and menus currently tagged with this job.
+	 * Number of posts (menu items included), comments, menus, terms, orders and
+	 * users currently tagged with this job.
 	 *
 	 * @return int
 	 */
 	public function imported_count() {
 		global $wpdb;
 		$posts = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT( DISTINCT m.post_id ) FROM {$wpdb->postmeta} m INNER JOIN {$wpdb->posts} p ON p.ID = m.post_id WHERE m.meta_key = '_migrateplus_job_id' AND m.meta_value = %s", $this->data['id'] ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
-		return $posts + (int) $this->imported_comments( 0, 0, true ) + count( $this->imported_menus() );
+		return $posts + (int) $this->imported_comments( 0, 0, true ) + count( $this->imported_menus() ) + count( $this->imported_terms() ) + count( $this->imported_orders() ) + count( $this->imported_users() );
+	}
+
+	/**
+	 * IDs of the WooCommerce orders this job created.
+	 *
+	 * @return int[]
+	 */
+	public function imported_orders() {
+		return MigratePlus_Orders::imported( $this->data['id'] );
+	}
+
+	/**
+	 * IDs of the users this job created.
+	 *
+	 * @return int[]
+	 */
+	public function imported_users() {
+		return MigratePlus_Users::imported( $this->data['id'] );
 	}
 
 	/**
@@ -228,6 +288,27 @@ class MigratePlus_Job {
 				'taxonomy'   => 'nav_menu',
 				'hide_empty' => false,
 				'fields'     => 'ids',
+				'meta_key'   => '_migrateplus_job_id', // phpcs:ignore WordPress.DB.SlowDBQuery
+				'meta_value' => $this->data['id'], // phpcs:ignore WordPress.DB.SlowDBQuery
+			)
+		);
+		return is_array( $ids ) ? array_map( 'intval', $ids ) : array();
+	}
+
+	/**
+	 * IDs of the terms this job created, children before parents so each can be
+	 * deleted on its own (menus are counted apart, by imported_menus()).
+	 *
+	 * @return int[]
+	 */
+	public function imported_terms() {
+		$ids = get_terms(
+			array(
+				'taxonomy'   => array_values( array_diff( get_taxonomies(), array( 'nav_menu' ) ) ),
+				'hide_empty' => false,
+				'fields'     => 'ids',
+				'orderby'    => 'id',
+				'order'      => 'DESC',
 				'meta_key'   => '_migrateplus_job_id', // phpcs:ignore WordPress.DB.SlowDBQuery
 				'meta_value' => $this->data['id'], // phpcs:ignore WordPress.DB.SlowDBQuery
 			)
@@ -286,7 +367,7 @@ class MigratePlus_Job {
 		$data     = $this->data;
 		$settings = array();
 		foreach ( (array) $data['settings'] as $key => $value ) {
-			if ( in_array( $key, array( 'password', 'app_password', 'api_key', 'headers', 'file', 'cache_file', 'menus_file', 'api_base' ), true ) ) {
+			if ( in_array( $key, array_merge( array( 'password', 'app_password', 'api_key', 'headers', 'file', 'cache_file', 'api_base' ), self::side_file_keys() ), true ) ) {
 				continue;
 			}
 			$settings[ $key ] = is_scalar( $value ) ? $value : '';

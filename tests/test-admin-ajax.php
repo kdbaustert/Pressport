@@ -712,7 +712,10 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 		$this->assertTrue( MigratePlus_Admin::exportable_type( 'post' ) );
 		$this->assertTrue( MigratePlus_Admin::exportable_type( 'attachment' ) );
 		$this->assertFalse( MigratePlus_Admin::exportable_type( 'shop_order' ) );
-		$this->assertFalse( MigratePlus_Admin::exportable_type( 'wp_block' ) );
+		$this->assertFalse( MigratePlus_Admin::exportable_type( 'wp_global_styles' ) );
+		// Synced patterns, navigation menus and templates are posts of the block editor: they export like any type.
+		$this->assertTrue( MigratePlus_Admin::exportable_type( 'wp_block' ) );
+		$this->assertTrue( MigratePlus_Admin::exportable_type( 'wp_template' ) );
 		unregister_post_type( 'acf-field-group' );
 		unregister_post_type( 'mp_hidden' );
 	}
@@ -761,8 +764,9 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 			array(
 				'args' => wp_json_encode(
 					array(
-						'post_types' => array( 'post' ),
-						'statuses'   => array( 'future' ),
+						'post_types'        => array( 'post' ),
+						'statuses'          => array( 'future' ),
+						'include_term_data' => 0, // With term data on, the default category alone would make a file.
 					)
 				),
 			)
@@ -779,9 +783,10 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 		$args = array(
 			'args' => wp_json_encode(
 				array(
-					'post_types'    => array( 'post' ),
-					'statuses'      => array( 'future' ),
-					'include_menus' => 1,
+					'post_types'        => array( 'post' ),
+					'statuses'          => array( 'future' ),
+					'include_menus'     => 1,
+					'include_term_data' => 0,
 				)
 			),
 		);

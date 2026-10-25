@@ -34,7 +34,7 @@
 	color: var(--pp-ink);
 }
 
-.migrateplus-wrap { max-width: 1240px; }
+.migrateplus-wrap { max-width: none; }
 .migrateplus-wrap h1.wp-heading-inline { font-size: 26px; font-weight: 650; letter-spacing: -.01em; color: var(--pp-ink); }
 .migrateplus-intro { color: var(--pp-ink-2); font-size: 14px; line-height: 1.55; max-width: 68ch; margin: 4px 0 20px; }
 
@@ -220,7 +220,7 @@
 .migrateplus-drop-file { margin-left: auto; font-weight: 600; color: var(--pp-tide-dark); word-break: break-all; text-align: right; }
 
 /* Upload screen: one large drop area */
-.migrateplus-import { max-width: 960px; }
+.migrateplus-import { max-width: none; }
 .migrateplus-import-drop {
 	display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
 	min-height: 240px; padding: 28px 20px; text-align: center;
@@ -530,6 +530,16 @@
 .migrateplus-check-chip input:checked + span { background: var(--pp-tide-wash); border-color: var(--pp-tide); color: var(--pp-tide-dark); }
 .migrateplus-check-chip input:checked + span::before { content: ""; width: 8px; height: 4px; margin-top: -2px; border-left: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); }
 .migrateplus-check-chip input:focus-visible + span { box-shadow: var(--pp-focus); }
+/* A button in the chip row, drawn by the same .migrateplus-check-chip span rules as the checkbox chips. */
+.migrateplus-chip-btn { padding: 0; border: 0; background: none; font: inherit; cursor: pointer; }
+.migrateplus-chip-btn:focus-visible { outline: none; }
+.migrateplus-chip-btn:focus-visible span { box-shadow: var(--pp-focus); }
+.migrateplus-chip-btn.is-active span { background: var(--pp-tide-wash); border-color: var(--pp-tide); color: var(--pp-tide-dark); }
+.migrateplus-chip-btn.is-active span::before { content: ""; width: 8px; height: 4px; margin-top: -2px; border-left: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); }
+.migrateplus-cpt-list { margin-top: 8px; max-height: 240px; }
+/* Room under the content type chips before the notes and the next field. */
+.migrateplus-export .migrateplus-chips { padding-bottom: 8px; }
+.migrateplus-export .migrateplus-chips + .migrateplus-help { margin-top: 2px; }
 .migrateplus-date-range { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .migrateplus-app .migrateplus-date-range input { min-height: 36px; border: 1px solid var(--pp-line); border-radius: var(--pp-r-sm); padding: 4px 8px; }
 .migrateplus-export-count { font-weight: 500; color: var(--pp-ink-2); }
@@ -713,3 +723,19 @@ body.migrateplus-modal-open { overflow: hidden; }
 .migrateplus-dot.is-ok { background: var(--pp-tide); }
 .migrateplus-dot.is-warn { background: var(--pp-buoy); }
 .migrateplus-status code { font-size: 12px; }
+/* What to export: one card per feature. A selected card is tinted and opens to show its parts as chips. */
+.migrateplus-export-cards { display: grid; grid-template-columns: 1fr; gap: 10px; margin-bottom: 14px; }
+.migrateplus-export-card { display: flex; flex-direction: column; border: 1px solid var(--pp-line); border-radius: var(--pp-r-lg); background: var(--pp-paper); transition: border-color .12s, box-shadow .12s; }
+.migrateplus-export-card:hover { border-color: var(--pp-ink-2); }
+.migrateplus-export-card.is-on { border-color: var(--pp-tide); background: var(--pp-tide-wash); }
+.migrateplus-export-card-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-rows: auto auto; column-gap: 10px; row-gap: 2px; align-items: start; padding: 12px 14px; cursor: pointer; }
+.migrateplus-export-card-head input { grid-row: 1 / span 2; margin: 3px 0 0; }
+.migrateplus-export-card-title { grid-column: 2; font-weight: 600; color: var(--pp-ink); line-height: 1.4; }
+.migrateplus-export-card-count { grid-column: 3; grid-row: 1; font-size: 12px; color: var(--pp-muted); white-space: nowrap; line-height: 1.4; padding-top: 1px; }
+.migrateplus-export-card.is-on .migrateplus-export-card-count { color: var(--pp-tide-dark); }
+.migrateplus-export-card-head .migrateplus-help { grid-column: 2 / span 2; margin: 0; }
+.migrateplus-export-parts { display: grid; gap: 8px; padding: 0 14px 12px 38px; }
+.migrateplus-export-parts .migrateplus-table-tools { margin-bottom: 0; }
+.migrateplus-help.is-warn { color: var(--pp-hull); }
+.migrateplus-export-filters { display: grid; gap: 10px; padding-top: 4px; border-top: 1px solid var(--pp-line); }
+.migrateplus-export-filters .migrateplus-opt { margin-bottom: 0; }

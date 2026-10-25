@@ -14,14 +14,19 @@ require_once $root . '/vendor/yoast/phpunit-polyfills/phpunitpolyfills-autoload.
 $tests_dir = getenv( 'WP_PHPUNIT__DIR' ) ? getenv( 'WP_PHPUNIT__DIR' ) : $root . '/vendor/wp-phpunit/wp-phpunit';
 require_once $tests_dir . '/includes/functions.php';
 
-// A dev dependency (wpackagist), so it is never committed or shipped. Without it the WooCommerce tests skip.
-$woo = $root . '/vendor/wpackagist-plugin/woocommerce/woocommerce.php';
+// Dev dependencies (wpackagist), so they are never committed or shipped. Without them the WooCommerce and ACF tests skip.
+// Not $acf: ACF keeps its instance in a global of that name.
+$woo        = $root . '/vendor/wpackagist-plugin/woocommerce/woocommerce.php';
+$acf_plugin = $root . '/vendor/wpackagist-plugin/advanced-custom-fields/acf.php';
 
 tests_add_filter(
 	'muplugins_loaded',
-	static function () use ( $root, $woo ) {
+	static function () use ( $root, $woo, $acf_plugin ) {
 		if ( file_exists( $woo ) ) {
 			require $woo;
+		}
+		if ( file_exists( $acf_plugin ) ) {
+			require $acf_plugin;
 		}
 		require $root . '/migrateplus.php';
 	}

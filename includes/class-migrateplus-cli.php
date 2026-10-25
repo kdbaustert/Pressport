@@ -43,7 +43,7 @@ class MigratePlus_CLI {
 	 *
 	 * @var string[]
 	 */
-	protected $reserved = array( 'config', 'map', 'mapping', 'post_type', 'status', 'author', 'duplicate', 'duplicates', 'batch_size', 'featured-images', 'content-images', 'create-authors', 'create-terms', 'rewrite-links', 'force-status', 'comments', 'menus', 'dry-run', 'yes' );
+	protected $reserved = array( 'config', 'map', 'mapping', 'post_type', 'status', 'author', 'duplicate', 'duplicates', 'batch_size', 'featured-images', 'content-images', 'create-authors', 'create-terms', 'rewrite-links', 'force-status', 'comments', 'menus', 'term-data', 'users', 'acf-definitions', 'acf-options', 'site-settings', 'orders', 'redirects', 'dry-run', 'yes' );
 
 	/**
 	 * Import switches and the option each sets.
@@ -58,6 +58,13 @@ class MigratePlus_CLI {
 		'rewrite-links'   => 'rewrite_links',
 		'comments'        => 'import_comments',
 		'menus'           => 'import_menus',
+		'term-data'       => 'import_term_data',
+		'users'           => 'import_users',
+		'acf-definitions' => 'import_acf_definitions',
+		'acf-options'     => 'import_acf_options',
+		'site-settings'   => 'import_site_settings',
+		'orders'          => 'import_orders',
+		'redirects'       => 'import_redirects',
 		'dry-run'         => 'dry_run',
 	);
 
@@ -159,6 +166,27 @@ class MigratePlus_CLI {
 	 * [--[no-]menus]
 	 * : Import the navigation menus a Migrate Plus export carries, after its posts. Defaults to the Migrate Plus setting.
 	 *
+	 * [--[no-]term-data]
+	 * : Import the terms a Migrate Plus export carries, with their data, before its posts. Defaults to the Migrate Plus setting.
+	 *
+	 * [--[no-]users]
+	 * : Import the users a Migrate Plus export carries, before its posts. Defaults to the Migrate Plus setting.
+	 *
+	 * [--[no-]acf-definitions]
+	 * : Import the ACF field groups, post types, taxonomies and options pages a Migrate Plus export carries, before its posts. Defaults to the Migrate Plus setting.
+	 *
+	 * [--[no-]acf-options]
+	 * : Import the ACF options page values a Migrate Plus export carries, after its posts. Defaults to the Migrate Plus setting.
+	 *
+	 * [--[no-]site-settings]
+	 * : Import the site settings a Migrate Plus export carries, after its posts. Defaults to the Migrate Plus setting.
+	 *
+	 * [--[no-]orders]
+	 * : Import the WooCommerce orders a Migrate Plus export carries, after its posts. Defaults to the Migrate Plus setting.
+	 *
+	 * [--[no-]redirects]
+	 * : Redirect a post's old address to its new one when they differ. Defaults to the Migrate Plus setting.
+	 *
 	 * [--dry-run]
 	 * : Show what would happen without saving.
 	 *
@@ -251,8 +279,8 @@ class MigratePlus_CLI {
 		}
 		// As the mapping screen saves it: known fields only, and something to give each post a title or content.
 		$job->data['mapping'] = MigratePlus_Mappings::clean_mapping( (array) $mapping );
-		$menus_only           = 0 === (int) $job->data['total'] && ! empty( $job->data['settings']['menus_file'] );
-		if ( ! $menus_only && empty( $job->data['mapping']['fields']['post_title'] ) && empty( $job->data['mapping']['fields']['post_content'] ) ) {
+		$sides_only           = 0 === (int) $job->data['total'] && $job->has_side_sections();
+		if ( ! $sides_only && empty( $job->data['mapping']['fields']['post_title'] ) && empty( $job->data['mapping']['fields']['post_content'] ) ) {
 			$this->abandon( $job, 'Map at least the Title or Content field (post_title or post_content under "fields").' );
 		}
 
@@ -375,7 +403,7 @@ class MigratePlus_CLI {
 	 * ## OPTIONS
 	 *
 	 * [<post_type>]
-	 * : Post type to export, or several separated by commas (e.g. attachment,page,post). Media is always written first, so the import downloads each file once. Default: post.
+	 * : Content type to export, or several separated by commas (e.g. attachment,page,post). "users", "orders" and "site-settings" are content types too: a file can hold them alone or with posts. Users are always written first and media next, so content lands with its authors and the import downloads each file once. Default: post.
 	 *
 	 * [--status=<statuses>]
 	 * : Comma separated statuses, or "any". Default: the export defaults in Settings (Published).
@@ -398,6 +426,9 @@ class MigratePlus_CLI {
 	 * [--[no-]terms]
 	 * : Include categories, tags and other terms. Defaults to the export defaults in Settings; --no-terms leaves them out.
 	 *
+	 * [--[no-]term-data]
+	 * : Include the terms of the exported types as their own section: descriptions, slugs, hierarchy, custom fields, ACF fields and empty terms. Defaults to the export defaults in Settings.
+	 *
 	 * [--[no-]featured-images]
 	 * : Include featured image URLs. Defaults to the export defaults in Settings; --no-featured-images leaves them out.
 	 *
@@ -410,6 +441,27 @@ class MigratePlus_CLI {
 	 * [--[no-]menus]
 	 * : Include the navigation menus, their items and theme locations. Defaults to the export defaults in Settings (off). With menus, a file can hold menus alone when no content matches.
 	 *
+	 * [--[no-]yoast]
+	 * : Include Yoast SEO fields of posts and terms, when Yoast SEO is active. Defaults to the export defaults in Settings (on).
+	 *
+	 * [--[no-]users]
+	 * : Include every user with their profile, roles, custom fields and (from the shell, or as a user who may edit users) password hash. Defaults to the export defaults in Settings (off).
+	 *
+	 * [--[no-]acf-definitions]
+	 * : Include the ACF field groups, post types, taxonomies and options pages. Defaults to the export defaults in Settings (on).
+	 *
+	 * [--[no-]acf-options]
+	 * : Include the values of ACF options pages. Defaults to the export defaults in Settings (on).
+	 *
+	 * [--[no-]site-settings]
+	 * : Include the site settings: General, Writing, Reading, Discussion, Media and Permalinks, widgets, theme (Customizer settings, Additional CSS, global styles) and Yoast SEO settings. Defaults to the export defaults in Settings (off).
+	 *
+	 * [--site-sections=<sections>]
+	 * : Which parts of the site settings, comma separated: general, writing, reading, discussion, media, permalinks, widgets, theme, yoast. Default: all of them.
+	 *
+	 * [--[no-]orders]
+	 * : Include the WooCommerce orders (within --after/--before when given) with their items, refunds and notes. Defaults to the export defaults in Settings (off).
+	 *
 	 * [--[no-]gzip]
 	 * : Compress the file (.json.gz), for a site whose upload limit is lower than the export. Needs PHP's zlib extension. Defaults to the export defaults in Settings (off).
 	 *
@@ -421,6 +473,8 @@ class MigratePlus_CLI {
 	 *     wp migrateplus export post --status=publish,draft --output=posts.json
 	 *     wp migrateplus export product --after=2024-01-01
 	 *     wp migrateplus export attachment,page,post --menus
+	 *     wp migrateplus export users,product,orders
+	 *     wp migrateplus export site-settings --output=settings.json
 	 *     wp migrateplus export product --gzip
 	 *
 	 * @param array $args  Args.
@@ -428,19 +482,31 @@ class MigratePlus_CLI {
 	 */
 	public function export( $args, $assoc ) {
 		$defaults = MigratePlus_Exporter::defaults();
+		// "users", "orders" and "site-settings" in the type list are the sections of their own, not post types.
+		$kinds    = array_filter( array_map( 'trim', explode( ',', isset( $args[0] ) ? (string) $args[0] : 'post' ) ) );
+		$kinds    = str_replace( 'site_settings', 'site-settings', $kinds );
+		$records  = array_intersect( $kinds, array( 'users', 'orders', 'site-settings' ) );
 		$export   = MigratePlus_Exporter::sanitize_args(
 			array(
-				'post_type'        => isset( $args[0] ) ? $args[0] : 'post',
+				'post_type'        => implode( ',', array_diff( $kinds, $records ) ),
 				'statuses'         => isset( $assoc['status'] ) ? $assoc['status'] : $defaults['statuses'],
 				'after'            => isset( $assoc['after'] ) ? $assoc['after'] : '',
 				'before'           => isset( $assoc['before'] ) ? $assoc['before'] : '',
 				'include_acf'      => WP_CLI\Utils\get_flag_value( $assoc, 'acf', ! empty( $defaults['include_acf'] ) ),
 				'include_meta'     => WP_CLI\Utils\get_flag_value( $assoc, 'meta', ! empty( $defaults['include_meta'] ) ),
 				'include_terms'    => WP_CLI\Utils\get_flag_value( $assoc, 'terms', ! empty( $defaults['include_terms'] ) ),
+				'include_term_data' => WP_CLI\Utils\get_flag_value( $assoc, 'term-data', ! empty( $defaults['include_term_data'] ) ),
 				'include_image'    => WP_CLI\Utils\get_flag_value( $assoc, 'featured-images', ! empty( $defaults['include_image'] ) ),
 				'include_woo'      => WP_CLI\Utils\get_flag_value( $assoc, 'woo', ! empty( $defaults['include_woo'] ) ),
 				'include_comments' => WP_CLI\Utils\get_flag_value( $assoc, 'comments', ! empty( $defaults['include_comments'] ) ),
 				'include_menus'    => WP_CLI\Utils\get_flag_value( $assoc, 'menus', ! empty( $defaults['include_menus'] ) ),
+				'include_yoast'    => WP_CLI\Utils\get_flag_value( $assoc, 'yoast', ! empty( $defaults['include_yoast'] ) ),
+				'include_users'    => in_array( 'users', $records, true ) || WP_CLI\Utils\get_flag_value( $assoc, 'users', ! empty( $defaults['include_users'] ) ),
+				'include_acf_definitions' => WP_CLI\Utils\get_flag_value( $assoc, 'acf-definitions', ! empty( $defaults['include_acf_definitions'] ) ),
+				'include_acf_options' => WP_CLI\Utils\get_flag_value( $assoc, 'acf-options', ! empty( $defaults['include_acf_options'] ) ),
+				'include_site_settings' => in_array( 'site-settings', $records, true ) || WP_CLI\Utils\get_flag_value( $assoc, 'site-settings', ! empty( $defaults['include_site_settings'] ) ),
+				'site_sections'    => isset( $assoc['site-sections'] ) ? $assoc['site-sections'] : $defaults['site_sections'],
+				'include_orders'   => in_array( 'orders', $records, true ) || WP_CLI\Utils\get_flag_value( $assoc, 'orders', ! empty( $defaults['include_orders'] ) ),
 				'exclude_meta'     => isset( $assoc['exclude-meta'] ) ? $assoc['exclude-meta'] : $defaults['exclude_meta'],
 				'gzip'             => WP_CLI\Utils\get_flag_value( $assoc, 'gzip', ! empty( $defaults['gzip'] ) ),
 			)
@@ -459,11 +525,11 @@ class MigratePlus_CLI {
 		if ( is_wp_error( $state ) ) {
 			WP_CLI::error( $state->get_error_message() );
 		}
-		if ( ! $state['total'] && ! ( $export['include_menus'] && wp_get_nav_menus() ) ) {
+		if ( ! $state['total'] && ! array_sum( MigratePlus_Exporter::side_counts( $export ) ) ) {
 			MigratePlus_Exporter::forget( $state['id'] );
 			WP_CLI::error( 'Nothing to export with these filters.' );
 		}
-		$progress = WP_CLI\Utils\make_progress_bar( sprintf( 'Exporting %d %s', $state['total'], implode( ', ', $export['post_types'] ) ), max( 1, $state['total'] ) );
+		$progress = WP_CLI\Utils\make_progress_bar( sprintf( 'Exporting %d %s', $state['total'], implode( ', ', $kinds ) ), max( 1, $state['total'] ) );
 		while ( empty( $state['complete'] ) ) {
 			$before = $state['done'];
 			MigratePlus_Exporter::run_batch( $state, 100 );
@@ -479,7 +545,14 @@ class MigratePlus_CLI {
 			WP_CLI::error( sprintf( 'Could not write %s', $output ) );
 		}
 		MigratePlus_Exporter::delete( $state );
-		WP_CLI::success( sprintf( 'Exported %d items%s (%d ACF fields, %d custom fields) to %s', $state['done'], $state['menus'] ? sprintf( ' and %d menus', $state['menus'] ) : '', count( $state['acf_names'] ), count( $state['meta_keys'] ), $output ) );
+		$extras    = array();
+		$providers = MigratePlus_Exporter::side_providers();
+		foreach ( isset( $state['sides'] ) ? (array) $state['sides'] : array() as $key => $n ) {
+			if ( $n && isset( $providers[ $key ] ) ) {
+				$extras[] = 'site_settings' === $key ? 'the site settings' : sprintf( '%d %s', $n, $providers[ $key ]['label'] );
+			}
+		}
+		WP_CLI::success( sprintf( 'Exported %d items%s (%d ACF fields, %d custom fields) to %s', $state['done'], $extras ? ' and ' . implode( ' and ', $extras ) : '', count( $state['acf_names'] ), count( $state['meta_keys'] ), $output ) );
 	}
 
 	/**
@@ -657,11 +730,11 @@ class MigratePlus_CLI {
 					WP_CLI::warning( $r['message'] );
 				} elseif ( ! empty( $r['warning'] ) ) {
 					WP_CLI::warning( $r['message'] );
-				} elseif ( ! $progress || ! empty( $r['menu'] ) ) {
+				} elseif ( ! $progress || ! empty( $r['section'] ) ) {
 					WP_CLI::log( $r['message'] );
 				}
-				// Menus come after the records the bar counts.
-				if ( $progress && empty( $r['menu'] ) ) {
+				// Side sections (terms, users, menus...) come apart from the records the bar counts.
+				if ( $progress && empty( $r['section'] ) ) {
 					$progress->tick();
 				}
 			}

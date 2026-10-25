@@ -239,26 +239,38 @@ class MigratePlus_Source_JSON extends MigratePlus_Source_Base {
 
 		$this->settings['cache_file'] = $cache;
 		$this->settings['total']      = count( $records );
-		// Menus are imported after every item, from a cache of their own.
-		$menus = $export && ! empty( $doc['menus'] ) && is_array( $doc['menus'] ) ? array_values( array_filter( $doc['menus'], 'is_array' ) ) : array();
-		// "Run again" prepares a refreshed file over the last run's settings: the menus of the
-		// previous file must not carry over to one without them.
-		$old_menus = (string) $this->get( 'menus_file' );
-		unset( $this->settings['menus_file'], $this->settings['migrateplus_menus'] );
-		if ( $menus ) {
-			$menus_file = substr( $cache, 0, -5 ) . '-menus.json';
-			if ( false === file_put_contents( $menus_file, wp_json_encode( $menus ) ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
-				// No job will be made to delete the records cache, or what part of this one was written.
+		// Side sections (terms, users, ACF definitions and options, site settings, menus, orders) are imported apart
+		// from the items, each from a cache of its own. "Run again" prepares a refreshed file
+		// over the last run's settings: a section of the previous file must not carry over to
+		// one without it.
+		$old_sides = array();
+		$written   = array();
+		foreach ( MigratePlus_Runner::side_keys() as $key ) {
+			$data                     = $export && ! empty( $doc[ $key ] ) && is_array( $doc[ $key ] ) ? $doc[ $key ] : array();
+			$data                     = isset( $data[0] ) || array() === $data ? array_values( array_filter( $data, 'is_array' ) ) : array( $data ); // "site" is one object; the lists hold one record each.
+			$old_sides[ $key . '_file' ] = (string) $this->get( $key . '_file' );
+			unset( $this->settings[ $key . '_file' ], $this->settings[ 'migrateplus_' . $key ] );
+			if ( ! $data ) {
+				continue;
+			}
+			$side_file = substr( $cache, 0, -5 ) . '-' . str_replace( '_', '-', $key ) . '.json';
+			if ( false === file_put_contents( $side_file, wp_json_encode( $data ) ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions
+				// No job will be made to delete the records cache, or what part of these was written.
 				wp_delete_file( $cache );
-				wp_delete_file( $menus_file );
+				foreach ( array_merge( array( $side_file ), $written ) as $f ) {
+					wp_delete_file( $f );
+				}
 				return new WP_Error( 'migrateplus_json_cache', __( 'Could not write the import cache to the uploads folder.', 'migrateplus' ) );
 			}
-			$this->settings['menus_file']        = $menus_file;
-			$this->settings['migrateplus_menus'] = count( $menus );
+			$written[]                                = $side_file;
+			$this->settings[ $key . '_file' ]         = $side_file;
+			$this->settings[ 'migrateplus_' . $key ]  = count( $data );
 		}
 		// Only now that this file's caches are written: until then a failed refresh can fall back to the last copy.
-		if ( '' !== $old_menus && 0 === strpos( wp_normalize_path( $old_menus ), wp_normalize_path( MigratePlus_Util::storage_dir() ) ) && file_exists( $old_menus ) ) {
-			wp_delete_file( $old_menus );
+		foreach ( $old_sides as $old ) {
+			if ( '' !== $old && 0 === strpos( wp_normalize_path( $old ), wp_normalize_path( MigratePlus_Util::storage_dir() ) ) && file_exists( $old ) ) {
+				wp_delete_file( $old );
+			}
 		}
 		// Collect field names from the first few records; optional fields may be missing from the first one.
 		// A MigratePlus export's mapping was built from every item, so check them all or later-only fields drop out of it.

@@ -19,7 +19,8 @@ class MigratePlus_Admin {
 	 * menus' types (which the importer refuses too), ACF's settings, and WooCommerce orders,
 	 * which with HPOS keep their data in tables of their own.
 	 */
-	const NOT_EXPORTED = array( 'wp_block', 'wp_navigation', 'wp_template', 'wp_template_part', 'wp_global_styles', 'nav_menu_item', 'acf-field-group', 'acf-field', 'acf-post-type', 'acf-taxonomy', 'acf-ui-options-page', 'shop_order', 'shop_order_refund', 'shop_order_placehold' );
+	// Global styles travel with the site settings, ACF's definitions and orders as sections of their own.
+	const NOT_EXPORTED = array( 'wp_global_styles', 'nav_menu_item', 'acf-field-group', 'acf-field', 'acf-post-type', 'acf-taxonomy', 'acf-ui-options-page', 'shop_order', 'shop_order_refund', 'shop_order_placehold' );
 
 	public static function init() {
 		add_action( 'admin_menu', array( __CLASS__, 'menu' ) );
@@ -90,11 +91,12 @@ class MigratePlus_Admin {
 		if ( ! in_array( $page, array( self::SLUG, self::HISTORY_SLUG, self::EXPORT_SLUG, self::REPLACE_SLUG, MigratePlus_Settings::PAGE ), true ) ) {
 			return;
 		}
-		wp_enqueue_style( 'migrateplus', MIGRATEPLUS_URL . 'assets/admin.css', array(), MIGRATEPLUS_VERSION );
+		// Versioned by the file, not the plugin: a changed stylesheet must not serve from the browser cache.
+		wp_enqueue_style( 'migrateplus', MIGRATEPLUS_URL . 'assets/admin.css', array(), (string) filemtime( MIGRATEPLUS_DIR . 'assets/admin.css' ) );
 		if ( MigratePlus_Settings::PAGE === $page ) {
 			return;
 		}
-		wp_enqueue_script( 'migrateplus', MIGRATEPLUS_URL . 'assets/admin.js', array( 'wp-element' ), MIGRATEPLUS_VERSION, true );
+		wp_enqueue_script( 'migrateplus', MIGRATEPLUS_URL . 'assets/admin.js', array( 'wp-element' ), (string) filemtime( MIGRATEPLUS_DIR . 'assets/admin.js' ), true );
 		$views = array(
 			self::HISTORY_SLUG => 'history',
 			self::EXPORT_SLUG  => 'export',
@@ -122,10 +124,13 @@ class MigratePlus_Admin {
 		}
 
 		$post_types = array();
-		foreach ( get_post_types( array( 'show_ui' => true ), 'objects' ) as $pt ) {
-			if ( in_array( $pt->name, array( 'wp_block', 'wp_navigation', 'wp_template', 'wp_template_part' ), true ) ) {
-				continue;
+		$objects    = get_post_types( array( 'show_ui' => true ), 'objects' );
+		foreach ( array( 'wp_template', 'wp_template_part' ) as $hidden ) {
+			if ( post_type_exists( $hidden ) ) {
+				$objects[ $hidden ] = get_post_type_object( $hidden ); // No admin screen, but exportable: see exportable_type().
 			}
+		}
+		foreach ( $objects as $pt ) {
 			$taxes = array();
 			foreach ( get_object_taxonomies( $pt->name, 'objects' ) as $tax ) {
 				if ( $tax->show_ui && 'post_format' !== $tax->name ) {
@@ -189,6 +194,13 @@ class MigratePlus_Admin {
 			'acf'            => MigratePlus_ACF::bootstrap( wp_list_pluck( $post_types, 'name' ) ),
 			'woo'            => array( 'active' => MigratePlus_Woo::active() ),
 			'menus'          => current_user_can( 'edit_theme_options' ), // Whether this user may export menus.
+			'siteSections'   => MigratePlus_Site::sections_for_js(), // What the Site settings chip lets you pick.
+			'sides'          => array( // ...and the other sections an export offers.
+				'users'  => current_user_can( 'list_users' ),
+				'site'   => current_user_can( 'manage_options' ),
+				'orders' => MigratePlus_Orders::active() && current_user_can( 'manage_woocommerce' ),
+				'yoast'  => MigratePlus_Yoast::active(),
+			),
 			'zlib'           => MigratePlus_Util::zlib_available(), // Compressed (.json.gz) exports.
 			'mappings'       => 'new' === $view ? MigratePlus_Mappings::for_js() : array(),
 			'maxRemote'      => size_format( max( 1, (int) MigratePlus_Settings::get( 'max_remote_size' ) ) * MB_IN_BYTES ),
@@ -494,9 +506,9 @@ class MigratePlus_Admin {
 		// phpcs:enable
 
 		$clean_map = MigratePlus_Mappings::clean_mapping( (array) $mapping );
-		// An export of menus alone has no records to map.
-		$menus_only = 0 === (int) $job->data['total'] && ! empty( $job->data['settings']['menus_file'] );
-		if ( ! $menus_only && empty( $clean_map['fields']['post_title'] ) && empty( $clean_map['fields']['post_content'] ) ) {
+		// An export of menus, terms or other side sections alone has no records to map.
+		$sides_only = 0 === (int) $job->data['total'] && $job->has_side_sections();
+		if ( ! $sides_only && empty( $clean_map['fields']['post_title'] ) && empty( $clean_map['fields']['post_content'] ) ) {
 			self::fail( new WP_Error( 'migrateplus_mapping', __( 'Map at least the Title or Content field.', 'migrateplus' ) ) );
 		}
 		$clean_opt = self::clean_options( (array) $options );
@@ -866,9 +878,16 @@ class MigratePlus_Admin {
 				return new WP_Error( 'migrateplus_export_cap', sprintf( __( 'You are not allowed to export %s.', 'migrateplus' ), MigratePlus_Exporter::type_label( $type ) ) );
 			}
 		}
-		// The menus toggle is hidden from users who may not edit menus, but the default still sends it: leave menus out.
-		if ( ! current_user_can( 'edit_theme_options' ) ) {
-			$args['include_menus'] = 0;
+		// A toggle hidden from users who may not see its section still arrives with its default: leave the section out.
+		foreach ( array(
+			'include_menus'         => 'edit_theme_options',
+			'include_users'         => 'list_users',
+			'include_site_settings' => 'manage_options',
+			'include_orders'        => 'manage_woocommerce',
+		) as $arg => $capability ) {
+			if ( ! current_user_can( $capability ) ) {
+				$args[ $arg ] = 0;
+			}
 		}
 		return $args;
 	}
@@ -883,11 +902,14 @@ class MigratePlus_Admin {
 			self::fail( $args );
 		}
 		$counts = MigratePlus_Exporter::counts( $args );
+		$sides  = MigratePlus_Exporter::side_counts( $args );
 		wp_send_json_success(
 			array(
 				'count'  => array_sum( $counts ),
 				'counts' => $counts,
-				'menus'  => $args['include_menus'] ? count( wp_get_nav_menus() ) : 0,
+				'sides'  => $sides,
+				'menus'  => isset( $sides['menus'] ) ? $sides['menus'] : 0,
+				'terms'  => isset( $sides['terms'] ) ? $sides['terms'] : 0,
 			)
 		);
 	}
@@ -905,8 +927,8 @@ class MigratePlus_Admin {
 		if ( is_wp_error( $state ) ) {
 			self::fail( $state );
 		}
-		// With menus included, a file of menus alone is still worth having.
-		if ( 0 === (int) $state['total'] && ! ( $args['include_menus'] && wp_get_nav_menus() ) ) {
+		// With menus, terms, users or settings included, a file of those alone is still worth having.
+		if ( 0 === (int) $state['total'] && ! array_sum( MigratePlus_Exporter::side_counts( $args ) ) ) {
 			MigratePlus_Exporter::forget( $state['id'] );
 			self::fail( new WP_Error( 'migrateplus_export_empty', __( 'Nothing matches these filters. Widen the status or date range.', 'migrateplus' ) ) );
 		}
@@ -1100,7 +1122,8 @@ class MigratePlus_Admin {
 	 */
 	public static function exportable_type( $type ) {
 		$object = get_post_type_object( $type );
-		return $object && $object->show_ui && ! in_array( $type, self::NOT_EXPORTED, true );
+		// Templates and template parts have no admin screen of their own (the Site Editor edits them), but are content.
+		return $object && ( $object->show_ui || MigratePlus_Blocks::is_template_type( $type ) ) && ! in_array( $type, self::NOT_EXPORTED, true );
 	}
 
 	/**
@@ -1159,10 +1182,13 @@ class MigratePlus_Admin {
 			'meta'     => count( $state['meta_keys'] ),
 			'taxes'    => $state['taxes'],
 		);
-		// The post type being exported, when the file holds more than one.
+		// The post type being exported, when the file holds more than one; or the side section (orders) after them.
 		$types          = $state['args']['post_types'];
-		$out['section'] = count( $types ) > 1 && ! $out['complete'] ? MigratePlus_Exporter::type_label( $types[ min( (int) $state['type_pos'], count( $types ) - 1 ) ] ) : '';
+		$side           = MigratePlus_Exporter::current_side( $state );
+		$out['section'] = '' !== $side && ! $out['complete'] ? ucfirst( MigratePlus_Exporter::side_providers()[ $side ]['label'] ) : ( count( $types ) > 1 && ! $out['complete'] ? MigratePlus_Exporter::type_label( $types[ min( (int) $state['type_pos'], count( $types ) - 1 ) ] ) : '' );
+		$out['sides']   = isset( $state['sides'] ) ? (array) $state['sides'] : array();
 		$out['menus']   = (int) $state['menus'];
+		$out['terms']   = isset( $state['terms'] ) ? (int) $state['terms'] : 0;
 		if ( ! empty( $state['error'] ) ) {
 			$out['error'] = $state['error'];
 		} elseif ( $out['complete'] ) {

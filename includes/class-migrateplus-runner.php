@@ -37,8 +37,12 @@ class MigratePlus_Runner {
 		if ( is_wp_error( $batch ) ) {
 			return $batch;
 		}
-		// An export of navigation menus alone has no items: the import goes straight to its menus.
-		if ( empty( $batch['records'] ) && empty( $prepared['migrateplus_menus'] ) ) {
+		// An export of menus (or terms, users...) alone has no items: the import goes straight to its side sections.
+		$sides = 0;
+		foreach ( self::side_stages() as $side ) {
+			$sides += empty( $prepared[ $side['count'] ] ) ? 0 : (int) $prepared[ $side['count'] ];
+		}
+		if ( empty( $batch['records'] ) && ! $sides ) {
 			return new WP_Error( 'migrateplus_empty', __( 'The source returned no records.', 'migrateplus' ) );
 		}
 
@@ -101,6 +105,16 @@ class MigratePlus_Runner {
 	 */
 	protected static function sections( array $prepared ) {
 		$sections = array();
+		foreach ( self::side_stages() as $side ) {
+			if ( 'before' === $side['when'] && ! empty( $prepared[ $side['count'] ] ) ) {
+				$sections[] = array(
+					'type'  => $side['type'],
+					'label' => $side['label'],
+					'total' => (int) $prepared[ $side['count'] ],
+					'done'  => 0,
+				);
+			}
+		}
 		foreach ( isset( $prepared['migrateplus_counts'] ) ? (array) $prepared['migrateplus_counts'] : array() as $type => $total ) {
 			$sections[] = array(
 				'type'  => (string) $type,
@@ -109,15 +123,167 @@ class MigratePlus_Runner {
 				'done'  => 0,
 			);
 		}
-		if ( ! empty( $prepared['migrateplus_menus'] ) ) {
-			$sections[] = array(
-				'type'  => 'nav_menu',
-				'label' => __( 'Menus', 'migrateplus' ),
-				'total' => (int) $prepared['migrateplus_menus'],
-				'done'  => 0,
-			);
+		foreach ( self::side_stages() as $side ) {
+			if ( 'after' === $side['when'] && ! empty( $prepared[ $side['count'] ] ) ) {
+				$sections[] = array(
+					'type'  => $side['type'],
+					'label' => $side['label'],
+					'total' => (int) $prepared[ $side['count'] ],
+					'done'  => 0,
+				);
+			}
 		}
 		return $sections;
+	}
+
+	/**
+	 * The side sections an export can carry next to its records, in import order.
+	 * Terms and users come first, so records find them; everything that points at
+	 * records comes after them. Each one's class implements pending( $job ) and
+	 * import_batch( $job ) => { done: bool, results: array[] }.
+	 *
+	 * @return array[] stage => { class, type, label, count, option, when }
+	 */
+	public static function side_stages() {
+		return array(
+			'terms' => array(
+				'class'  => 'MigratePlus_Terms',
+				'type'   => 'terms',
+				'label'  => __( 'Terms', 'migrateplus' ),
+				'count'  => 'migrateplus_terms',
+				'option' => 'import_term_data',
+				'when'   => 'before',
+			),
+			'users' => array(
+				'class'  => 'MigratePlus_Users',
+				'type'   => 'users',
+				'label'  => __( 'Users', 'migrateplus' ),
+				'count'  => 'migrateplus_users',
+				'option' => 'import_users',
+				'when'   => 'before',
+			),
+			'acf_definitions' => array(
+				'class'  => 'MigratePlus_ACF_Definitions',
+				'type'   => 'acf_definitions',
+				'label'  => __( 'ACF definitions', 'migrateplus' ),
+				'count'  => 'migrateplus_acf_definitions',
+				'option' => 'import_acf_definitions',
+				'when'   => 'before',
+			),
+			'acf_options' => array(
+				'class'  => 'MigratePlus_ACF_Options',
+				'type'   => 'acf_options',
+				'label'  => __( 'ACF options', 'migrateplus' ),
+				'count'  => 'migrateplus_acf_options',
+				'option' => 'import_acf_options',
+				'when'   => 'after',
+			),
+			'site_settings' => array(
+				'class'  => 'MigratePlus_Site',
+				'type'   => 'site_settings',
+				'label'  => __( 'Site settings', 'migrateplus' ),
+				'count'  => 'migrateplus_site_settings',
+				'option' => 'import_site_settings',
+				'when'   => 'after',
+			),
+			'menus' => array(
+				'class'  => 'MigratePlus_Menus',
+				'type'   => 'nav_menu',
+				'label'  => __( 'Menus', 'migrateplus' ),
+				'count'  => 'migrateplus_menus',
+				'option' => 'import_menus',
+				'when'   => 'after',
+			),
+			'orders' => array(
+				'class'  => 'MigratePlus_Orders',
+				'type'   => 'orders',
+				'label'  => __( 'Orders', 'migrateplus' ),
+				'count'  => 'migrateplus_orders',
+				'option' => 'import_orders',
+				'when'   => 'after',
+			),
+		);
+	}
+
+	/**
+	 * The keys of every side section, in import order: what the JSON source
+	 * splits off and the job caches as "<key>_file".
+	 *
+	 * @return string[]
+	 */
+	public static function side_keys() {
+		return array_keys( self::side_stages() );
+	}
+
+	/**
+	 * What a side section's "left out" log line says when the file carries it but
+	 * its import option is off.
+	 *
+	 * @param string $stage Side stage.
+	 * @return string
+	 */
+	protected static function off_message( $stage ) {
+		$messages = array(
+			'terms'       => __( 'The file\'s terms were not imported: "Term data" is off.', 'migrateplus' ),
+			'users'       => __( 'The file\'s users were not imported: "Users" is off.', 'migrateplus' ),
+			'acf_definitions' => __( 'The file\'s ACF definitions were not imported: "ACF definitions" is off.', 'migrateplus' ),
+			'acf_options' => __( 'The file\'s ACF options were not imported: "ACF options" is off.', 'migrateplus' ),
+			'site_settings' => __( 'The file\'s site settings were not imported: "Site settings" is off.', 'migrateplus' ),
+			'menus'       => __( 'The file\'s menus were not imported: "Import menus" is off.', 'migrateplus' ),
+			'orders'      => __( 'The file\'s orders were not imported: "Orders" is off.', 'migrateplus' ),
+		);
+		return isset( $messages[ $stage ] ) ? $messages[ $stage ] : '';
+	}
+
+	/**
+	 * Every stage of an import, in order.
+	 *
+	 * @return string[]
+	 */
+	protected static function stage_order() {
+		$sides = self::side_stages();
+		return array_merge(
+			array_keys(
+				array_filter(
+					$sides,
+					static function ( $s ) {
+						return 'before' === $s['when'];
+					}
+				)
+			),
+			array( 'records' ),
+			array_keys(
+				array_filter(
+					$sides,
+					static function ( $s ) {
+						return 'after' === $s['when'];
+					}
+				)
+			)
+		);
+	}
+
+	/**
+	 * The stage after $current with something to do, in import order, or '' when
+	 * the import is finished. '' as $current means the first stage of the job.
+	 *
+	 * @param MigratePlus_Job $job     Job.
+	 * @param string          $current Stage just finished ('' at the start).
+	 * @return string
+	 */
+	public static function next_stage( MigratePlus_Job $job, $current = '' ) {
+		$sides = self::side_stages();
+		$order = self::stage_order();
+		$at    = '' === $current ? 0 : (int) array_search( $current, $order, true ) + 1;
+		foreach ( array_slice( $order, $at ) as $stage ) {
+			if ( 'records' === $stage ) {
+				return $stage;
+			}
+			if ( class_exists( $sides[ $stage ]['class'] ) && call_user_func( array( $sides[ $stage ]['class'], 'pending' ), $job ) ) {
+				return $stage;
+			}
+		}
+		return '';
 	}
 
 	/**
@@ -284,8 +450,11 @@ class MigratePlus_Runner {
 		wp_defer_term_counting( true );
 		wp_defer_comment_counting( true );
 
-		if ( 'menus' === $job->data['stage'] ) {
-			return self::run_menus( $job, $lock );
+		if ( '' === (string) $job->data['stage'] ) {
+			self::advance( $job );
+		}
+		if ( 'records' !== $job->data['stage'] ) {
+			return self::run_side( $job, $job->data['stage'], $lock );
 		}
 		$job->data['status'] = 'running';
 		$limit               = max( 1, min( 100, (int) $job->data['options']['batch_size'] ) );
@@ -346,12 +515,9 @@ class MigratePlus_Runner {
 		$job->data['cursor']      = $batch['next'];
 		$job->data['cursor_skip'] = 0;
 		$done                     = null === $batch['next'] || empty( $batch['records'] );
-		if ( $done && MigratePlus_Menus::pending( $job ) ) {
-			// Menu items point at the posts and terms imported above, so menus come last, in a request of their own.
-			$job->data['stage'] = 'menus';
-			$done               = false;
-		} elseif ( $done && ! empty( $job->data['settings']['menus_file'] ) ) {
-			$job->log( 'info', __( 'The file\'s menus were not imported: "Import menus" is off.', 'migrateplus' ) );
+		if ( $done ) {
+			// Menus and the other side sections that point at the records come after them, in requests of their own.
+			$done = ! self::advance( $job, 'records' );
 		}
 		if ( ! self::finish_batch( $job, $lock, $done ) ) {
 			return new WP_Error( 'migrateplus_locked', __( 'This batch took too long and another request took it over.', 'migrateplus' ) );
@@ -364,42 +530,75 @@ class MigratePlus_Runner {
 	}
 
 	/**
-	 * The last stage of a MigratePlus export's import: its menus, all in one request (they hold no files to download).
+	 * One batch of a side stage (terms, users, ACF options, site settings or menus).
 	 *
-	 * @param MigratePlus_Job $job  Job.
-	 * @param string          $lock Lock token.
-	 * @return array { done: true, results: array[] }
+	 * @param MigratePlus_Job $job   Job.
+	 * @param string          $stage Side stage, a key of side_stages().
+	 * @param string          $lock  Lock token.
+	 * @return array|WP_Error { done: bool, results: array[] }
 	 */
-	protected static function run_menus( MigratePlus_Job $job, $lock ) {
+	protected static function run_side( MigratePlus_Job $job, $stage, $lock ) {
+		$side = self::side_stages()[ $stage ];
 		try {
-			$results = MigratePlus_Menus::import( $job );
+			$out = call_user_func( array( $side['class'], 'import_batch' ), $job );
 		} catch ( Throwable $e ) {
-			$results = array(
-				array(
-					'action'  => 'failed',
-					'post_id' => 0,
-					'message' => $e->getMessage(),
-					'warning' => false,
-					'menu'    => true,
+			$out = array(
+				'done'    => true,
+				'results' => array(
+					array(
+						'action'  => 'failed',
+						'post_id' => 0,
+						'message' => $e->getMessage(),
+						'warning' => false,
+						'section' => $side['type'],
+					),
 				),
 			);
 		}
-		foreach ( $results as $result ) {
-			$job->log( 'failed' === $result['action'] ? 'error' : ( ! empty( $result['warning'] ) ? 'warning' : 'success' ), $result['message'] );
+		foreach ( $out['results'] as $result ) {
+			$job->log( 'failed' === $result['action'] ? 'error' : ( ! empty( $result['warning'] ) ? 'warning' : ( 'skipped' === $result['action'] ? 'info' : 'success' ) ), $result['message'] );
 		}
 		foreach ( $job->data['sections'] as $i => $section ) {
-			if ( 'nav_menu' === $section['type'] ) {
-				$job->data['sections'][ $i ]['done'] = $section['total'];
+			if ( $side['type'] === $section['type'] ) {
+				$job->data['sections'][ $i ]['done'] = $out['done'] ? $section['total'] : min( $section['total'], $section['done'] + count( $out['results'] ) );
 			}
 		}
-		$job->data['stage'] = 'records';
-		if ( ! self::finish_batch( $job, $lock, true ) ) {
+		$done = false;
+		if ( $out['done'] ) {
+			$job->data['stage_pos'] = 0;
+			$done                   = ! self::advance( $job, $stage );
+		}
+		if ( ! self::finish_batch( $job, $lock, $done ) ) {
 			return new WP_Error( 'migrateplus_locked', __( 'This batch took too long and another request took it over.', 'migrateplus' ) );
 		}
 		return array(
-			'done'    => true,
-			'results' => $results,
+			'done'    => $done,
+			'results' => $out['results'],
 		);
+	}
+
+	/**
+	 * Move a job to the stage after $current. Side sections the file carries whose
+	 * import option is off are logged as left out as the job passes them.
+	 *
+	 * @param MigratePlus_Job $job     Job (stage is updated in place).
+	 * @param string          $current Stage that just finished.
+	 * @return bool False when no stage is left: the import is done.
+	 */
+	protected static function advance( MigratePlus_Job $job, $current = '' ) {
+		$sides = self::side_stages();
+		$order = self::stage_order();
+		$next  = self::next_stage( $job, $current );
+		$from  = '' === $current ? 0 : (int) array_search( $current, $order, true ) + 1;
+		$to    = '' === $next ? count( $order ) : (int) array_search( $next, $order, true );
+		$opts  = array_merge( MigratePlus_Job::default_options(), (array) $job->data['options'] );
+		foreach ( array_slice( $order, $from, max( 0, $to - $from ) ) as $stage ) {
+			if ( 'records' !== $stage && ! empty( $job->data['settings'][ $stage . '_file' ] ) && empty( $opts[ $sides[ $stage ]['option'] ] ) ) {
+				$job->log( 'info', self::off_message( $stage ) );
+			}
+		}
+		$job->data['stage'] = '' === $next ? 'records' : $next;
+		return '' !== $next;
 	}
 
 	/**
@@ -497,7 +696,14 @@ class MigratePlus_Runner {
 					++$offset;
 					continue;
 				}
-				$ok = 'attachment' === get_post_type( $id ) ? wp_delete_attachment( $id, true ) : wp_delete_post( $id, true );
+				$type = (string) get_post_type( $id );
+				if ( 'attachment' === $type ) {
+					$ok = wp_delete_attachment( $id, true );
+				} elseif ( 0 === strpos( $type, 'acf-' ) && MigratePlus_ACF_Definitions::delete( $id ) ) {
+					$ok = true; // Through ACF, so a field group's fields go with it.
+				} else {
+					$ok = wp_delete_post( $id, true );
+				}
 				if ( $ok ) {
 					++$deleted;
 				} else {
@@ -524,6 +730,24 @@ class MigratePlus_Runner {
 				}
 			}
 		} while ( 0 === $deleted && $full );
+		// Terms it created, once the posts that used them are gone. Children come first,
+		// so a parent the user may not delete never strands its child.
+		if ( 0 === $deleted ) {
+			foreach ( $job->imported_terms() as $id ) {
+				$term = get_term( $id );
+				if ( ! $term instanceof WP_Term ) {
+					continue;
+				}
+				$tax = get_taxonomy( $term->taxonomy );
+				if ( ! $cli && ( ! $tax || ! current_user_can( $tax->cap->delete_terms ) ) ) {
+					++$denied;
+					continue;
+				}
+				if ( true === wp_delete_term( $id, $term->taxonomy ) ) {
+					++$deleted;
+				}
+			}
+		}
 		// Menus it created, once their items are gone (any items added to them by hand go with them).
 		if ( 0 === $deleted ) {
 			foreach ( $job->imported_menus() as $id ) {
@@ -536,10 +760,39 @@ class MigratePlus_Runner {
 				}
 			}
 		}
+		// Orders it created, with their refunds and notes.
+		if ( 0 === $deleted ) {
+			foreach ( $job->imported_orders() as $id ) {
+				if ( ! $cli && ! current_user_can( 'manage_woocommerce' ) ) {
+					++$denied;
+					continue;
+				}
+				if ( MigratePlus_Orders::delete( $id ) ) {
+					++$deleted;
+				}
+			}
+		}
+		// Users it created, last: the posts and orders that were theirs are gone by now.
+		if ( 0 === $deleted ) {
+			foreach ( $job->imported_users() as $id ) {
+				if ( ! $cli && ! current_user_can( 'delete_users' ) ) {
+					++$denied;
+					continue;
+				}
+				if ( MigratePlus_Users::delete( $id ) ) {
+					++$deleted;
+				}
+			}
+		}
 		$remaining = $job->imported_count();
 		$error     = '';
 		if ( 0 === $remaining ) {
 			MigratePlus_Menus::restore_locations( $job );
+			// Settings and values the import replaced go back to what they were.
+			MigratePlus_Site::restore( $job );
+			MigratePlus_ACF_Options::restore( $job );
+			MigratePlus_ACF_Definitions::restore( $job );
+			MigratePlus_Redirects::forget_job( $job->data['id'] );
 			$job->data['status']         = 'rolled_back';
 			$job->data['cursor']         = null;
 			$job->data['cursor_skip']    = 0;

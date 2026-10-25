@@ -17,14 +17,18 @@ delete_option( 'migrateplus_job_ids' );
 delete_option( 'migrateplus_settings' );
 delete_option( 'migrateplus_mappings' );
 delete_option( 'migrateplus_renamed' );
+delete_option( 'migrateplus_redirects' );
 delete_transient( 'migrateplus_storage_probe' );
 global $wpdb;
 $wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE 'migrateplus\\_job\\_%' OR option_name LIKE 'migrateplus\\_export\\_%' OR option_name LIKE 'migrateplus\\_exportlog\\_%' OR option_name LIKE 'migrateplus\\_replace\\_%' OR option_name LIKE 'migrateplus\\_replacelog\\_%' OR option_name LIKE 'migrateplus\\_lock\\_%'" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 wp_clear_scheduled_hook( 'migrateplus_cleanup' );
 
 if ( ! empty( $migrateplus_settings['remove_meta_on_uninstall'] ) ) {
-	foreach ( array( '_migrateplus_job_id', '_migrateplus_source_uid', '_migrateplus_source_id', '_migrateplus_source_url', '_migrateplus_download_source', '_migrateplus_parent_uid', '_migrateplus_acf_pending' ) as $migrateplus_key ) {
+	foreach ( array( '_migrateplus_job_id', '_migrateplus_source_uid', '_migrateplus_source_id', '_migrateplus_source_url', '_migrateplus_download_source', '_migrateplus_parent_uid', '_migrateplus_acf_pending', '_migrateplus_pending_ref' ) as $migrateplus_key ) {
 		delete_post_meta_by_key( $migrateplus_key );
+	}
+	foreach ( array( '_migrateplus_job_id', '_migrateplus_source_uid' ) as $migrateplus_key ) {
+		delete_metadata( 'user', 0, $migrateplus_key, '', true ); // Users an import created.
 	}
 	foreach ( array( '_migrateplus_job_id', '_migrateplus_source_comment_uid' ) as $migrateplus_key ) {
 		delete_metadata( 'comment', 0, $migrateplus_key, '', true );

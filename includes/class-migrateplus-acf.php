@@ -83,6 +83,173 @@ class MigratePlus_ACF {
 	}
 
 	/**
+	 * Top-level ACF fields shown for a taxonomy's terms, grouped by field group.
+	 *
+	 * @param string $taxonomy Taxonomy.
+	 * @return array[] { key, name, label, type, group, required, sub }
+	 */
+	public static function fields_for_taxonomy( $taxonomy ) {
+		if ( ! self::active() ) {
+			return array();
+		}
+		$out = array();
+		foreach ( (array) acf_get_field_groups( array( 'taxonomy' => $taxonomy ) ) as $group ) {
+			if ( isset( $group['active'] ) && ! $group['active'] ) {
+				continue;
+			}
+			foreach ( (array) acf_get_fields( $group ) as $field ) {
+				if ( empty( $field['name'] ) || in_array( $field['type'], self::LAYOUT_TYPES, true ) ) {
+					continue;
+				}
+				$out[] = array(
+					'key'   => $field['key'],
+					'name'  => $field['name'],
+					'label' => $field['label'] ? $field['label'] : $field['name'],
+					'type'  => $field['type'],
+					'group' => $group['title'],
+				);
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Top-level ACF fields shown on the user profile, grouped by field group.
+	 *
+	 * @return array[] { key, name, label, type, group }
+	 */
+	public static function fields_for_user() {
+		if ( ! self::active() ) {
+			return array();
+		}
+		$out = array();
+		foreach ( (array) acf_get_field_groups( array( 'user_form' => 'edit' ) ) as $group ) {
+			if ( isset( $group['active'] ) && ! $group['active'] ) {
+				continue;
+			}
+			foreach ( (array) acf_get_fields( $group ) as $field ) {
+				if ( empty( $field['name'] ) || in_array( $field['type'], self::LAYOUT_TYPES, true ) ) {
+					continue;
+				}
+				$out[] = array(
+					'key'   => $field['key'],
+					'name'  => $field['name'],
+					'label' => $field['label'] ? $field['label'] : $field['name'],
+					'type'  => $field['type'],
+					'group' => $group['title'],
+				);
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Save a user's exported ACF values ({ field name => portable value }), as
+	 * import_term_fields() saves a term's.
+	 *
+	 * @param int             $user_id  User id.
+	 * @param array           $values   Exported values.
+	 * @param MigratePlus_Job $job      Job.
+	 * @param array           $opts     Job options.
+	 * @param string[]        $warnings Warnings (by reference).
+	 * @return int Fields saved.
+	 */
+	public static function import_user_fields( $user_id, array $values, MigratePlus_Job $job, array $opts, array &$warnings ) {
+		if ( ! self::active() ) {
+			return 0;
+		}
+		$by_name = array();
+		foreach ( self::fields_for_user() as $f ) {
+			$by_name[ $f['name'] ] = $f['key'];
+		}
+		$ctx   = array(
+			'post_id'      => 'user_' . (int) $user_id,
+			'job_id'       => $job->data['id'],
+			'job'          => $job,
+			'base'         => isset( $job->data['settings']['migrateplus_site'] ) ? (string) $job->data['settings']['migrateplus_site'] : '',
+			'create_terms' => ! empty( $opts['create_terms'] ),
+			'defer'        => false,
+			'pending'      => array(),
+			'warnings'     => array(),
+		);
+		$saved = 0;
+		foreach ( $values as $name => $raw ) {
+			if ( null === $raw || '' === $raw || array() === $raw ) {
+				continue;
+			}
+			$field = isset( $by_name[ $name ] ) ? acf_get_field( $by_name[ $name ] ) : false;
+			if ( ! $field ) {
+				/* translators: %s: field name */
+				$warnings[] = sprintf( __( 'ACF field "%s" is not on the user profile.', 'migrateplus' ), $name );
+				continue;
+			}
+			$value = self::convert( $field, $raw, $ctx );
+			if ( update_field( $field['key'], wp_slash( $value ), 'user_' . (int) $user_id ) || null !== $value ) {
+				++$saved;
+			}
+		}
+		foreach ( array_unique( $ctx['warnings'] ) as $w ) {
+			$warnings[] = $w;
+		}
+		return $saved;
+	}
+
+	/**
+	 * Save a term's exported ACF values ({ field name => portable value }).
+	 * Post references that are not on the site yet are linked when the post they
+	 * name arrives (see link_pending()).
+	 *
+	 * @param int             $term_id  Term id.
+	 * @param string          $taxonomy Taxonomy.
+	 * @param array           $values   Exported values.
+	 * @param MigratePlus_Job $job      Job.
+	 * @param array           $opts     Job options.
+	 * @param string[]        $warnings Warnings (by reference).
+	 * @return int Fields saved.
+	 */
+	public static function import_term_fields( $term_id, $taxonomy, array $values, MigratePlus_Job $job, array $opts, array &$warnings ) {
+		if ( ! self::active() ) {
+			return 0;
+		}
+		$by_name = array();
+		foreach ( self::fields_for_taxonomy( $taxonomy ) as $f ) {
+			$by_name[ $f['name'] ] = $f['key'];
+		}
+		$ctx   = array(
+			'post_id'      => 'term_' . (int) $term_id,
+			'job_id'       => $job->data['id'],
+			'job'          => $job,
+			'base'         => isset( $job->data['settings']['migrateplus_site'] ) ? (string) $job->data['settings']['migrateplus_site'] : '',
+			'create_terms' => ! empty( $opts['create_terms'] ),
+			'warnings'     => array(),
+		);
+		$saved = 0;
+		foreach ( $values as $name => $raw ) {
+			if ( null === $raw || '' === $raw || array() === $raw ) {
+				continue;
+			}
+			$field = isset( $by_name[ $name ] ) ? acf_get_field( $by_name[ $name ] ) : false;
+			if ( ! $field ) {
+				/* translators: %s: field name */
+				$warnings[] = sprintf( __( 'ACF field "%s" is not on this taxonomy.', 'migrateplus' ), $name );
+				continue;
+			}
+			$ctx['defer']   = in_array( $field['type'], array( 'post_object', 'relationship' ), true );
+			$ctx['pending'] = array();
+			$value          = self::convert( $field, $raw, $ctx );
+			// Slashed as from a form post, like a post's fields (see import()).
+			if ( update_field( $field['key'], wp_slash( $value ), 'term_' . (int) $term_id ) || null !== $value ) {
+				++$saved;
+			}
+			self::set_term_pending( (int) $term_id, $field['key'], $ctx['pending'] );
+		}
+		foreach ( array_unique( $ctx['warnings'] ) as $w ) {
+			$warnings[] = $w;
+		}
+		return $saved;
+	}
+
+	/**
 	 * ACF data for the admin screen.
 	 *
 	 * @param string[] $post_types Post type names.
@@ -405,7 +572,7 @@ class MigratePlus_ACF {
 				}
 				if ( $names ) {
 					$create = $ctx['create_terms'] && ! empty( $field['add_term'] );
-					$ids    = array_merge( $ids, MigratePlus_Importer::resolve_terms( $tax, $names, $create, $ctx['warnings'] ) );
+					$ids    = array_merge( $ids, MigratePlus_Importer::resolve_terms( $tax, $names, $create, $ctx['warnings'], isset( $ctx['job'] ) ? $ctx['job'] : null ) );
 				}
 				$ids = array_values( array_unique( $ids ) );
 				$one = isset( $field['field_type'] ) && in_array( $field['field_type'], array( 'radio', 'select' ), true ) && empty( $field['multiple'] );
@@ -649,7 +816,26 @@ class MigratePlus_ACF {
 	}
 
 	/**
-	 * A post has just been imported: add it to the relationship fields that were waiting for it.
+	 * Like set_pending(), for a term's relationship fields (term meta).
+	 *
+	 * @param int      $term_id    Term id.
+	 * @param string   $field_key  ACF field key.
+	 * @param string[] $source_ids Source uids (MigratePlus_Importer::uid()) not imported yet.
+	 */
+	protected static function set_term_pending( $term_id, $field_key, array $source_ids ) {
+		foreach ( (array) get_term_meta( $term_id, self::PENDING_META, false ) as $row ) {
+			if ( 0 === strpos( (string) $row, $field_key . '|' ) ) {
+				delete_term_meta( $term_id, self::PENDING_META, $row );
+			}
+		}
+		foreach ( array_unique( $source_ids ) as $source_id ) {
+			add_term_meta( $term_id, self::PENDING_META, $field_key . '|' . $source_id );
+		}
+	}
+
+	/**
+	 * A post has just been imported: add it to the relationship fields, on posts
+	 * and on terms, that were waiting for it.
 	 *
 	 * @param int    $post_id   The imported post.
 	 * @param string $source_id Its source uid (MigratePlus_Importer::uid()), so only references from the same source match.
@@ -659,28 +845,47 @@ class MigratePlus_ACF {
 		if ( '' === (string) $source_id || ! self::active() ) {
 			return;
 		}
+		$like = '%|' . $wpdb->esc_like( (string) $source_id );
 		$rows = $wpdb->get_results( // phpcs:ignore WordPress.DB.DirectDatabaseQuery
-			$wpdb->prepare(
-				"SELECT post_id, meta_value FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value LIKE %s",
-				self::PENDING_META,
-				'%|' . $wpdb->esc_like( (string) $source_id )
-			)
+			$wpdb->prepare( "SELECT post_id, meta_value FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value LIKE %s", self::PENDING_META, $like )
 		);
 		foreach ( (array) $rows as $row ) {
-			$field_key = substr( $row->meta_value, 0, strrpos( $row->meta_value, '|' ) );
-			$field     = acf_get_field( $field_key );
-			if ( $field ) {
-				$current = get_field( $field_key, (int) $row->post_id, false );
-				if ( 'relationship' === $field['type'] || ! empty( $field['multiple'] ) ) {
-					$ids   = array_map( 'intval', is_array( $current ) ? $current : array_filter( array( $current ) ) );
-					$ids[] = (int) $post_id;
-					update_field( $field_key, array_values( array_unique( $ids ) ), (int) $row->post_id );
-				} else {
-					update_field( $field_key, (int) $post_id, (int) $row->post_id );
-				}
+			if ( self::link_waiting_field( $row->meta_value, (int) $post_id, (int) $row->post_id ) ) {
+				delete_post_meta( (int) $row->post_id, self::PENDING_META, $row->meta_value );
 			}
-			delete_post_meta( (int) $row->post_id, self::PENDING_META, $row->meta_value );
 		}
+		$rows = $wpdb->get_results( // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+			$wpdb->prepare( "SELECT term_id, meta_value FROM {$wpdb->termmeta} WHERE meta_key = %s AND meta_value LIKE %s", self::PENDING_META, $like )
+		);
+		foreach ( (array) $rows as $row ) {
+			if ( self::link_waiting_field( $row->meta_value, (int) $post_id, 'term_' . (int) $row->term_id ) ) {
+				delete_term_meta( (int) $row->term_id, self::PENDING_META, $row->meta_value );
+			}
+		}
+	}
+
+	/**
+	 * Add a just-imported post to one waiting relationship field.
+	 *
+	 * @param string     $pending  A PENDING_META value ("<field key>|<uid>").
+	 * @param int        $post_id  The imported post.
+	 * @param int|string $selector Where the field lives: a post id, or "term_<id>".
+	 * @return bool Whether the pending row is settled and can go.
+	 */
+	protected static function link_waiting_field( $pending, $post_id, $selector ) {
+		$field_key = substr( $pending, 0, strrpos( $pending, '|' ) );
+		$field     = acf_get_field( $field_key );
+		if ( $field ) {
+			$current = get_field( $field_key, $selector, false );
+			if ( 'relationship' === $field['type'] || ! empty( $field['multiple'] ) ) {
+				$ids   = array_map( 'intval', is_array( $current ) ? $current : array_filter( array( $current ) ) );
+				$ids[] = (int) $post_id;
+				update_field( $field_key, array_values( array_unique( $ids ) ), $selector );
+			} else {
+				update_field( $field_key, (int) $post_id, $selector );
+			}
+		}
+		return true;
 	}
 
 	/**

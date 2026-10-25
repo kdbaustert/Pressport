@@ -119,6 +119,7 @@ class Test_CLI extends WP_UnitTestCase {
 			'status'        => array( 'post', array( 'status' => 'publish,draft' ), array( 'Hello world', 'Packing list' ) ),
 			'comments'      => array( 'post', array( 'comments' => true ), array( 'Hello world' ) ),
 			'menus'         => array( 'post', array( 'menus' => true ), array( 'Hello world' ) ),
+			'users'         => array( 'users,post', array(), array( 'Hello world' ) ),
 			'gzip'          => array( 'post', array( 'gzip' => true ), array( 'Hello world' ) ),
 		);
 	}
@@ -166,6 +167,12 @@ class Test_CLI extends WP_UnitTestCase {
 		$this->assertSame( $titles, array_column( $doc['items'], 'title' ) );
 		$this->assertSame( isset( $assoc['comments'] ), isset( $doc['items'][0]['comments'][0] ) );
 		$this->assertSame( isset( $assoc['menus'] ), isset( $doc['menus'] ) );
+		// "users" in the type list is the users section, written first, not a post type.
+		$this->assertSame( 0 === strpos( $types, 'users' ), isset( $doc['users'] ) );
+		if ( isset( $doc['users'] ) ) {
+			$this->assertSame( array( 'post' ), $doc['migrateplus']['post_types'] );
+			$this->assertStringContainsString( ' users', $output );
+		}
 	}
 
 	public function test_import_dry_run_counts_duplicates_and_saves_nothing() {
