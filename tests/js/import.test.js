@@ -96,18 +96,15 @@ describe('Import', () => {
     assert.equal(env.modal.title(), 'Import complete')
   })
 
-  it('offers the author for all in that confirmation, and points to Review mapping for one each', async () => {
+  it('asks for no author in that confirmation, leaving the posts to the person importing', async () => {
     const env = boot({ routes: { preview: exportPreview, duplicates: { count: 0, total: 15 }, save: saved, run: done(false) } })
     upload(env)
     await env.flush()
-    const picker = env.$('#migrateplus-modal-author')
-    assert.equal(picker.options[0].textContent, 'You (the person importing)')
-    assert.ok(env.byText('.migrateplus-modal p', 'To choose an author for each post or page, use Review mapping.'))
+    assert.equal(env.$('.migrateplus-modal select'), null)
 
-    env.choose(picker, '2')
     env.click(env.modal.primary())
     await env.flush()
-    assert.equal(json(env.sent('save')[0], 'options').author, 2)
+    assert.equal(json(env.sent('save')[0], 'options').author, 0)
   })
 
   it('runs without an author picked, leaving the posts to the person importing', async () => {
@@ -341,7 +338,8 @@ describe('Duplicates', () => {
     assert.equal(env.$('.migrateplus-dups-head h2').textContent, 'Items already on this site')
     assert.equal(env.$('.migrateplus-dups-head p').textContent, '4 of 6 records are already on this site. Choose what to do with each.')
     assert.equal(env.$('.migrateplus-dups-table caption').textContent, 'Items already on this site')
-    assert.deepEqual(env.$$('.migrateplus-dups-table thead th').map(th => th.getAttribute('scope')), ['col', 'col', 'col', 'col', 'col'])
+    assert.deepEqual(env.$$('.migrateplus-dups-table thead th').map(th => th.textContent), ['In the file', 'On this site', 'Why it matched', 'Status', 'Author', 'What to do'])
+    assert.deepEqual(env.$$('.migrateplus-dups-table thead th').map(th => th.getAttribute('scope')), ['col', 'col', 'col', 'col', 'col', 'col'])
     assert.deepEqual(rowTitles(env), ['Dune', 'Emma', 'Kindred', 'cover.jpg'])
 
     const [view, edit] = rows(env)[0].children[1].querySelectorAll('a')
@@ -489,6 +487,28 @@ describe('Duplicates', () => {
     assert.equal(env.modal.title(), 'Import complete')
   })
 
+  it('picks an author for each post before what to do with it, but none for media', async () => {
+    const env = await duplicatesScreen({ save: saved })
+    assert.equal(env.$('label[for="migrateplus-dup-0-author"]').textContent, 'Author of “Dune”')
+    assert.equal(env.$('#migrateplus-dup-0-author').options[0].textContent, 'You (the person importing)')
+    assert.equal(rows(env)[0].children[4].querySelector('select').id, 'migrateplus-dup-0-author')
+    assert.equal(env.$('#migrateplus-dup-4-author'), null)
+
+    env.choose(env.$('#migrateplus-dup-3-author'), '2')
+    env.choose(choice(env, 3), 'update')
+    env.click(dupButton(env, 'Import'))
+    await env.flush()
+    assert.deepEqual(json(env.sent('save')[0], 'options').authors, { 3: 2 })
+  })
+
+  it('names the author picked for all on the mapping step as each row’s default', async () => {
+    const env = await mappingStep({ duplicates: dups() })
+    env.choose(env.$('#migrateplus-opt-author'), '1')
+    env.click(env.byText('button', 'Start import'))
+    await env.flush()
+    assert.equal(env.$('#migrateplus-dup-0-author').options[0].textContent, 'Author for all')
+  })
+
   it('asks what to do with the duplicates past a list cut short, and sends it with the skipped ids', async () => {
     const env = await duplicatesScreen({ duplicates: dups({ count: 6, total: 8, items_truncated: true }) })
     assert.ok(env.byText('.migrateplus-dups-rest p', 'Showing the first 4 of 6.'))
@@ -507,25 +527,28 @@ describe('Duplicates', () => {
     assert.equal(opts.duplicate_rest, 'update')
   })
 
-  it('reaches the screen from the confirmation of a dropped export, which sends the author picked there', async () => {
+  it('reaches the screen from the confirmation of a dropped export, with an author picked on a row', async () => {
     const env = boot({ routes: { preview: exportPreview, duplicates: dups({ total: 15 }), save: saved, run: done(false) } })
     upload(env)
     await env.flush()
     assert.equal(env.modal.message(), 'Exported from old-books.test. Everything is imported as Post, with the field mapping saved in the file. 4 of them are already on this site. Next, choose which to update, skip or import as copies.')
     assert.deepEqual(env.modal.labels(), ['Review mapping', 'Cancel', 'Choose what to do with them'])
-    env.choose(env.$('#migrateplus-modal-author'), '2')
     env.click(env.modal.primary())
     assert.equal(env.modal.isOpen(), false)
     assert.deepEqual(rowTitles(env), ['Dune', 'Emma', 'Kindred', 'cover.jpg'])
     assert.ok(dupButton(env, 'Cancel'))
     assert.equal(dupButton(env, 'Dry run'), undefined)
 
+    assert.equal(env.byText('label', 'Author for all posts and pages'), undefined)
+    assert.equal(env.$('#migrateplus-dup-0-author').options[0].textContent, 'You (the person importing)')
     env.choose(choice(env, 0), 'update')
+    env.choose(env.$('#migrateplus-dup-0-author'), '2')
     env.click(dupButton(env, 'Import'))
     await env.flush()
     assert.equal(env.sent('duplicates').length, 1)
     const opts = json(env.sent('save')[0], 'options')
-    assert.equal(opts.author, 2)
+    assert.equal(opts.author, 0)
+    assert.deepEqual(opts.authors, { 0: 2 })
     assert.equal(opts.skip_existing, 1)
     assert.deepEqual(opts.update_ids, [41])
   })

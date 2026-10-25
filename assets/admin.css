@@ -623,17 +623,12 @@ body.migrateplus-modal-open { overflow: hidden; }
 }
 .migrateplus-modal-note.is-log { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .migrateplus-modal-note.is-error { white-space: normal; background: var(--pp-hull-wash); color: #8a2a20; font-family: inherit; font-size: 13px; }
-/* The rename dialog's text field, and the author picker of the import confirmation. */
-.migrateplus-modal .migrateplus-modal-input,
-.migrateplus-modal .migrateplus-author select,
-.migrateplus-modal .migrateplus-author input {
+/* The rename dialog's text field. */
+.migrateplus-modal .migrateplus-modal-input {
 	display: block; width: 100%; max-width: none; min-height: 36px; margin: 0; padding: 6px 10px;
 	border: 1px solid var(--pp-line); border-radius: var(--pp-r-sm); color: var(--pp-ink); background-color: var(--pp-paper); box-shadow: none;
 }
-.migrateplus-modal .migrateplus-modal-input:focus,
-.migrateplus-modal .migrateplus-author select:focus,
-.migrateplus-modal .migrateplus-author input:focus { border-color: var(--pp-tide); box-shadow: 0 0 0 1px var(--pp-tide); outline: none; }
-.migrateplus-modal .migrateplus-author { margin: 0; }
+.migrateplus-modal .migrateplus-modal-input:focus { border-color: var(--pp-tide); box-shadow: 0 0 0 1px var(--pp-tide); outline: none; }
 .migrateplus-author-search { width: 100%; }
 /* The author for each post or page, under the author for all. */
 .migrateplus-authors-each { gap: 6px; }
@@ -644,8 +639,6 @@ body.migrateplus-modal-open { overflow: hidden; }
 .migrateplus-authors-table td { padding: 6px; }
 .migrateplus-authors-table td:last-child { width: 45%; }
 .migrateplus-authors-table select { width: 100%; }
-.migrateplus-modal .migrateplus-author + .migrateplus-help { margin-top: 6px; }
-
 .migrateplus-modal-actions {
 	display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;
 	margin: 22px -24px 0; padding: 14px 24px; border-top: 1px solid var(--pp-line-2); background: #fafbfc;

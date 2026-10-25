@@ -329,7 +329,7 @@
 			if ( ! reopened && dialog.current.contains( active ) && active.matches( 'input, select' ) ) {
 				return; // Choosing in a field enabled a button: focus stays where the user is.
 			}
-			const field = dialog.current.querySelector( '.migrateplus-modal-input, .migrateplus-author select' );
+			const field = dialog.current.querySelector( '.migrateplus-modal-input' );
 			if ( field && ! field.disabled ) {
 				field.focus( { preventScroll: true } );
 				if ( field.select ) {
@@ -1191,9 +1191,6 @@
 		const actions = () => ( d && d.count
 			? [ { label: __( 'Choose what to do with them', 'migrateplus' ), primary: true, onClick: () => openDuplicates( d, 'confirm' ) } ]
 			: [ { label: __( 'Import', 'migrateplus' ), primary: true, onClick: () => start( false, true ) } ] ).concat( review, [ cancel ] );
-		base.content = sidesOnly ? null : createElement( Fragment, null,
-			createElement( MainAuthorPicker, { id: 'migrateplus-modal-author', onPick: () => modal.update( {} ) } ),
-			review.length ? createElement( 'p', { className: 'migrateplus-help' }, __( 'To choose an author for each post or page, use Review mapping.', 'migrateplus' ) ) : null );
 		if ( d && d.count ) {
 			modal.open( Object.assign( base, {
 				message: intro + ' ' + duplicateMessage( d ),
@@ -1458,6 +1455,7 @@
 						createElement( 'th', { scope: 'col' }, __( 'On this site', 'migrateplus' ) ),
 						createElement( 'th', { scope: 'col' }, __( 'Why it matched', 'migrateplus' ) ),
 						createElement( 'th', { scope: 'col' }, __( 'Status', 'migrateplus' ) ),
+						createElement( 'th', { scope: 'col' }, __( 'Author', 'migrateplus' ) ),
 						createElement( 'th', { scope: 'col' }, __( 'What to do', 'migrateplus' ) ) ) ),
 					createElement( 'tbody', null, rows.flatMap( ( it ) => {
 						const open = s.open.has( it.index );
@@ -1485,13 +1483,24 @@
 									}
 									render();
 								} }, it.changed ? __( 'Show changes', 'migrateplus' ) : __( 'Compare files', 'migrateplus' ) ) : null ),
+							// Media keeps its author; an update or a copy of a post or page takes the one picked here.
+							createElement( 'td', null, it.media ? null : createElement( AuthorPicker, {
+								id: id + '-author',
+								/* translators: %s: a post's title */
+								label: sprintf( __( 'Author of “%s”', 'migrateplus' ), title ),
+								hideLabel: true,
+								// The author for all is picked only on the mapping step; without one the import gives the post to whoever runs it.
+								emptyLabel: Number( state.options.author ) > 0 ? __( 'Author for all', 'migrateplus' ) : __( 'You (the person importing)', 'migrateplus' ),
+								value: ( state.options.authors || {} )[ it.index ],
+								onChange: ( user ) => setRecordAuthor( it.index, user ),
+							} ) ),
 							createElement( 'td', null,
 								/* translators: %s: the title of a record in the file */
 								createElement( 'label', { className: 'screen-reader-text', htmlFor: id }, sprintf( __( 'What to do with “%s”', 'migrateplus' ), title ) ),
 								createElement( 'select', { id, value: choiceOf( it ), onChange: ( e ) => set( [ it ], e.target.value ) },
 									( it.media ? MEDIA_CHOICES : POST_CHOICES ).map( ( [ v, l ] ) => createElement( 'option', { key: v, value: v }, l ) ) ) ) );
 						return open ? [ row, createElement( 'tr', { key: it.index + '-changes', className: 'migrateplus-dups-changes' },
-							createElement( 'td', { colSpan: 5, id: id + '-changes' },
+							createElement( 'td', { colSpan: 6, id: id + '-changes' },
 								it.media ? createElement( MediaCompare, { it } ) : null,
 								fields.length ? createElement( FieldChanges, { fields } ) : null ) ) ] : [ row ];
 					} ) ) ) : createElement( 'p', { className: 'migrateplus-muted' }, __( 'No duplicates match.', 'migrateplus' ) ),
@@ -2369,6 +2378,17 @@
 		} );
 	}
 
+	/** Give the record at index (its position in the file) its own author, or with 0 the author for all again, and redraw. */
+	function setRecordAuthor( index, user ) {
+		state.options.authors = Object.assign( {}, state.options.authors );
+		if ( user ) {
+			state.options.authors[ index ] = user;
+		} else {
+			delete state.options.authors[ index ];
+		}
+		render();
+	}
+
 	// Records per page in the author for each post or page.
 	const RECORDS_PAGE = 50;
 
@@ -2437,15 +2457,7 @@
 							hideLabel: true,
 							emptyLabel: __( 'Same as above', 'migrateplus' ),
 							value: ( state.options.authors || {} )[ r.index ],
-							onChange: ( user ) => {
-								state.options.authors = Object.assign( {}, state.options.authors );
-								if ( user ) {
-									state.options.authors[ r.index ] = user;
-								} else {
-									delete state.options.authors[ r.index ];
-								}
-								render();
-							},
+							onChange: ( user ) => setRecordAuthor( r.index, user ),
 						} ) ) ) ) ) ) : null,
 				rows.length ? createElement( 'div', { className: 'migrateplus-authors-paging' },
 					createElement( 'button', { type: 'button', className: 'button', disabled: ! page.offset, onClick: () => load( Math.max( 0, page.offset - RECORDS_PAGE ), page.q ) }, __( 'Previous', 'migrateplus' ) ),
