@@ -515,8 +515,6 @@
 .migrateplus-map-table td > .migrateplus-help { margin-top: 4px; }
 
 /* Export */
-.migrateplus-export-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 32px; }
-.migrateplus-export-grid h2 { margin-bottom: 14px; }
 .migrateplus-export fieldset { border: 0; margin: 0 0 14px; padding: 0; min-width: 0; }
 .migrateplus-export legend { float: left; width: 100%; padding: 0; margin-bottom: 6px; }
 .migrateplus-export fieldset > :not(legend) { clear: both; }
@@ -544,7 +542,6 @@
 .migrateplus-app .migrateplus-date-range input { min-height: 36px; border: 1px solid var(--pp-line); border-radius: var(--pp-r-sm); padding: 4px 8px; }
 .migrateplus-export-count { font-weight: 500; color: var(--pp-ink-2); }
 .migrateplus-export-count.is-warn { color: var(--pp-hull); }
-@media (max-width: 900px) { .migrateplus-export-grid { grid-template-columns: 1fr; gap: 20px; } }
 
 /* Progress modal: status icon and title in the header, a large percentage over the
    bar, outcome chips, the latest log line, and the actions in a footer. */
@@ -739,3 +736,21 @@ body.migrateplus-modal-open { overflow: hidden; }
 .migrateplus-help.is-warn { color: var(--pp-hull); }
 .migrateplus-export-filters { display: grid; gap: 10px; padding-top: 4px; border-top: 1px solid var(--pp-line); }
 .migrateplus-export-filters .migrateplus-opt { margin-bottom: 0; }
+/* Find & Replace keeps the two even columns. */
+.migrateplus-export-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 32px; }
+.migrateplus-export-grid h2 { margin-bottom: 14px; }
+@media (max-width: 900px) { .migrateplus-export-grid { grid-template-columns: 1fr; gap: 20px; } }
+/* Export: the manifest of what goes in on the left, the file being built on the right. */
+.migrateplus-export-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 32px; align-items: start; }
+.migrateplus-export-manifest h2, .migrateplus-export-file h2 { margin: 0 0 12px; font-size: 15px; }
+.migrateplus-export-file { position: sticky; top: 52px; padding: 18px 20px 20px; border: 1px solid var(--pp-line); border-radius: var(--pp-r-lg); background: var(--pp-deck); }
+.migrateplus-export-file .migrateplus-export-count { margin: 0 0 10px; font-size: 12px; color: var(--pp-muted); line-height: 1.45; }
+.migrateplus-export-file .migrateplus-export-count.is-warn { color: var(--pp-hull); }
+.migrateplus-file-lines { margin: 0 0 12px; padding: 0; list-style: none; border-top: 1px solid var(--pp-line); }
+.migrateplus-file-lines li { padding: 7px 0; border-bottom: 1px solid var(--pp-line); font-size: 13px; color: var(--pp-ink); }
+.migrateplus-file-lines li:first-child { font-weight: 600; }
+.migrateplus-export-file .migrateplus-help { margin: 0 0 12px; }
+.migrateplus-file-options { margin: 0 0 16px; padding-top: 12px; border-top: 1px solid var(--pp-line); }
+.migrateplus-file-export { width: 100%; justify-content: center; }
+.migrateplus-card-toggles { margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--pp-line); gap: 10px; }
+@media (max-width: 1100px) { .migrateplus-export-layout { grid-template-columns: 1fr; } .migrateplus-export-file { position: static; } }

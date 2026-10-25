@@ -146,6 +146,10 @@ class MigratePlus_Admin {
 				'plural'     => $pt->labels->name,
 				'taxonomies' => $taxes,
 				'export'     => self::exportable_type( $pt->name ), // Offered on the Export screen.
+				'supports'   => array( // What the Export screen can offer with this type.
+					'thumbnail' => post_type_supports( $pt->name, 'thumbnail' ),
+					'comments'  => post_type_supports( $pt->name, 'comments' ),
+				),
 			);
 		}
 

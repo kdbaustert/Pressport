@@ -2366,7 +2366,7 @@
 		const a = state.exportArgs;
 		if ( ! a.post_types.length && ! Number( a.include_users ) && ! Number( a.include_orders ) && ! Number( a.include_site_settings ) && ! Number( a.include_menus ) ) {
 			++exportCountSeq; // An answer still on its way is stale.
-			state.exportCount = { text: 'Nothing to export yet. Select at least one card to export.', warn: true, empty: true };
+			state.exportCount = { text: 'Nothing to export yet. Select at least one card to export.', warn: true, empty: true, lines: [] };
 			render();
 			return;
 		}
@@ -2382,6 +2382,8 @@
 				const each = counts.length > 1 ? ' (' + counts.map( ( [ type, n ] ) => n.toLocaleString() + ' ' + ( 1 === n ? postType( type ).label : postType( type ).plural || postType( type ).label ).toLowerCase() ).join( ', ' ) + ')' : '';
 						const sides = sidesList( d.sides || { terms: d.terms, menus: d.menus } );
 				const withSides = sides.length ? ', with ' + joinAnd( sides ) : '';
+				// One line per part of the file, for the rail: types with something in them, then the side sections.
+				const lines = counts.filter( ( [ , n ] ) => n > 0 ).map( ( [ type, n ] ) => n.toLocaleString() + ' ' + ( 1 === n ? postType( type ).label : postType( type ).plural || postType( type ).label ).toLowerCase() ).concat( sides );
 				// No post type ticked (users or orders alone) is a choice, not an empty match.
 				const noTypes = ! state.exportArgs.post_types.length;
 				state.exportCount = {
@@ -2390,6 +2392,7 @@
 						: d.count.toLocaleString() + ' ' + ( d.count === 1 && 1 === counts.length ? postType( counts[ 0 ][ 0 ] ).label.toLowerCase() : 'items' ) + each + withSides + ' will be exported',
 					warn: ! d.count && ! ( noTypes && sides.length ),
 					empty: ! d.count && ! sides.length, // Menus, terms, users or settings alone are worth a file.
+					lines,
 				};
 				render();
 			} ).catch( ( e ) => {
@@ -2432,7 +2435,7 @@
 		const typeItem = ( p ) => ( { kind: 'type', name: p.name, label: p.plural || p.label, on: x.post_types.includes( p.name ) } );
 		const sideItem = ( s ) => ( { kind: 'side', name: s.name, label: s.label, arg: s.arg, on: !! Number( x[ s.arg ] ) } );
 		const features = [
-			{ key: 'content', label: 'Posts, pages and media', help: 'With their custom fields, terms, featured images and the rest chosen under Include.', items: byName( BUILTIN_TYPES ).map( typeItem ) },
+			{ key: 'content', label: 'Posts, pages and media', help: 'Tick the types, then choose below what travels with them.', items: byName( BUILTIN_TYPES ).map( typeItem ) },
 			{ key: 'blocks', label: 'Block editor', help: 'Synced patterns, templates and template parts of the Site Editor.', items: blocks.map( typeItem ) },
 			{ key: 'navigation', label: 'Navigation', help: 'Menus from Appearance → Menus with their items and theme locations, and the Site Editor\'s navigation blocks. Export the content they link to in the same file.', items: ( menus ? [ sideItem( menus ) ] : [] ).concat( navigation.map( typeItem ) ) },
 			{ key: 'woo', label: 'WooCommerce', help: 'Products with their data, coupons, and orders with their items, refunds and notes.', items: wooTypes.map( typeItem ).concat( orders ? [ sideItem( orders ) ] : [] ) },
@@ -2441,7 +2444,6 @@
 			site ? { key: 'site', label: 'Site settings', help: 'Settings, widgets, theme and plugin options. Pick which parts below.', items: [ sideItem( site ) ], single: true } : null,
 		].filter( ( f ) => f && f.items.length );
 		const pickedCount = features.reduce( ( n, f ) => n + f.items.filter( ( i ) => i.on ).length, 0 );
-		const hasPosts = x.post_types.length > 0;
 		// Apply a set of items: post types in the order shown, side sections by their arg. Everything may be
 		// unticked; the count line then says so and Export is disabled.
 		const apply = ( items, on ) => {
@@ -2486,6 +2488,36 @@
 					createElement( 'span', { className: 'migrateplus-help' }, 'Leave empty to export everything.' )
 				)
 		);
+		// What travels with a card's content: the post fields with Posts, pages and media (and any other post
+		// type), product data with products, the options pages with the site settings.
+		// The first card with a post type ticked carries the post field toggles: normally Posts, pages and media.
+		const postCard = features.find( ( o ) => o.items.some( ( i ) => 'type' === i.kind && i.on ) ) || null;
+		const cardToggles = ( f ) => {
+			if ( f === postCard ) {
+				// Only what the ticked types can carry: no terms toggle for types without taxonomies, no
+				// featured images or comments for types that don't support them, no ACF toggle without ACF fields.
+				const picked = x.post_types.map( postType );
+				const can = ( key ) => picked.some( ( p ) => ! p.supports || p.supports[ key ] );
+				const hasTerms = picked.some( ( p ) => ( p.taxonomies || [] ).length > 0 );
+				return [
+					hasTerms ? toggle( 'include_terms', 'Categories, tags and terms', 'Hierarchy is kept as "Parent > Child".' ) : null,
+					hasTerms ? toggle( 'include_term_data', 'Term data', 'The terms of these content types as their own section: descriptions, custom fields, ACF fields, category images and terms nothing uses yet.' ) : null,
+					! isMedia && can( 'thumbnail' ) ? toggle( 'include_image', 'Featured images', 'Exported as URLs; the importing site downloads them.' ) : null,
+					toggle( 'include_meta', 'Custom fields', 'Public post meta. Private keys starting with "_" and keys listed in Settings are left out.' ),
+					D.acf && D.acf.active && acfCount ? toggle( 'include_acf', 'ACF fields', acfCount + ' field' + ( acfCount === 1 ? '' : 's' ) + ' on these content types. Images become URLs, related posts become references.' ) : null,
+					D.acf && D.acf.active ? toggle( 'include_acf_definitions', 'ACF definitions', 'Field groups, post types, taxonomies and options pages, as ACF\'s own export writes them.' ) : null,
+					can( 'comments' ) ? toggle( 'include_comments', 'Comments', 'Approved comments and replies, with their public comment fields. Pending, spam and trashed comments are left out.' ) : null,
+					D.sides && D.sides.yoast ? toggle( 'include_yoast', 'Yoast SEO', 'Titles, descriptions, keyphrases, social images and primary categories of posts and terms.' ) : null,
+				];
+			}
+			if ( 'woo' === f.key && D.woo && D.woo.active && x.post_types.includes( 'product' ) ) {
+				return [ toggle( 'include_woo', 'Product data', 'Prices, stock, attributes, downloads and variations. Images become URLs; related products link up by ID or SKU.' ) ];
+			}
+			if ( 'site' === f.key && D.acf && D.acf.active ) {
+				return [ toggle( 'include_acf_options', 'ACF options pages', 'The values of every options page. Images become URLs, related posts become references.' ) ];
+			}
+			return [];
+		};
 		const featureCard = ( f ) => {
 			const picked = f.items.filter( ( i ) => i.on ).length;
 			const id = 'migrateplus-export-feature-' + f.key;
@@ -2507,7 +2539,8 @@
 							createElement( 'input', { type: 'checkbox', id: cid, checked: i.on, onChange: ( e ) => apply( [ i ], e.target.checked ) } ),
 							createElement( 'span', null, i.label ) );
 					} ) ),
-					'content' === f.key ? contentFilters() : null ) : null,
+					'content' === f.key ? contentFilters() : null,
+					cardToggles( f ).filter( Boolean ).length ? createElement( 'div', { className: 'migrateplus-toggles migrateplus-card-toggles' }, cardToggles( f ) ) : null ) : null,
 				picked && 'site' === f.key ? createElement( 'div', { className: 'migrateplus-export-parts' },
 					createElement( 'div', { className: 'migrateplus-table-tools' },
 						createElement( 'span', { className: 'migrateplus-help' }, pickedSections.length + ' of ' + siteSections.length + ' sections' ),
@@ -2519,47 +2552,31 @@
 							createElement( 'input', { type: 'checkbox', id: sid, value: s.key, checked: pickedSections.includes( s.key ), onChange: ( e ) => setSections( e.target.checked ? pickedSections.concat( s.key ) : pickedSections.filter( ( k ) => k !== s.key ) ) } ),
 							createElement( 'span', null, s.label ) );
 					} ) ),
-					! pickedSections.length ? createElement( 'p', { className: 'migrateplus-help is-warn' }, 'Pick at least one section, or untick Site settings.' ) : null ) : null );
+					! pickedSections.length ? createElement( 'p', { className: 'migrateplus-help is-warn' }, 'Pick at least one section, or untick Site settings.' ) : null,
+					cardToggles( f ).length ? createElement( 'div', { className: 'migrateplus-toggles migrateplus-card-toggles' }, cardToggles( f ) ) : null ) : null );
 		};
 		const le = state.lastExport;
 
+		const file = state.exportCount;
 		return createElement( Fragment, null,
 			createElement( 'form', { className: 'migrateplus-panel migrateplus-export', onSubmit: ( e ) => {
 				e.preventDefault();
 				runExport();
 			} },
-				createElement( 'div', { className: 'migrateplus-export-grid' },
-					createElement( 'section', null,
+				createElement( 'div', { className: 'migrateplus-export-layout' },
+					createElement( 'section', { className: 'migrateplus-export-manifest' },
 						createElement( 'h2', null, 'What to export' ),
-						createElement( 'div', { className: 'migrateplus-export-cards', role: 'group', 'aria-label': 'What to export' }, features.map( featureCard ) ),
-						pickedCount > 1 ? createElement( 'p', { className: 'migrateplus-help' }, 'One file, imported in one go: users first, then media, then the rest in the order shown, and orders last.' ) : null,
-					),
-					createElement( 'section', null,
-						createElement( 'h2', null, 'Include' ),
-						// Each toggle shows with the card it belongs to: the post fields with any post type, the
-						// options pages with the site settings, product data with products. Compression always.
-						createElement( 'div', { className: 'migrateplus-toggles is-flush' },
-							hasPosts ? toggle( 'include_terms', 'Categories, tags and terms', 'Hierarchy is kept as "Parent > Child".' ) : null,
-							hasPosts ? toggle( 'include_term_data', 'Term data', 'The terms of these content types as their own section: descriptions, custom fields, ACF fields, category images and terms nothing uses yet.' ) : null,
-							hasPosts && ! isMedia ? toggle( 'include_image', 'Featured images', 'Exported as URLs; the importing site downloads them.' ) : null,
-							hasPosts ? toggle( 'include_meta', 'Custom fields', 'Public post meta. Private keys starting with "_" and keys listed in Settings are left out.' ) : null,
-							hasPosts && D.acf && D.acf.active
-								? toggle( 'include_acf', 'ACF fields', acfCount ? acfCount + ' field' + ( acfCount === 1 ? '' : 's' ) + ' on this content type. Images become URLs, related posts become references.' : 'No ACF fields on this content type.', ! acfCount )
-								: ( hasPosts ? toggle( 'include_acf', 'ACF fields', 'Advanced Custom Fields is not active on this site.', true ) : null ),
-							hasPosts && D.acf && D.acf.active ? toggle( 'include_acf_definitions', 'ACF definitions', 'Field groups, post types, taxonomies and options pages, as ACF\'s own export writes them.' ) : null,
-							D.woo && D.woo.active && x.post_types.includes( 'product' )
-								? toggle( 'include_woo', 'WooCommerce product data', 'Prices, stock, attributes, downloads and variations. Images become URLs; related products link up by ID or SKU.' )
-								: null,
-							hasPosts ? toggle( 'include_comments', 'Comments', 'Approved comments and replies, with their public comment fields. Pending, spam and trashed comments are left out.' ) : null,
-							hasPosts && D.sides && D.sides.yoast ? toggle( 'include_yoast', 'Yoast SEO', 'Titles, descriptions, keyphrases, social images and primary categories of posts and terms.' ) : null,
-							Number( x.include_site_settings ) && D.acf && D.acf.active ? toggle( 'include_acf_options', 'ACF options pages', 'The values of every options page. Images become URLs, related posts become references.' ) : null,
-							D.zlib ? toggle( 'gzip', 'Compress the file (.json.gz)', 'Much smaller, for a site whose upload limit is lower than the export. Migrate Plus imports it as it is.' ) : null ),
-						! hasPosts && ! Number( x.include_site_settings ) ? createElement( 'p', { className: 'migrateplus-muted' }, 'Tick a card to see what can be included with it.' ) : null
-					)
-				),
-				createElement( 'footer', { className: 'migrateplus-panel-foot' },
-					createElement( 'span', { className: 'migrateplus-export-count' + ( state.exportCount.warn ? ' is-warn' : '' ), 'aria-live': 'polite' }, state.exportCount.text ),
-					createElement( 'button', { type: 'submit', className: 'button button-primary migrateplus-btn-lg', disabled: state.exportCount.empty }, 'Export' ) )
+						createElement( 'div', { className: 'migrateplus-export-cards', role: 'group', 'aria-label': 'What to export' }, features.map( featureCard ) ) ),
+					// The file being built: what is in it so far, and the button that writes it.
+					createElement( 'aside', { className: 'migrateplus-export-file', 'aria-label': 'Your file' },
+						createElement( 'h2', null, 'Your file' ),
+						createElement( 'p', { className: 'migrateplus-export-count' + ( file.warn ? ' is-warn' : '' ), 'aria-live': 'polite' }, file.text ),
+						file.lines && file.lines.length ? createElement( 'ul', { className: 'migrateplus-file-lines' }, file.lines.map( ( line ) => createElement( 'li', { key: line }, line ) ) ) : null,
+						pickedCount > 1 ? createElement( 'p', { className: 'migrateplus-help' }, 'Imported in this order on the other site: users first, then media, then the rest as listed, and orders last.' ) : null,
+						D.zlib ? createElement( 'div', { className: 'migrateplus-toggles migrateplus-file-options' },
+							toggle( 'gzip', 'Compress the file (.json.gz)', 'Much smaller, for a site whose upload limit is lower than the export. Migrate Plus imports it as it is.' ) ) : null,
+						createElement( 'button', { type: 'submit', className: 'button button-primary migrateplus-btn-lg migrateplus-file-export', disabled: file.empty }, 'Export' ) )
+				)
 			),
 			le ? createElement( 'section', { className: 'migrateplus-summary' },
 				createElement( 'span', { className: 'migrateplus-source-icon migrateplus-icon-json', 'aria-hidden': 'true' } ),

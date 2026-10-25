@@ -153,6 +153,30 @@ describe('Export custom post types', () => {
     assert.ok(env.$('#migrateplus-export-gzip'))
   })
 
+  it('offers only the toggles the ticked types can use', async () => {
+    const env = boot({
+      data: { view: 'export', postTypes: [
+        { name: 'post', label: 'Post', plural: 'Posts', taxonomies: [{ name: 'category', label: 'Category' }], supports: { thumbnail: true, comments: true } },
+        { name: 'book', label: 'Book', plural: 'Books', taxonomies: [], supports: { thumbnail: false, comments: false } },
+      ] },
+      routes: { export_count: { count: 3, counts: { post: 3 } } },
+    })
+    assert.ok(env.$('#migrateplus-export-include_terms'))
+    assert.ok(env.$('#migrateplus-export-include_image'))
+    assert.ok(env.$('#migrateplus-export-include_comments'))
+    assert.equal(env.$('#migrateplus-export-include_acf'), null) // ACF is not active.
+
+    // Books alone: no taxonomies, no featured images, no comments. The custom fields toggle stays.
+    env.check(env.$('#migrateplus-export-feature-cpt'))
+    env.check(env.$('#migrateplus-export-feature-content'), false)
+    await env.flush()
+    const card = env.$('#migrateplus-export-feature-cpt').closest('.migrateplus-export-card')
+    assert.ok(card.querySelector('#migrateplus-export-include_meta'))
+    assert.equal(env.$('#migrateplus-export-include_terms'), null)
+    assert.equal(env.$('#migrateplus-export-include_image'), null)
+    assert.equal(env.$('#migrateplus-export-include_comments'), null)
+  })
+
   it('lets every card be unticked, then says so and disables Export', async () => {
     const env = exportScreen()
     env.check(env.$('#migrateplus-export-feature-content'), false)
