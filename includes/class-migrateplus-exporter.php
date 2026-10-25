@@ -25,6 +25,62 @@ class MigratePlus_Exporter {
 	const LOG_INDEX  = 'migrateplus_exportlog_ids';
 
 	/**
+	 * Post types with an admin screen that are not content to move: the site editor's and
+	 * menus' types (which the importer refuses too), ACF's settings, and WooCommerce orders,
+	 * which with HPOS keep their data in tables of their own.
+	 */
+	// Global styles travel with the site settings, ACF's definitions and orders as sections of their own.
+	const NOT_EXPORTED = array( 'wp_global_styles', 'nav_menu_item', 'acf-field-group', 'acf-field', 'acf-post-type', 'acf-taxonomy', 'acf-ui-options-page', 'shop_order', 'shop_order_refund', 'shop_order_placehold' );
+
+	/**
+	 * Whether a post type may be exported: one with an admin screen, as the importer
+	 * requires, that is not in NOT_EXPORTED. Whether the user may edit it is checked apart.
+	 *
+	 * @param string $type Post type.
+	 * @return bool
+	 */
+	public static function exportable_type( $type ) {
+		$object = get_post_type_object( $type );
+		// Templates and template parts have no admin screen of their own (the Site Editor edits them), but are content.
+		return $object && ( $object->show_ui || MigratePlus_Blocks::is_template_type( $type ) ) && ! in_array( $type, self::NOT_EXPORTED, true );
+	}
+
+	/**
+	 * Sanitized export args the current user may run: every type exportable and editable,
+	 * and the menu, site-settings and order sections only with their capability.
+	 *
+	 * @param array $raw Raw args.
+	 * @return array|WP_Error
+	 */
+	public static function args_for_user( array $raw ) {
+		$args = self::sanitize_args( $raw );
+		if ( is_wp_error( $args ) ) {
+			return $args;
+		}
+		foreach ( $args['post_types'] as $type ) {
+			if ( ! self::exportable_type( $type ) ) {
+				/* translators: %s: post type label */
+				return new WP_Error( 'migrateplus_export_type', sprintf( __( '%s can\'t be exported.', 'migrateplus' ), self::type_label( $type ) ) );
+			}
+			if ( ! current_user_can( get_post_type_object( $type )->cap->edit_posts ) ) {
+				/* translators: %s: post type label */
+				return new WP_Error( 'migrateplus_export_cap', sprintf( __( 'You are not allowed to export %s.', 'migrateplus' ), self::type_label( $type ) ) );
+			}
+		}
+		// A toggle hidden from users who may not see its section still arrives with its default: leave the section out.
+		foreach ( array(
+			'include_menus'         => 'edit_theme_options',
+			'include_site_settings' => 'manage_options',
+			'include_orders'        => 'manage_woocommerce',
+		) as $arg => $capability ) {
+			if ( ! current_user_can( $capability ) ) {
+				$args[ $arg ] = 0;
+			}
+		}
+		return $args;
+	}
+
+	/**
 	 * Default export arguments.
 	 *
 	 * @return array
@@ -33,6 +89,7 @@ class MigratePlus_Exporter {
 		$s = MigratePlus_Settings::get();
 		return array(
 			'post_types'              => array( 'post' ),
+			'post_ids'                => array(),
 			'statuses'                => (array) $s['export_statuses'],
 			'after'                   => '',
 			'before'                  => '',
@@ -168,6 +225,23 @@ class MigratePlus_Exporter {
 		}
 		$types = is_array( $args['post_types'] ) ? $args['post_types'] : explode( ',', (string) $args['post_types'] );
 		$types = array_values( array_unique( array_filter( array_map( 'sanitize_key', array_map( 'trim', array_map( 'strval', $types ) ) ) ) ) );
+		// Hand-picked posts: the file holds exactly these. They name their own types,
+		// and the status and date filters are dropped so no pick is silently lost.
+		$ids = is_array( $args['post_ids'] ) ? $args['post_ids'] : explode( ',', (string) $args['post_ids'] );
+		$ids = array_values( array_unique( array_filter( array_map( 'absint', $ids ) ) ) );
+		foreach ( $ids as $id ) {
+			$post = get_post( $id );
+			if ( ! $post || in_array( $post->post_status, array( 'trash', 'auto-draft' ), true ) ) {
+				/* translators: %d: post ID */
+				return new WP_Error( 'migrateplus_export_post', sprintf( __( 'Post %d was not found.', 'migrateplus' ), $id ) );
+			}
+		}
+		if ( $ids ) {
+			$types            = array_values( array_unique( array_map( 'get_post_type', $ids ) ) );
+			$args['statuses'] = 'any';
+			$args['after']    = '';
+			$args['before']   = '';
+		}
 		// The parts of the site settings. None picked ('' from a form, which drops an empty list) means none, not all.
 		$sections = array_values( array_filter( array_map( 'sanitize_key', array_map( 'strval', is_array( $args['site_sections'] ) ? $args['site_sections'] : explode( ',', (string) $args['site_sections'] ) ) ) ) );
 		$sections = $sections ? MigratePlus_Site::picked_sections( array( 'site_sections' => $sections ) ) : array();
@@ -217,6 +291,7 @@ class MigratePlus_Exporter {
 		}
 		return array(
 			'post_types'              => $types,
+			'post_ids'                => $ids,
 			'statuses'                => $statuses,
 			'after'                   => $args['after'],
 			'before'                  => $args['before'],
@@ -260,6 +335,9 @@ class MigratePlus_Exporter {
 			'ignore_sticky_posts'    => true,
 			'update_post_term_cache' => ! empty( $args['include_terms'] ),
 		);
+		if ( ! empty( $args['post_ids'] ) ) {
+			$q['post__in'] = $args['post_ids'];
+		}
 		if ( 'attachment' === $type ) {
 			// Files sold as product downloads stay private: they travel with the product export instead.
 			$q['meta_query'] = array( // phpcs:ignore WordPress.DB.SlowDBQuery
@@ -475,7 +553,12 @@ class MigratePlus_Exporter {
 			sprintf( __( 'Exporting %1$s: %2$d items match.', 'migrateplus' ), $entry['label'], $entry['total'] ),
 			/* translators: %s: count per post type */
 			count( $per_type ) > 1 ? sprintf( __( 'In import order: %s.', 'migrateplus' ), implode( ', ', $per_type ) ) : '',
-			array( 'attachment' ) === $args['post_types'] ? '' : sprintf(
+			! empty( $args['post_ids'] ) ? sprintf(
+				/* translators: %s: number of posts */
+				_n( '%s hand-picked item.', '%s hand-picked items.', count( $args['post_ids'] ), 'migrateplus' ),
+				count( $args['post_ids'] )
+			) : '',
+			array( 'attachment' ) === $args['post_types'] || ! empty( $args['post_ids'] ) ? '' : sprintf(
 				/* translators: %s: statuses */
 				__( 'Status: %s.', 'migrateplus' ),
 				implode(
@@ -618,7 +701,9 @@ class MigratePlus_Exporter {
 		$type = $types[ (int) $state['type_pos'] ];
 		// Page by ID, not offset: posts deleted between batches would shift later ones out of the export.
 		$after = isset( $state['last_id'] ) ? (int) $state['last_id'] : 0;
-		$ids   = array_map( 'intval', $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND ID > %d ORDER BY ID ASC LIMIT %d", $type, $after, $limit ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		// Hand-picked posts: only the picks, not the whole type. The ids come from sanitize_args, already absint'd.
+		$picks = empty( $state['args']['post_ids'] ) ? '' : ' AND ID IN (' . implode( ',', array_map( 'intval', $state['args']['post_ids'] ) ) . ')';
+		$ids   = array_map( 'intval', $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_type = %s{$picks} AND ID > %d ORDER BY ID ASC LIMIT %d", $type, $after, $limit ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$posts = $ids ? ( new WP_Query( array_merge( self::query_args( $state['args'], $type, 1, $limit ), array( 'post__in' => $ids ) ) ) )->posts : array();
 		$lines = '';
 		$log   = array();

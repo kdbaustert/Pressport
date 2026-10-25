@@ -443,6 +443,8 @@ class MigratePlus_Runner {
 	protected static function duplicate_item( array $record, MigratePlus_Job $job, $index, array $match, $title ) {
 		$type    = get_post_type_object( get_post_type( $match['post_id'] ) );
 		$changes = empty( $match['image'] ) ? (array) $match['changes'] : (array) $match['image']['changes'];
+		// Products carry more than changes_for() reads, so their rows show no Differs or Unchanged.
+		$compared = ! empty( $match['image'] ) || ! MigratePlus_Woo::is_product_type( get_post_type( $match['post_id'] ) );
 		$media   = empty( $match['image'] ) ? null : array_intersect_key( $match['image'], array_flip( array( 'current', 'current_full', 'imported', 'is_image' ) ) );
 		$view    = get_permalink( $match['post_id'] );
 		$edit    = current_user_can( 'edit_post', $match['post_id'] ) ? get_edit_post_link( $match['post_id'], 'raw' ) : '';
@@ -455,10 +457,12 @@ class MigratePlus_Runner {
 			'kind'           => $match['kind'],
 			'label'          => $match['label'],
 			'changed'        => (bool) $changes,
+			'compared'       => $compared,
 			'changes'        => $changes,
 			'view_url'       => $view ? $view : '',
 			'edit_url'       => $edit ? $edit : '',
 			'media'          => $media,
+			'author'         => MigratePlus_Importer::source_author( $record, (array) $job->data['mapping'] )['key'],
 		);
 	}
 
@@ -495,9 +499,10 @@ class MigratePlus_Runner {
 		);
 		$row                   = static function ( $record, $index ) use ( $view, $mapping ) {
 			return array(
-				'index' => $index,
-				'title' => self::record_title( $record, $mapping, $index ),
-				'type'  => MigratePlus_Importer::type_for( $record, $view ),
+				'index'  => $index,
+				'title'  => self::record_title( $record, $mapping, $index ),
+				'type'   => MigratePlus_Importer::type_for( $record, $view ),
+				'author' => MigratePlus_Importer::source_author( $record, $mapping )['key'],
 			);
 		};
 		if ( '' === $search ) {
@@ -537,6 +542,72 @@ class MigratePlus_Runner {
 			$cursor = $batch['next'];
 		} while ( null !== $cursor && ! empty( $batch['records'] ) );
 		return $out;
+	}
+
+	/**
+	 * The authors a job's records name from the old site, with how many posts and pages each
+	 * wrote, most first, read from the start up to RECORDS_SEARCH_LIMIT records. Media is left
+	 * out, as its import keeps the author it has.
+	 *
+	 * @param MigratePlus_Job $job     Job.
+	 * @param array           $mapping Mapping the authors and types follow.
+	 * @return array|WP_Error { authors: array[] { key, login, name, count, match: { id, name, login } | null }, truncated }
+	 */
+	public static function list_source_authors( MigratePlus_Job $job, array $mapping ) {
+		$source = $job->source();
+		if ( is_wp_error( $source ) ) {
+			return $source;
+		}
+		$view                  = clone $job;
+		$view->data['mapping'] = $mapping;
+		$found                 = array();
+		$truncated             = false;
+		$index                 = 0;
+		$cursor                = null;
+		do {
+			$batch = $source->fetch( $cursor, 100 );
+			if ( is_wp_error( $batch ) ) {
+				return $batch;
+			}
+			foreach ( $batch['records'] as $record ) {
+				if ( $index >= self::RECORDS_SEARCH_LIMIT ) {
+					$truncated = true;
+					break 2;
+				}
+				++$index;
+				$who = MigratePlus_Importer::source_author( $record, $mapping );
+				if ( '' === $who['key'] || 'attachment' === MigratePlus_Importer::type_for( $record, $view ) ) {
+					continue;
+				}
+				if ( ! isset( $found[ $who['key'] ] ) ) {
+					// Between environments of one site the same people exist with the same logins,
+					// so an account here with the record's old login is offered as the match.
+					$match                 = '' !== $who['login'] ? get_user_by( 'login', $who['login'] ) : false;
+					$match                 = $match && MigratePlus_Mappings::may_write_posts( $match->ID ) ? $match : false;
+					$found[ $who['key'] ] = $who + array(
+						'count' => 0,
+						'match' => $match ? array(
+							'id'    => (int) $match->ID,
+							'name'  => $match->display_name,
+							'login' => $match->user_login,
+						) : null,
+					);
+				}
+				++$found[ $who['key'] ]['count'];
+			}
+			$cursor = $batch['next'];
+		} while ( null !== $cursor && ! empty( $batch['records'] ) );
+		$authors = array_values( $found );
+		usort(
+			$authors,
+			static function ( $a, $b ) {
+				return $b['count'] - $a['count'] ? $b['count'] - $a['count'] : strcasecmp( $a['key'], $b['key'] );
+			}
+		);
+		return array(
+			'authors'   => $authors,
+			'truncated' => $truncated,
+		);
 	}
 
 	/**

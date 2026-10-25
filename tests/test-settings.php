@@ -53,6 +53,29 @@ class Test_Settings extends WP_UnitTestCase {
 		$this->assertSame( 'manage_options', MigratePlus_Settings::sanitize( 'broken' )['capability'] );
 	}
 
+	public function test_sanitize_generates_keeps_and_revokes_the_pull_key() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+
+		// The key never arrives in the input; a posted one is ignored.
+		$out = MigratePlus_Settings::sanitize( array( 'pull_key' => 'smuggled' ) );
+		$this->assertSame( '', $out['pull_key'] );
+		$this->assertSame( 0, $out['pull_key_user'] );
+
+		$out = MigratePlus_Settings::sanitize( array( 'pull_key_generate' => '1' ) );
+		$this->assertSame( 40, strlen( $out['pull_key'] ) );
+		$this->assertSame( get_current_user_id(), $out['pull_key_user'] );
+		update_option( MigratePlus_Settings::OPTION, $out );
+
+		// A save without the checkboxes keeps the stored key.
+		$kept = MigratePlus_Settings::sanitize( array( 'capability' => 'manage_options' ) );
+		$this->assertSame( $out['pull_key'], $kept['pull_key'] );
+		$this->assertSame( $out['pull_key_user'], $kept['pull_key_user'] );
+
+		$revoked = MigratePlus_Settings::sanitize( array( 'pull_key_revoke' => '1' ) );
+		$this->assertSame( '', $revoked['pull_key'] );
+		$this->assertSame( 0, $revoked['pull_key_user'] );
+	}
+
 	/**
 	 * @dataProvider out_of_range
 	 *
@@ -105,6 +128,26 @@ class Test_Settings extends WP_UnitTestCase {
 		update_option( MigratePlus_Settings::OPTION, 'broken' );
 		MigratePlus_Settings::flush_cache();
 		$this->assertSame( 10, MigratePlus_Settings::get( 'batch_size' ) );
+	}
+
+	public function test_number_field_renders_a_stale_value_clamped() {
+		// A 30 saved by a version without the 60-second floor: rendered as-is it
+		// would fail the browser's min check and block the whole form from saving.
+		update_option( MigratePlus_Settings::OPTION, array( 'request_timeout' => 30 ) );
+		MigratePlus_Settings::flush_cache();
+		ob_start();
+		MigratePlus_Settings::field_number(
+			array(
+				'key'     => 'request_timeout',
+				'title'   => 'Download timeout',
+				'choices' => array( 60, 300 ),
+				'help'    => '',
+				'suffix'  => 'seconds',
+			)
+		);
+		$out = ob_get_clean();
+		$this->assertStringContainsString( 'value="60"', $out );
+		$this->assertStringContainsString( 'min="60"', $out );
 	}
 
 	public function test_cache_flushes_on_update() {

@@ -15,12 +15,13 @@ Move content between WordPress sites as JSON, with ACF and WooCommerce support, 
 
 Migrate Plus adds its own **Migrate Plus** menu to wp-admin with five pages:
 
-* **Import**: drop a JSON file (.json, or .json.gz compressed) onto the page, or choose one.
+* **Import**: drop a JSON file (.json, or .json.gz compressed) onto the page, choose one, or pull it straight from the old site.
+    * *Pull from another site* fetches the export itself over HTTP. Connect with a WordPress application password (needs HTTPS) or with a pull key generated on the old site under Migrate Plus → Settings → Access, which also works over plain http:// for local and staging sites. Credentials go along with each request and are stored nowhere on the pulling site.
     * *A Migrate Plus export* is recognised, and after one confirmation it imports straight away with the field mapping and post type saved in the file. "Review mapping" opens the mapping step first. An export with several post types imports in one go too: Media first, then the other types, then its menus, with progress shown per part.
     * *Any other JSON file* goes through *Map & options*: preview real records and map fields to title, content, excerpt, date, slug, status, author, categories, tags, featured image, post type, custom fields, custom taxonomies and ACF fields. Save the mapping and its import options under a name to apply them to the next file; a file with the same top-level fields gets it selected for you, to apply with one click.
     * *Before importing*, Migrate Plus looks for items already on the site: imported before, or the same slug (products: SKU, media: file name). It asks whether to skip them or import them anyway. Posts and pages that differ from the site's version can be reviewed one by one, with what would change, and only the ones you approve are updated. Duplicate media is shown side by side with the copy on the site, and each file can be skipped, have its details updated, be replaced, or be added as a new item beside it ("Keep both").
     * Imports run in small batches so large ones don't time out, with a progress window (live counts and time remaining), a live log, pause/resume and a dry-run mode.
-* **Export**: export posts, pages or any post type as a JSON file with terms, featured images, custom fields, ACF fields and WooCommerce product data. Tick several content types to put them in one file; Media always goes first, so the import downloads each file once and the posts after it reuse it. Navigation menus can go in the file too, also on their own. The file can be compressed (.json.gz) for a site with a low upload limit. It maps itself when imported with Migrate Plus on another site.
+* **Export**: export posts, pages or any post type as a JSON file with terms, featured images, custom fields, ACF fields and WooCommerce product data. Tick several content types to put them in one file; Media always goes first, so the import downloads each file once and the posts after it reuse it. Navigation menus can go in the file too, also on their own. The file can be compressed (.json.gz) for a site with a low upload limit. It maps itself when imported with Migrate Plus on another site. Or tick **Hand-picked content** to export exactly the posts you choose: search by title or paste an ID, whatever the type; the status and date filters don't apply to picks.
     * *Media* exports the Media Library: each file as a URL, with its title, caption, description and alt text. Importing it downloads the files into the other site's Media Library. Files sold as WooCommerce downloads are left out; they travel with the product export.
 * **Find & Replace**: replace text across the database, for example an old domain after a migration. Serialized data stays valid, and web addresses only match whole, so http://old.test leaves http://old.test.example.com alone. Starts as a dry run with sample changes per table. Real runs can be rolled back from Past replacements; values edited since the replacement are left alone. Administrators only.
 * **History**: every import you have run. View the log, resume an import that stopped, run it again, or roll it back. Exports are listed too, each with a log of what went into the file. Tick several entries to delete them in one go; running ones are skipped.
@@ -31,7 +32,7 @@ Migrate Plus adds its own **Migrate Plus** menu to wp-admin with five pages:
 * Re-runs are safe: records are matched by their source ID, so you can skip or update anything already imported instead of duplicating it.
 * Downloads featured images and, optionally, images inside post content into the Media Library and rewrites the URLs. An image is only downloaded once.
 * Hierarchical categories using "Parent > Child". Lists can be arrays or "a, b", "a|b" or "a;b" strings.
-* Authors are matched by email, login, slug or display name, and can be created if missing. A Migrate Plus export names the author by email, login and display name: the email is tried first, then the login. An author that can't be matched gets the default author and a warning in the log.
+* Authors: user accounts differ between sites, so authors aren't taken from the file. Each post goes to the author picked for it (on Review mapping or the duplicates screen), else the author for all posts and pages picked on Review mapping (--author on the command line), else whoever runs the import. The old site's author login and name are kept with the post as a note.
 * "Status for every item" overrides each record's status, also for posts that are updated, for example to import everything as drafts on staging. Published posts with a future date are scheduled.
 * Comments: an export can carry each post's approved comments (pending, spam and trash stay behind). The import adds them with replies threaded, links commenters to users by email, and doesn't add them twice when the same file is imported again.
 * Dates in any strtotime() format, ISO 8601 with offsets, or Unix timestamps (seconds or milliseconds).
@@ -51,9 +52,9 @@ Any JSON file holding a list of records can be imported: a top-level array, or a
 
 Migrate Plus → Settings (administrators only):
 
-* **Import defaults**: post type, default status, a status for every item, author, what to do with records imported before, batch size, whether to download images, create missing terms and create missing authors, whether links to the old site should point at this one (Migrate Plus exports only), whether to import comments, and whether to import menus. These are starting values; each import can still change them.
+* **Import defaults**: post type, default status, a status for every item, what to do with records imported before, batch size, whether to download images, whether to create missing terms, whether links to the old site should point at this one (Migrate Plus exports only), whether to import comments, and whether to import menus. These are starting values; each import can still change them.
 * **Export defaults**: which statuses to export and what to include (comments and menus are off unless you turn them on), whether to compress the file (.json.gz, off by default), plus custom field keys to always leave out (end a key with * to match a prefix).
-* **Access**: let Editors run imports as well as Administrators. Only administrators can change settings.
+* **Access**: let Editors run imports as well as Administrators, and generate a pull key other sites can use to pull exports from this site. The key is shown here to copy, can be revoked or replaced, and pulls made with it run as the user who generated it. Only administrators can change settings.
 * **Downloads**: limits for the files an import downloads from the old site (featured images, images in content, Media Library files, WooCommerce download files): the timeout per file, the largest image or media file, and whether downloads may reach localhost, private network addresses and non-standard ports. The remote file size limit only applies to custom sources that read their file from a URL.
 * **Housekeeping**: automatically delete history entries after a number of days, and choose whether uninstalling also removes Migrate Plus's tracking data from imported posts.
 
@@ -97,13 +98,14 @@ No. Uninstalling removes Migrate Plus's settings, history and cached files. Impo
     wp migrateplus export page --output=pages.json
     wp migrateplus export attachment,page,post --menus --output=site.json
     wp migrateplus export product --gzip
+    wp migrateplus export --posts=12,34,56
     wp migrateplus import json --file=feed.json --mapping="Books feed"
     wp migrateplus mapping list
     wp migrateplus mapping export "Books feed" --output=books.json
     wp migrateplus mapping import books.json
     wp migrateplus mapping delete "Books feed"
 
-Options: --post_type, --status, --force-status=publish|draft|pending|private|keep, --author, --duplicate=skip|update|create, --duplicates=skip|import|update (what to do with items already on the site; asks when left out, unless you pass --yes or run a dry run, when it skips them, or imports copies with --duplicate=create), --batch_size, --[no-]featured-images, --content-images, --create-authors, --[no-]create-terms, --[no-]rewrite-links, --[no-]comments, --[no-]menus, --dry-run, --mapping=<name> (a saved mapping). --file takes .json or .json.gz. `wp migrateplus export` takes one post type or several separated by commas, plus --[no-]comments, --[no-]menus and --[no-]gzip. `wp migrateplus mapping export` writes a file for `wp migrateplus import --config`. Anything you leave out uses the values from Migrate Plus → Settings, except that a Migrate Plus export imports into the post type it came from unless you pass --post_type.
+Options: --post_type, --status, --force-status=publish|draft|pending|private|keep, --author, --duplicate=skip|update|create, --duplicates=skip|import|update (what to do with items already on the site; asks when left out, unless you pass --yes or run a dry run, when it skips them, or imports copies with --duplicate=create), --batch_size, --[no-]featured-images, --content-images, --[no-]create-terms, --[no-]rewrite-links, --[no-]comments, --[no-]menus, --dry-run, --mapping=<name> (a saved mapping). --file takes .json or .json.gz. `wp migrateplus export` takes one post type or several separated by commas, plus --posts=<ids> (export exactly these posts by ID, whatever their type; the type list and the status and date filters don't apply), --[no-]comments, --[no-]menus and --[no-]gzip. `wp migrateplus mapping export` writes a file for `wp migrateplus import --config`. Anything you leave out uses the values from Migrate Plus → Settings, except that a Migrate Plus export imports into the post type it came from unless you pass --post_type.
 
 On/off options also take yes, no, true, false, 1 or 0 (`--comments=no`). An import with failed records ends with an error and a non-zero exit status, after printing the summary.
 
@@ -130,6 +132,9 @@ Imported posts and menu items carry the meta keys `_migrateplus_job_id`, `_migra
 == Changelog ==
 
 = Unreleased =
+* Pull from another site: the Import page can fetch an export straight from the old site over HTTP, connecting with an application password or a pull key generated on the old site under Settings → Access. The key works over plain http:// and is stored nowhere on the pulling site.
+* Hand-picked export: tick "Hand-picked content" on the Export page to export exactly the posts you choose, whatever their type, or pass --posts=<ids> on the command line.
+* Fix: a number saved by an older version below a setting's new minimum (for example a 30-second download timeout) silently blocked the whole settings form from saving. Such values now render clamped to the allowed range.
 * History: select several imports or exports and delete them in one go. Running ones are skipped and the result says which.
 * Confirmations and error messages use Migrate Plus's own dialog instead of the browser's. Primary buttons use WordPress's blue; buttons that delete or roll back are red.
 * Find & Replace is now above History in the menu.

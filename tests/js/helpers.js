@@ -24,8 +24,9 @@ const defaults = {
   default_status: 'publish',
   force_status: '',
   author: 0,
-  // An empty PHP array, as wp_localize_script() sends it.
+  // Empty PHP arrays, as wp_localize_script() sends them.
   authors: [],
+  author_map: [],
   duplicate: 'skip',
   skip_existing: 0,
   update_ids: [],

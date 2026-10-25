@@ -64,6 +64,8 @@ class MigratePlus_Settings {
 			'export_exclude_meta'            => '',
 			// Access.
 			'capability'                     => 'manage_options',
+			'pull_key'                       => '',
+			'pull_key_user'                  => 0,
 			// Downloads.
 			'request_timeout'                => 60,
 			'allow_local_sources'            => 0,
@@ -216,6 +218,7 @@ class MigratePlus_Settings {
 			),
 			'migrateplus_access'       => array(
 				'capability' => array( 'select', __( 'Who can run imports', 'migrateplus' ), self::access_levels(), __( 'Only administrators can change these settings.', 'migrateplus' ) ),
+				'pull_key'   => array( 'pull_key', __( 'Pull key', 'migrateplus' ) ),
 			),
 			'migrateplus_connections'  => array(
 				'request_timeout'     => array( 'number', __( 'Download timeout', 'migrateplus' ), array( 60, 300 ), __( 'Seconds to wait for each file Migrate Plus downloads.', 'migrateplus' ), __( 'seconds', 'migrateplus' ) ),
@@ -247,7 +250,7 @@ class MigratePlus_Settings {
 						'key'       => $key,
 						'title'     => $def[1],
 						'type'      => $def[0],
-						'label_for' => in_array( $def[0], array( 'checkbox', 'checkboxes' ), true ) ? null : 'migrateplus_' . $key,
+						'label_for' => in_array( $def[0], array( 'checkbox', 'checkboxes', 'pull_key' ), true ) ? null : 'migrateplus_' . $key,
 						'choices'   => isset( $def[2] ) ? $def[2] : null,
 						'help'      => isset( $def[3] ) ? $def[3] : '',
 						'suffix'    => isset( $def[4] ) ? $def[4] : '',
@@ -301,11 +304,14 @@ class MigratePlus_Settings {
 	 * @param array $args Field args.
 	 */
 	public static function field_number( $args ) {
+		// A saved value from a version with wider limits would fail the browser's
+		// min/max check and silently block the whole form, so render it clamped,
+		// as sanitize() would store it.
 		printf(
 			'<span class="migrateplus-number"><input type="number" id="migrateplus_%1$s" name="%2$s[%1$s]" value="%3$d" min="%4$d" max="%5$d"> %6$s</span>',
 			esc_attr( $args['key'] ),
 			esc_attr( self::OPTION ),
-			(int) self::get( $args['key'] ),
+			max( (int) $args['choices'][0], min( (int) $args['choices'][1], (int) self::get( $args['key'] ) ) ),
 			(int) $args['choices'][0],
 			(int) $args['choices'][1],
 			esc_html( $args['suffix'] )
@@ -347,6 +353,38 @@ class MigratePlus_Settings {
 		}
 		echo '</fieldset>';
 		self::help( $args );
+	}
+
+	/**
+	 * The key another site's Migrate Plus connects with instead of a username and
+	 * application password. Generated and revoked on save, never typed in, so the
+	 * field is a readonly copy box plus checkboxes.
+	 *
+	 * @param array $args Field args.
+	 */
+	public static function field_pull_key( $args ) {
+		$key  = (string) self::get( 'pull_key' );
+		$user = get_userdata( (int) self::get( 'pull_key_user' ) );
+		if ( '' !== $key ) {
+			printf( '<input type="text" class="regular-text code" readonly value="%s" onfocus="this.select()" aria-label="%s">', esc_attr( $key ), esc_attr( $args['title'] ) );
+			if ( $user ) {
+				/* translators: %s: the user the key authenticates as */
+				echo '<p class="migrateplus-field-help">' . esc_html( sprintf( __( 'Pulls with this key run as %s.', 'migrateplus' ), $user->display_name ) ) . '</p>';
+			}
+			printf(
+				'<p><label><input type="checkbox" name="%1$s[pull_key_generate]" value="1"> %2$s</label><br><label><input type="checkbox" name="%1$s[pull_key_revoke]" value="1"> %3$s</label></p>',
+				esc_attr( self::OPTION ),
+				esc_html__( 'Replace it with a new key on save (the old one stops working)', 'migrateplus' ),
+				esc_html__( 'Revoke it on save', 'migrateplus' )
+			);
+		} else {
+			printf(
+				'<p><label><input type="checkbox" name="%1$s[pull_key_generate]" value="1"> %2$s</label></p>',
+				esc_attr( self::OPTION ),
+				esc_html__( 'Generate a pull key on save', 'migrateplus' )
+			);
+		}
+		echo '<p class="migrateplus-field-help">' . esc_html__( 'Lets another site\'s Migrate Plus pull from this one with just this key, instead of a username and application password. Pulls run as the administrator who generated it. Unlike application passwords, it also works on sites served over plain http.', 'migrateplus' ) . '</p>';
 	}
 
 	/**
@@ -416,6 +454,19 @@ class MigratePlus_Settings {
 		$out['export_statuses'] = $statuses ? $statuses : $defaults['export_statuses'];
 
 		$out['export_exclude_meta'] = isset( $input['export_exclude_meta'] ) ? implode( "\n", MigratePlus_Exporter::meta_patterns( $input['export_exclude_meta'] ) ) : '';
+
+		// The key itself is never posted: it is kept, revoked or regenerated.
+		$saved                = (array) get_option( self::OPTION, array() );
+		$out['pull_key']      = isset( $saved['pull_key'] ) ? (string) $saved['pull_key'] : '';
+		$out['pull_key_user'] = isset( $saved['pull_key_user'] ) ? (int) $saved['pull_key_user'] : 0;
+		if ( ! empty( $input['pull_key_revoke'] ) ) {
+			$out['pull_key']      = '';
+			$out['pull_key_user'] = 0;
+		}
+		if ( ! empty( $input['pull_key_generate'] ) ) {
+			$out['pull_key']      = wp_generate_password( 40, false );
+			$out['pull_key_user'] = get_current_user_id();
+		}
 
 		self::flush_cache();
 		return $out;

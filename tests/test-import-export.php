@@ -822,6 +822,65 @@ class Test_Import_Export extends WP_UnitTestCase {
 		$this->assertSame( array( $own, $own, $all ), $authors() );
 	}
 
+	public function test_an_author_picked_for_an_old_author_covers_their_posts() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$all   = self::factory()->user->create( array( 'role' => 'editor' ) );
+		$maya  = self::factory()->user->create( array( 'role' => 'author' ) );
+		$own   = self::factory()->user->create( array( 'role' => 'author' ) );
+		$items = array(
+			$this->item( 1 ),
+			$this->item( 2 ),
+			$this->item( 3 ),
+			$this->item( 4 ),
+		);
+		// 1, 2 and 3 are maya's on the old site; 2 also has an author of its own, which wins.
+		$items[0]['author_login'] = 'maya';
+		$items[1]['author_login'] = 'maya';
+		$items[2]['author_login'] = 'maya';
+		$items[3]['author_name']  = 'Guest Writer';
+		$file = $this->export_file( $items );
+		$job  = $this->import_file(
+			$file,
+			array(
+				'author'     => $all,
+				'authors'    => array( 1 => $own ),
+				'author_map' => array(
+					'maya'         => $maya,
+					'Guest Writer' => $all,
+				),
+			)
+		);
+		$job->delete();
+		wp_delete_file( $file );
+		$authors = array();
+		foreach ( array( 1, 2, 3, 4 ) as $source_id ) {
+			$authors[] = (int) get_post( $this->imported( $source_id, 'post' )[0] )->post_author;
+		}
+		$this->assertSame( array( $maya, $own, $maya, $all ), $authors );
+	}
+
+	public function test_clean_author_map_keeps_only_valid_picks() {
+		$editor     = self::factory()->user->create( array( 'role' => 'editor' ) );
+		$subscriber = self::factory()->user->create( array( 'role' => 'subscriber' ) );
+		$this->assertSame(
+			array(
+				'maya'         => $editor,
+				'Guest Writer' => $editor,
+			),
+			MigratePlus_Mappings::clean_author_map(
+				array(
+					'maya'                    => $editor,
+					'Guest Writer'            => (string) $editor,
+					'guest'                   => $subscriber,
+					'gone'                    => 999999,
+					''                        => $editor,
+					str_repeat( 'a', 201 )    => $editor,
+				)
+			)
+		);
+		$this->assertSame( array(), MigratePlus_Mappings::clean_author_map( 'maya' ) );
+	}
+
 	public function test_an_author_who_may_not_write_posts_falls_back_to_the_next_pick() {
 		$me         = self::factory()->user->create( array( 'role' => 'administrator' ) );
 		$editor     = self::factory()->user->create( array( 'role' => 'editor' ) );
@@ -1101,6 +1160,58 @@ class Test_Import_Export extends WP_UnitTestCase {
 
 		$this->assertWPError( MigratePlus_Exporter::sanitize_args( array( 'post_types' => 'page,nope' ) ) );
 		$this->assertWPError( MigratePlus_Exporter::sanitize_args( array( 'post_types' => array() ) ) );
+	}
+
+	/**
+	 * Hand-picked posts name their own types and ignore the status and date filters.
+	 */
+	public function test_export_of_hand_picked_posts() {
+		$draft = self::factory()->post->create(
+			array(
+				'post_title'  => 'Picked draft',
+				'post_status' => 'draft',
+			)
+		);
+		$page  = self::factory()->post->create(
+			array(
+				'post_type'  => 'page',
+				'post_title' => 'Picked page',
+			)
+		);
+		self::factory()->post->create( array( 'post_title' => 'Not picked' ) );
+
+		// The type list and the status and date filters are dropped: the picks decide.
+		$args = MigratePlus_Exporter::sanitize_args(
+			array(
+				'post_types' => 'post',
+				'post_ids'   => "$draft,$page",
+				'statuses'   => 'publish',
+				'after'      => '2999-01-01',
+			)
+		);
+		$this->assertSame( array( $draft, $page ), $args['post_ids'] );
+		$this->assertSame( array( 'post', 'page' ), $args['post_types'] );
+		$this->assertEqualsCanonicalizing( array( 'publish', 'draft', 'pending', 'private', 'future' ), $args['statuses'] );
+		$this->assertSame( '', $args['after'] );
+		$this->assertSame(
+			array(
+				'post' => 1,
+				'page' => 1,
+			),
+			MigratePlus_Exporter::counts( $args )
+		);
+
+		$doc = $this->export_doc( array( 'post_ids' => array( $page, $draft ) ) );
+		$this->assertSame( 2, $doc['migrateplus']['count'] );
+		$this->assertEqualsCanonicalizing( array( 'Picked draft', 'Picked page' ), array_column( $doc['items'], 'title' ) );
+
+		$missing = MigratePlus_Exporter::sanitize_args( array( 'post_ids' => array( 999999 ) ) );
+		$this->assertWPError( $missing );
+		$this->assertSame( 'migrateplus_export_post', $missing->get_error_code() );
+		wp_trash_post( $draft );
+		$trashed = MigratePlus_Exporter::sanitize_args( array( 'post_ids' => array( $draft ) ) );
+		$this->assertWPError( $trashed );
+		$this->assertSame( 'migrateplus_export_post', $trashed->get_error_code() );
 	}
 
 	/**
@@ -2128,6 +2239,41 @@ class Test_Import_Export extends WP_UnitTestCase {
 		$this->assertSame( array( 'Third one', 'Again two', 'Again three', 'Again four', 'Again here' ), $titles( array_merge( $ids, array( $here ) ) ) );
 		$this->assertCount( 1, get_posts( array( 'title' => 'Third three' ) ) );
 		$this->assertCount( 1, get_posts( array( 'title' => 'Third four' ) ) );
+		$job->delete();
+	}
+
+	/**
+	 * The duplicates screen offers Update only on rows that differ, so "update the rest" treats
+	 * the duplicates past its list the same way: a post the file would not change stays skipped,
+	 * whether it was imported before or matched by slug.
+	 */
+	public function test_update_the_rest_skips_posts_the_file_would_not_change() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$here  = self::factory()->post->create(
+			array(
+				'post_title' => 'First here',
+				'post_name'  => 'here',
+			)
+		);
+		$first = $this->rest_file( 'First ' );
+		$this->import_file( $first, array( 'skip_existing' => 1 ) )->delete();
+		$two = $this->imported( 2 )[0];
+		wp_update_post(
+			array(
+				'ID'         => $two,
+				'post_title' => 'Edited two',
+			)
+		);
+
+		$job = $this->import_file( $first, array( 'duplicate_rest' => 'update' ) );
+		wp_delete_file( $first );
+		$this->assertSame( 1, $job->data['stats']['updated'] );
+		$this->assertSame( 4, $job->data['stats']['skipped'] );
+		$this->assertSame( 'First two', get_the_title( $two ) );
+		$this->assertSame( 'First here', get_the_title( $here ) );
+		$log = implode( "\n", wp_list_pluck( $job->data['log'], 'm' ) );
+		$this->assertStringContainsString( sprintf( 'Not updated: "First one" (#%d) is unchanged.', $this->imported( 1 )[0] ), $log );
+		$this->assertStringContainsString( sprintf( 'Not updated: "First here" (#%d) is unchanged.', $here ), $log );
 		$job->delete();
 	}
 

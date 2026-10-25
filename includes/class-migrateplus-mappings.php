@@ -40,7 +40,7 @@ class MigratePlus_Mappings {
 		foreach ( $all as $name => $entry ) {
 			// Saved before authors stopped travelling: authors are picked for each import, as ids differ per site.
 			if ( isset( $entry['options'] ) && is_array( $entry['options'] ) ) {
-				$all[ $name ]['options'] = array_diff_key( $entry['options'], array_flip( array( 'author', 'authors', 'default_author', 'create_authors' ) ) );
+				$all[ $name ]['options'] = array_diff_key( $entry['options'], array_flip( array( 'author', 'authors', 'author_map', 'default_author', 'create_authors' ) ) );
 			}
 		}
 		return $all;
@@ -77,7 +77,7 @@ class MigratePlus_Mappings {
 			// What to do with this file's records, not how one run went: the per-run choices stay behind.
 			// Only the options given are kept: one left out takes the MigratePlus setting when the mapping is used, as in a --config file.
 			// Nor the authors: user ids differ from site to site.
-			'options' => array_diff_key( array_intersect_key( self::clean_options( $options ), $options ), array_flip( array( 'skip_existing', 'update_ids', 'replace_ids', 'copy_ids', 'skip_ids', 'duplicate_rest', 'dry_run', 'author', 'authors' ) ) ),
+			'options' => array_diff_key( array_intersect_key( self::clean_options( $options ), $options ), array_flip( array( 'skip_existing', 'update_ids', 'replace_ids', 'copy_ids', 'skip_ids', 'duplicate_rest', 'dry_run', 'author', 'authors', 'author_map' ) ) ),
 			'updated' => time(),
 			'user'    => get_current_user_id(),
 		);
@@ -344,6 +344,7 @@ class MigratePlus_Mappings {
 			'force_status'           => in_array( $force, array( 'publish', 'draft', 'pending', 'private' ), true ) ? $force : '',
 			'author'                 => $author,
 			'authors'                => self::clean_authors( isset( $options['authors'] ) ? $options['authors'] : array(), $total ),
+			'author_map'             => self::clean_author_map( isset( $options['author_map'] ) ? $options['author_map'] : array() ),
 			'duplicate'              => in_array( $duplicate, array( 'skip', 'update', 'create' ), true ) ? $duplicate : 'skip',
 			'skip_existing'          => empty( $options['skip_existing'] ) ? 0 : 1,
 			'update_ids'             => array_values( array_filter( array_map( 'absint', isset( $options['update_ids'] ) ? (array) $options['update_ids'] : array() ) ) ),
@@ -391,6 +392,30 @@ class MigratePlus_Mappings {
 			}
 		}
 		ksort( $clean );
+		return $clean;
+	}
+
+	/**
+	 * The authors picked for the old site's authors, by login (or name without one, as
+	 * MigratePlus_Importer::source_author() keys them): each must be someone who may write
+	 * posts. The keys are only looked up, never shown or stored on a post, so they are kept
+	 * as given, up to 200 bytes and 1,000 of them.
+	 *
+	 * @param mixed $map Old author => user id, from a request or file.
+	 * @return int[] Old author => user id.
+	 */
+	public static function clean_author_map( $map ) {
+		$clean = array();
+		foreach ( is_array( $map ) ? $map : array() as $old => $user ) {
+			$old = trim( wp_check_invalid_utf8( (string) $old ) );
+			if ( '' === $old || strlen( $old ) > 200 || ! is_scalar( $user ) || count( $clean ) >= 1000 ) {
+				continue;
+			}
+			$user = absint( $user );
+			if ( self::may_write_posts( $user ) ) {
+				$clean[ $old ] = $user;
+			}
+		}
 		return $clean;
 	}
 

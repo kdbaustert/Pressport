@@ -31,6 +31,7 @@ class MigratePlus_Job {
 			'force_status'           => $s['force_status'], // '' keeps each record's status; otherwise every post gets this one.
 			'author'                 => 0, // Imported posts' author when one is picked; 0 gives them to whoever runs the import.
 			'authors'                => array(), // Record position in the file => its own author, over "author".
+			'author_map'             => array(), // Old site's author (login, or name without one) => author of their posts, between "authors" and "author".
 			'duplicate'              => $s['duplicate'],
 			'skip_existing'          => 0, // Also skip records matching content already here by slug, SKU or file name.
 			'update_ids'             => array(), // Existing posts whose changes the user reviewed and approved: these are updated.

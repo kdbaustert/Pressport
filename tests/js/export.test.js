@@ -163,6 +163,63 @@ describe('Export', () => {
     assert.equal(env.modal.title(), 'Export ready')
     assert.equal(env.leaveWarns(), false)
   })
+
+  const needle = { id: 7, title: 'Needle', type: 'page', label: 'Page', status: 'Draft', date: 'Oct 25, 2026' }
+  const withPicks = () =>
+    boot({
+      data: { view: 'export' },
+      routes: {
+        export_posts: { posts: [needle] },
+        export_count: { count: 1, counts: { page: 1 } },
+        export_start: { id: 'exp1', total: 1 },
+        export_run: { complete: true, done: 1, total: 1, size: '1 KB', filename: 'picks.json', url: 'https://example.test/dl/exp1' },
+      },
+    })
+
+  it('hand-picks posts by search and sends their ids', async () => {
+    const env = withPicks()
+    env.check(env.$('#migrateplus-export-feature-picks'))
+    env.type(env.$('#migrateplus-export-pick-search'), 'needle')
+    // The search is debounced by 300 ms.
+    env.clock.tick(300)
+    await env.flush()
+    assert.equal(env.sent('export_posts').at(-1).fields.search, 'needle')
+    assert.equal(env.$('.migrateplus-pick-results .migrateplus-pick-title').textContent, 'Needle')
+
+    env.click(env.byText('.migrateplus-pick-results button', 'Add'))
+    env.clock.tick(250)
+    await env.flush()
+    assert.equal(env.$('.migrateplus-pick-list .migrateplus-pick-title').textContent, 'Needle')
+    const args = json(env.sent('export_count').at(-1), 'args')
+    assert.deepEqual(args.post_ids, [7])
+    assert.deepEqual(args.post_types, [])
+
+    env.submit(env.$('form.migrateplus-export'))
+    await env.flush()
+    assert.deepEqual(json(env.sent('export_start')[0], 'args').post_ids, [7])
+    assert.equal(env.modal.title(), 'Export ready')
+  })
+
+  it('clears the picks when a whole type is ticked, and the types when picking starts', async () => {
+    const env = withPicks()
+    env.check(env.$('#migrateplus-export-feature-picks'))
+    env.type(env.$('#migrateplus-export-pick-search'), 'needle')
+    env.clock.tick(300)
+    await env.flush()
+    env.click(env.byText('.migrateplus-pick-results button', 'Add'))
+    env.clock.tick(250)
+    await env.flush()
+    assert.deepEqual(json(env.sent('export_count').at(-1), 'args').post_types, [])
+
+    // Hand-picking closed the content card, so the user ticks the whole card again.
+    env.check(env.$('#migrateplus-export-feature-content'))
+    env.clock.tick(250)
+    await env.flush()
+    assert.equal(env.$('.migrateplus-pick-list'), null)
+    const args = json(env.sent('export_count').at(-1), 'args')
+    assert.deepEqual(args.post_ids, [])
+    assert.deepEqual(args.post_types, ['post', 'page', 'attachment'])
+  })
 })
 
 describe('Export custom post types', () => {
@@ -182,7 +239,7 @@ describe('Export custom post types', () => {
 
   it('get a card of their own, closed until it is ticked', async () => {
     const env = withCpt()
-    assert.deepEqual(titles(env), ['Posts, pages and media', 'Navigation', 'Custom post types', 'Site settings'])
+    assert.deepEqual(titles(env), ['Hand-picked content', 'Posts, pages and media', 'Navigation', 'Custom post types', 'Site settings'])
     assert.equal(env.$('#migrateplus-export-type-book'), null)
 
     env.check(env.$('#migrateplus-export-feature-cpt'))
@@ -206,7 +263,7 @@ describe('Export custom post types', () => {
   })
 
   it('has no Custom post types card on a site without them', () => {
-    assert.deepEqual(titles(exportScreen()), ['Posts, pages and media', 'Navigation', 'Site settings'])
+    assert.deepEqual(titles(exportScreen()), ['Hand-picked content', 'Posts, pages and media', 'Navigation', 'Site settings'])
   })
 
   it('puts classic menus on the Navigation card, not among the Include toggles', async () => {

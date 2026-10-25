@@ -235,6 +235,10 @@
 .migrateplus-import-drop .button { margin-top: 10px; }
 .migrateplus-import-limit { margin: 12px 0 0; color: var(--pp-muted); font-size: 12px; }
 
+/* Pull from another site, under the drop zone */
+.migrateplus-pull-site { margin: 0 0 12px; }
+.migrateplus-pull-go { margin: 20px 0 0; }
+
 /* Map step */
 .migrateplus-summary {
 	display: flex; align-items: center; gap: 14px; margin: 0 0 16px; padding: 14px 16px;
@@ -742,6 +746,14 @@ body.migrateplus-modal-open { overflow: hidden; }
 .migrateplus-export-parts .migrateplus-table-tools { margin-bottom: 0; }
 .migrateplus-help.is-warn { color: var(--pp-hull); }
 .migrateplus-export-filters { display: grid; gap: 10px; padding-top: 4px; border-top: 1px solid var(--pp-line); }
+/* The hand-picked card: the search box, its results, and the rows already added. */
+.migrateplus-pick-search { max-width: 360px; }
+.migrateplus-pick-results, .migrateplus-pick-list { margin: 0; display: grid; gap: 4px; }
+.migrateplus-pick-results li, .migrateplus-pick-list li { display: flex; align-items: center; gap: 10px; margin: 0; padding: 6px 10px; border: 1px solid var(--pp-line); border-radius: var(--pp-r); background: var(--pp-paper); }
+.migrateplus-pick-text { display: flex; min-width: 0; flex: 1; flex-direction: column; }
+.migrateplus-pick-title { font-weight: 500; color: var(--pp-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.migrateplus-pick-meta { font-size: 12px; color: var(--pp-muted); }
+.migrateplus-pick-remove { color: var(--pp-hull); text-decoration: none; }
 .migrateplus-export-filters .migrateplus-opt { margin-bottom: 0; }
 /* Find & Replace keeps the two even columns. */
 .migrateplus-export-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 32px; }

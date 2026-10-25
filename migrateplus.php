@@ -43,6 +43,7 @@ require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-exporter.php';
 require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-importer.php';
 require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-runner.php';
 require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-replace.php';
+require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-rest.php';
 require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-upgrade.php';
 
 // Before anything reads settings: moves the data of an install from before the rename, once.
@@ -56,6 +57,9 @@ if ( is_admin() ) {
 
 // Old addresses of imported posts send visitors to where the posts are now.
 MigratePlus_Redirects::init();
+
+// Routes another site pulls an export through, with an application password.
+MigratePlus_Rest::init();
 
 // Let MigratePlus's own requests reach local/dev sites when the setting is on.
 add_filter( 'http_request_host_is_external', array( 'MigratePlus_Util', 'allow_local_host' ), 10, 3 );

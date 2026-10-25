@@ -96,6 +96,37 @@ describe('Import', () => {
     assert.equal(env.modal.title(), 'Import complete')
   })
 
+  it('offers Review mapping and a dry run for a file of several post types', async () => {
+    const multiPreview = {
+      job: job({
+        total: 15,
+        settings: { file_name: 'site.json', migrateplus_site: 'https://old.test', migrateplus_post_types: 'attachment,page,post' },
+        mapping: { fields: { post_title: 'title', post_type: 'post_type' }, acf: { page_field: 'a', post_field: 'b' } },
+        sections: [
+          { type: 'attachment', label: 'Media', done: 0, total: 5 },
+          { type: 'page', label: 'Pages', done: 0, total: 4 },
+          { type: 'post', label: 'Posts', done: 0, total: 6 },
+        ],
+      }),
+      records: [{ title: 'Dune', post_type: 'post' }],
+      fields: ['title', 'post_type'],
+    }
+    const env = boot({ routes: { preview: multiPreview, duplicates: { count: 0, total: 15 }, save: saved, run: done(true) } })
+    upload(env, 'site.json')
+    await env.flush()
+    assert.match(env.modal.message(), /Media, Pages and Posts are imported in that order/)
+    assert.deepEqual(env.modal.labels(), ['Review mapping', 'Cancel', 'Import'])
+
+    env.click(env.byText('.migrateplus-modal button', 'Review mapping'))
+    await env.flush()
+    assert.equal(env.modal.isOpen(), false)
+    env.click(env.byText('button', 'Dry run'))
+    await env.flush()
+    const req = json(env.sent('save')[0], 'mapping')
+    assert.deepEqual(req.fields, { post_title: 'title', post_type: 'post_type' })
+    assert.deepEqual(req.acf, { page_field: 'a', post_field: 'b' })
+  })
+
   it('asks for no author in that confirmation, leaving the posts to the person importing', async () => {
     const env = boot({ routes: { preview: exportPreview, duplicates: { count: 0, total: 15 }, save: saved, run: done(false) } })
     upload(env)
@@ -359,6 +390,15 @@ describe('Duplicates', () => {
     assert.deepEqual([...choice(env, 1).options].map(o => o.textContent), ['Skip', 'Import as copy'])
     assert.deepEqual([...choice(env, 4).options].map(o => o.textContent), ['Update details', 'Replace file', 'Skip'])
     assert.equal(env.$('.migrateplus-stepper'), null)
+  })
+
+  it('keeps Update and shows no badge on a row the check cannot compare, like a product', async () => {
+    const items = dupItems()
+    items[1] = { ...items[1], compared: false }
+    const env = await duplicatesScreen({ duplicates: dups({ items }) })
+    assert.deepEqual([...choice(env, 1).options].map(o => o.textContent), ['Update', 'Skip', 'Import as copy'])
+    assert.equal(rows(env)[1].querySelector('.migrateplus-badge'), null)
+    assert.deepEqual(env.$$('.migrateplus-dups-table .migrateplus-badge').map(n => n.textContent), ['Differs', 'Differs', 'Unchanged'])
   })
 
   it('starts the import at once when nothing is already here', async () => {

@@ -14,20 +14,12 @@ class MigratePlus_Admin {
 	const EXPORT_SLUG  = 'migrateplus-export';
 	const REPLACE_SLUG = 'migrateplus-replace';
 
-	/**
-	 * Post types with an admin screen that are not content to move: the site editor's and
-	 * menus' types (which the importer refuses too), ACF's settings, and WooCommerce orders,
-	 * which with HPOS keep their data in tables of their own.
-	 */
-	// Global styles travel with the site settings, ACF's definitions and orders as sections of their own.
-	const NOT_EXPORTED = array( 'wp_global_styles', 'nav_menu_item', 'acf-field-group', 'acf-field', 'acf-post-type', 'acf-taxonomy', 'acf-ui-options-page', 'shop_order', 'shop_order_refund', 'shop_order_placehold' );
-
 	public static function init() {
 		add_action( 'admin_menu', array( __CLASS__, 'menu' ) );
 		add_action( 'admin_enqueue_scripts', array( __CLASS__, 'assets' ) );
 		add_filter( 'plugin_action_links_' . plugin_basename( MIGRATEPLUS_FILE ), array( __CLASS__, 'action_links' ) );
 
-		foreach ( array( 'preview', 'users', 'records', 'duplicates', 'media_preview', 'save', 'run', 'rollback', 'delete', 'history_delete', 'jobs', 'job', 'restart', 'export_count', 'export_start', 'export_run', 'export_download', 'exports', 'export_log', 'export_forget', 'replace_start', 'replace_run', 'replace_history', 'replace_rollback', 'replace_forget', 'mapping_save', 'mapping_rename', 'mapping_delete' ) as $action ) {
+		foreach ( array( 'preview', 'users', 'records', 'source_authors', 'duplicates', 'media_preview', 'save', 'run', 'rollback', 'delete', 'history_delete', 'jobs', 'job', 'restart', 'export_count', 'export_posts', 'export_start', 'export_run', 'export_download', 'exports', 'export_log', 'export_forget', 'pull_check', 'pull_start', 'pull_run', 'pull_fetch', 'replace_start', 'replace_run', 'replace_history', 'replace_rollback', 'replace_forget', 'mapping_save', 'mapping_rename', 'mapping_delete' ) as $action ) {
 			add_action( 'wp_ajax_migrateplus_' . $action, array( __CLASS__, 'ajax_' . $action ) );
 		}
 	}
@@ -401,6 +393,18 @@ class MigratePlus_Admin {
 		}
 		// phpcs:enable
 
+		self::send_preview( $source_id, $settings, $uploads );
+	}
+
+	/**
+	 * Connect to the source and send the preview the import screen continues from,
+	 * for a dropped file and a pulled one alike.
+	 *
+	 * @param string $source_id Source.
+	 * @param array  $settings  Source settings.
+	 * @param array  $uploads   Files to delete when no job is created.
+	 */
+	protected static function send_preview( $source_id, array $settings, array $uploads ) {
 		$preview = MigratePlus_Runner::preview( $source_id, $settings );
 		if ( is_wp_error( $preview ) ) {
 			// No job was created, so nothing else will ever clean up the upload.
@@ -480,6 +484,24 @@ class MigratePlus_Admin {
 			self::fail( $page );
 		}
 		wp_send_json_success( $page );
+	}
+
+	/**
+	 * The authors a job's records name from the old site, for picking an author per old
+	 * author: param mapping (JSON, as ajax_records()).
+	 */
+	public static function ajax_source_authors() {
+		self::guard();
+		$job = self::request_job();
+		// phpcs:disable WordPress.Security.NonceVerification, WordPress.Security.ValidatedSanitizedInput -- verified in guard(); the mapping is cleaned below.
+		$mapping = isset( $_POST['mapping'] ) ? json_decode( wp_unslash( $_POST['mapping'] ), true ) : null;
+		// phpcs:enable
+		$mapping = is_array( $mapping ) ? MigratePlus_Mappings::clean_mapping( $mapping ) : (array) $job->data['mapping'];
+		$found   = MigratePlus_Runner::list_source_authors( $job, $mapping );
+		if ( is_wp_error( $found ) ) {
+			self::fail( $found );
+		}
+		wp_send_json_success( $found );
 	}
 
 	/**
@@ -967,31 +989,7 @@ class MigratePlus_Admin {
 		// phpcs:disable WordPress.Security.NonceVerification -- verified in guard().
 		$raw = isset( $_POST['args'] ) ? json_decode( wp_unslash( $_POST['args'] ), true ) : array(); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
 		// phpcs:enable
-		$args = MigratePlus_Exporter::sanitize_args( is_array( $raw ) ? $raw : array() );
-		if ( is_wp_error( $args ) ) {
-			return $args;
-		}
-		foreach ( $args['post_types'] as $type ) {
-			if ( ! self::exportable_type( $type ) ) {
-				/* translators: %s: post type label */
-				return new WP_Error( 'migrateplus_export_type', sprintf( __( '%s can\'t be exported.', 'migrateplus' ), MigratePlus_Exporter::type_label( $type ) ) );
-			}
-			if ( ! current_user_can( get_post_type_object( $type )->cap->edit_posts ) ) {
-				/* translators: %s: post type label */
-				return new WP_Error( 'migrateplus_export_cap', sprintf( __( 'You are not allowed to export %s.', 'migrateplus' ), MigratePlus_Exporter::type_label( $type ) ) );
-			}
-		}
-		// A toggle hidden from users who may not see its section still arrives with its default: leave the section out.
-		foreach ( array(
-			'include_menus'         => 'edit_theme_options',
-			'include_site_settings' => 'manage_options',
-			'include_orders'        => 'manage_woocommerce',
-		) as $arg => $capability ) {
-			if ( ! current_user_can( $capability ) ) {
-				$args[ $arg ] = 0;
-			}
-		}
-		return $args;
+		return MigratePlus_Exporter::args_for_user( is_array( $raw ) ? $raw : array() );
 	}
 
 	/**
@@ -1014,6 +1012,58 @@ class MigratePlus_Admin {
 				'terms'  => isset( $sides['terms'] ) ? $sides['terms'] : 0,
 			)
 		);
+	}
+
+	/**
+	 * Posts matching a title search (or an ID), to hand-pick for an export.
+	 */
+	public static function ajax_export_posts() {
+		self::guard();
+		// phpcs:disable WordPress.Security.NonceVerification -- verified in guard().
+		$term = isset( $_POST['search'] ) ? sanitize_text_field( wp_unslash( $_POST['search'] ) ) : ''; // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+		// phpcs:enable
+		if ( '' === $term ) {
+			wp_send_json_success( array( 'posts' => array() ) );
+		}
+		$types = array();
+		foreach ( get_post_types( array(), 'objects' ) as $type => $object ) {
+			if ( MigratePlus_Exporter::exportable_type( $type ) && current_user_can( $object->cap->edit_posts ) ) {
+				$types[] = $type;
+			}
+		}
+		$query = new WP_Query(
+			array(
+				'post_type'           => $types,
+				'post_status'         => array( 'publish', 'draft', 'pending', 'private', 'future', 'inherit' ),
+				's'                   => $term,
+				'posts_per_page'      => 20,
+				'suppress_filters'    => true,
+				'ignore_sticky_posts' => true,
+				'no_found_rows'       => true,
+			)
+		);
+		$found = $query->posts;
+		// A number finds that exact post too, first.
+		if ( is_numeric( $term ) ) {
+			$exact = get_post( absint( $term ) );
+			if ( $exact && in_array( $exact->post_type, $types, true ) && ! in_array( $exact->post_status, array( 'trash', 'auto-draft' ), true ) ) {
+				$found = array_merge( array( $exact ), wp_list_filter( $found, array( 'ID' => $exact->ID ), 'NOT' ) );
+			}
+		}
+		$posts = array();
+		foreach ( $found as $post ) {
+			$object  = get_post_type_object( $post->post_type );
+			$status  = get_post_status_object( $post->post_status );
+			$posts[] = array(
+				'id'     => $post->ID,
+				'title'  => '' !== $post->post_title ? $post->post_title : __( '(no title)', 'migrateplus' ),
+				'type'   => $post->post_type,
+				'label'  => $object ? $object->labels->singular_name : $post->post_type,
+				'status' => $status ? $status->label : $post->post_status,
+				'date'   => get_the_date( '', $post ),
+			);
+		}
+		wp_send_json_success( array( 'posts' => $posts ) );
 	}
 
 	/**
@@ -1108,6 +1158,207 @@ class MigratePlus_Admin {
 		}
 		MigratePlus_Exporter::forget( $id );
 		wp_send_json_success();
+	}
+
+	// Pull from another site: this site asks the old one, over its Migrate Plus REST
+	// routes, to export and hand over the file, which then imports like a dropped one.
+
+	/**
+	 * The old site's address and credentials from the request: a username with an
+	 * application password, or the old site's pull key. Either is sent along with
+	 * every pull request and stored nowhere on this site.
+	 *
+	 * @return array { url, user, pass, key } Sends the error instead when something is missing.
+	 */
+	protected static function pull_args() {
+		// phpcs:disable WordPress.Security.NonceVerification, WordPress.Security.ValidatedSanitizedInput -- verified in guard(); sanitized here.
+		$url  = isset( $_POST['url'] ) ? esc_url_raw( trim( (string) wp_unslash( $_POST['url'] ) ), array( 'http', 'https' ) ) : '';
+		$user = isset( $_POST['user'] ) ? sanitize_text_field( wp_unslash( $_POST['user'] ) ) : '';
+		$pass = isset( $_POST['pass'] ) ? trim( (string) wp_unslash( $_POST['pass'] ) ) : '';
+		$key  = isset( $_POST['key'] ) ? trim( (string) wp_unslash( $_POST['key'] ) ) : '';
+		// phpcs:enable
+		if ( '' === $url ) {
+			self::fail( new WP_Error( 'migrateplus_pull_url', __( 'Enter the old site\'s address, starting with http:// or https://.', 'migrateplus' ) ) );
+		}
+		if ( '' === $key && ( '' === $user || '' === $pass ) ) {
+			self::fail( new WP_Error( 'migrateplus_pull_auth', __( 'Enter a username and an application password from the old site, or its pull key.', 'migrateplus' ) ) );
+		}
+		return array(
+			'url'  => $url,
+			'user' => $user,
+			'pass' => $pass,
+			'key'  => $key,
+		);
+	}
+
+	/**
+	 * A route's URL on the old site. ?rest_route= works with and without pretty permalinks.
+	 *
+	 * @param array  $pull  From pull_args().
+	 * @param string $route Route under the plugin's namespace.
+	 * @param array  $query Query args.
+	 * @return string
+	 */
+	protected static function pull_url( array $pull, $route, array $query = array() ) {
+		return add_query_arg(
+			array_merge( array( 'rest_route' => '/' . MigratePlus_Rest::ROUTE_NAMESPACE . '/' . $route ), $query ),
+			trailingslashit( $pull['url'] )
+		);
+	}
+
+	/**
+	 * @param array $pull From pull_args().
+	 * @return array Request headers.
+	 */
+	protected static function pull_headers( array $pull ) {
+		if ( '' !== $pull['key'] ) {
+			return array( 'X-MigratePlus-Key' => $pull['key'] );
+		}
+		return array( 'Authorization' => 'Basic ' . base64_encode( $pull['user'] . ':' . $pull['pass'] ) ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions -- Basic auth is base64 by definition.
+	}
+
+	/**
+	 * Call one of the old site's Migrate Plus routes and return the decoded answer.
+	 *
+	 * @param array      $pull  From pull_args().
+	 * @param string     $route Route under the plugin's namespace.
+	 * @param array|null $body  POST body, or null for GET.
+	 * @return array Sends the error instead when the old site cannot be used.
+	 */
+	protected static function pull_request( array $pull, $route, $body = null ) {
+		$args = array(
+			'timeout'    => max( 30, (int) MigratePlus_Settings::get( 'request_timeout' ) ),
+			'headers'    => self::pull_headers( $pull ),
+			'user-agent' => 'MigratePlus/' . MIGRATEPLUS_VERSION . '; ' . home_url(),
+		);
+		if ( null !== $body ) {
+			$args['method']                  = 'POST';
+			$args['body']                    = wp_json_encode( $body );
+			$args['headers']['Content-Type'] = 'application/json';
+		}
+		// Reset in finally: left on after an exception, the next request anything makes would get the local-host allowance.
+		MigratePlus_Util::$in_request = true;
+		try {
+			$response = wp_safe_remote_request( self::pull_url( $pull, $route ), $args );
+		} finally {
+			MigratePlus_Util::$in_request = false;
+		}
+		if ( is_wp_error( $response ) ) {
+			/* translators: %s: error message */
+			self::fail( new WP_Error( 'migrateplus_pull_http', sprintf( __( 'Could not reach the old site: %s', 'migrateplus' ), $response->get_error_message() ) ) );
+		}
+		$code = (int) wp_remote_retrieve_response_code( $response );
+		$data = json_decode( wp_remote_retrieve_body( $response ), true );
+		if ( $code >= 200 && $code < 300 && is_array( $data ) ) {
+			return $data;
+		}
+		if ( is_array( $data ) && isset( $data['code'] ) && 'rest_no_route' === $data['code'] ) {
+			self::fail( new WP_Error( 'migrateplus_pull_plugin', __( 'Migrate Plus is not active on the old site, or its version there is too old to pull from.', 'migrateplus' ) ) );
+		}
+		if ( is_array( $data ) && ! empty( $data['message'] ) ) {
+			/* translators: %s: the other site's error message */
+			self::fail( new WP_Error( 'migrateplus_pull_remote', sprintf( __( 'The old site said: %s', 'migrateplus' ), sanitize_text_field( (string) $data['message'] ) ) ) );
+		}
+		/* translators: %d: HTTP status code */
+		self::fail( new WP_Error( 'migrateplus_pull_http', sprintf( __( 'The old site did not answer like a WordPress site (HTTP %d). Check the address.', 'migrateplus' ), $code ) ) );
+	}
+
+	/**
+	 * Try the connection and describe the old site: its name and what it offers to export.
+	 */
+	public static function ajax_pull_check() {
+		self::guard();
+		$pull = self::pull_args();
+		$site = self::pull_request( $pull, 'site' );
+		wp_send_json_success(
+			array(
+				'name'    => sanitize_text_field( (string) ( isset( $site['name'] ) ? $site['name'] : '' ) ),
+				'url'     => esc_url_raw( (string) ( isset( $site['url'] ) ? $site['url'] : '' ) ),
+				'version' => sanitize_text_field( (string) ( isset( $site['version'] ) ? $site['version'] : '' ) ),
+				'types'   => array_values(
+					array_map(
+						static function ( $type ) {
+							return array(
+								'type'  => sanitize_key( (string) ( isset( $type['type'] ) ? $type['type'] : '' ) ),
+								'label' => sanitize_text_field( (string) ( isset( $type['label'] ) ? $type['label'] : '' ) ),
+								'count' => isset( $type['count'] ) ? (int) $type['count'] : 0,
+							);
+						},
+						isset( $site['types'] ) && is_array( $site['types'] ) ? array_filter( $site['types'], 'is_array' ) : array()
+					)
+				),
+			)
+		);
+	}
+
+	/**
+	 * Start the export on the old site.
+	 */
+	public static function ajax_pull_start() {
+		self::guard();
+		$pull = self::pull_args();
+		// phpcs:disable WordPress.Security.NonceVerification -- verified in guard().
+		$types = isset( $_POST['post_types'] ) ? array_filter( array_map( 'sanitize_key', explode( ',', (string) wp_unslash( $_POST['post_types'] ) ) ) ) : array(); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+		// phpcs:enable
+		if ( ! $types ) {
+			self::fail( new WP_Error( 'migrateplus_pull_types', __( 'Choose at least one content type to pull.', 'migrateplus' ) ) );
+		}
+		// The other args keep the old site's own export defaults.
+		$started = self::pull_request( $pull, 'export', array( 'args' => array( 'post_types' => array_values( $types ) ) ) );
+		wp_send_json_success(
+			array(
+				'export' => sanitize_key( (string) ( isset( $started['id'] ) ? $started['id'] : '' ) ),
+				'total'  => isset( $started['total'] ) ? (int) $started['total'] : 0,
+			)
+		);
+	}
+
+	/**
+	 * Export the next batch on the old site and relay the progress.
+	 */
+	public static function ajax_pull_run() {
+		self::guard();
+		$pull = self::pull_args();
+		$id   = isset( $_POST['export'] ) ? sanitize_key( wp_unslash( $_POST['export'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification -- verified in guard().
+		$done = self::pull_request( $pull, 'export/run', array( 'export' => $id ) );
+		if ( ! empty( $done['error'] ) ) {
+			/* translators: %s: the other site's error message */
+			self::fail( new WP_Error( 'migrateplus_pull_remote', sprintf( __( 'The old site said: %s', 'migrateplus' ), sanitize_text_field( (string) $done['error'] ) ) ) );
+		}
+		wp_send_json_success(
+			array(
+				'done'     => isset( $done['done'] ) ? (int) $done['done'] : 0,
+				'total'    => isset( $done['total'] ) ? (int) $done['total'] : 0,
+				'complete' => ! empty( $done['complete'] ),
+				'filename' => sanitize_file_name( (string) ( isset( $done['filename'] ) ? $done['filename'] : '' ) ),
+			)
+		);
+	}
+
+	/**
+	 * Download the finished file from the old site and preview it, like a dropped file.
+	 */
+	public static function ajax_pull_fetch() {
+		self::guard();
+		$pull = self::pull_args();
+		// phpcs:disable WordPress.Security.NonceVerification -- verified in guard().
+		$id   = isset( $_POST['export'] ) ? sanitize_key( wp_unslash( $_POST['export'] ) ) : '';
+		$name = isset( $_POST['filename'] ) ? sanitize_file_name( wp_unslash( $_POST['filename'] ) ) : '';
+		// phpcs:enable
+		if ( '' === $id ) {
+			self::fail( new WP_Error( 'migrateplus_pull_export', __( 'Run the export on the old site first.', 'migrateplus' ) ) );
+		}
+		// The URL has no file extension; gzip is detected by the file's bytes either way.
+		$path = MigratePlus_Util::download_to_storage( self::pull_url( $pull, 'export/file', array( 'export' => $id ) ), array( 'json', 'gz' ), self::pull_headers( $pull ) );
+		if ( is_wp_error( $path ) ) {
+			self::fail( $path );
+		}
+		$settings = array( 'file' => $path );
+		if ( '' !== $name ) {
+			// Named like the export, so re-imports of the same pull match in history.
+			$settings['file_name'] = $name;
+		}
+		self::send_preview( 'json', $settings, array( $path ) );
 	}
 
 	/**
@@ -1216,16 +1467,14 @@ class MigratePlus_Admin {
 	}
 
 	/**
-	 * Whether a post type may be exported: one with an admin screen, as the importer
-	 * requires, that is not in NOT_EXPORTED. Whether the user may edit it is checked apart.
+	 * Whether a post type may be exported. Lives on the exporter (the REST routes need it
+	 * outside the admin); kept here for the callers that know this class.
 	 *
 	 * @param string $type Post type.
 	 * @return bool
 	 */
 	public static function exportable_type( $type ) {
-		$object = get_post_type_object( $type );
-		// Templates and template parts have no admin screen of their own (the Site Editor edits them), but are content.
-		return $object && ( $object->show_ui || MigratePlus_Blocks::is_template_type( $type ) ) && ! in_array( $type, self::NOT_EXPORTED, true );
+		return MigratePlus_Exporter::exportable_type( $type );
 	}
 
 	/**

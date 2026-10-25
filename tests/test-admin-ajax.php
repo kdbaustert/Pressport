@@ -166,7 +166,7 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 	}
 
 	public function actions() {
-		$actions = array( 'preview', 'users', 'records', 'duplicates', 'media_preview', 'save', 'run', 'rollback', 'delete', 'history_delete', 'jobs', 'job', 'restart', 'export_count', 'export_start', 'export_run', 'export_download', 'exports', 'export_log', 'export_forget', 'replace_start', 'replace_run', 'replace_history', 'replace_rollback', 'replace_forget', 'mapping_save', 'mapping_rename', 'mapping_delete' );
+		$actions = array( 'preview', 'users', 'records', 'duplicates', 'media_preview', 'save', 'run', 'rollback', 'delete', 'history_delete', 'jobs', 'job', 'restart', 'export_count', 'export_posts', 'export_start', 'export_run', 'export_download', 'exports', 'export_log', 'export_forget', 'replace_start', 'replace_run', 'replace_history', 'replace_rollback', 'replace_forget', 'mapping_save', 'mapping_rename', 'mapping_delete' );
 		return array_combine( $actions, array_chunk( $actions, 1 ) );
 	}
 
@@ -503,14 +503,16 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 			array(
 				'records'   => array(
 					array(
-						'index' => 3,
-						'title' => 'Beloved',
-						'type'  => 'post',
+						'index'  => 3,
+						'title'  => 'Beloved',
+						'type'   => 'post',
+						'author' => '',
 					),
 					array(
-						'index' => 4,
-						'title' => 'Middlemarch',
-						'type'  => 'post',
+						'index'  => 4,
+						'title'  => 'Middlemarch',
+						'type'   => 'post',
+						'author' => '',
 					),
 				),
 				'total'     => 7,
@@ -596,6 +598,94 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 		);
 		$page    = $this->records( $job->data['id'], array( 'mapping' => wp_json_encode( $mapping ) ) );
 		$this->assertSame( array( 'Post headline', 'Page headline' ), array_column( $page['records'], 'title' ) );
+	}
+
+	public function test_source_authors_lists_the_files_authors_most_posts_first_with_login_matches() {
+		$this->login( 'administrator' );
+		$maya = self::factory()->user->create(
+			array(
+				'role'         => 'editor',
+				'user_login'   => 'maya',
+				'display_name' => 'Maya Here',
+			)
+		);
+		self::factory()->user->create(
+			array(
+				'role'       => 'subscriber',
+				'user_login' => 'guest',
+			)
+		);
+		$job = $this->json_job(
+			array(
+				'migrateplus' => array(
+					'site'       => 'http://old.test',
+					'post_types' => array( 'attachment', 'post' ),
+					'mapping'    => array(
+						'fields' => array(
+							'post_title'        => 'title',
+							'post_type'         => 'post_type',
+							'post_author_login' => 'author_login',
+							'post_author_name'  => 'author_name',
+						),
+					),
+				),
+				'items'       => array(
+					array(
+						'title'        => 'A file',
+						'post_type'    => 'attachment',
+						'author_login' => 'maya',
+					),
+					array(
+						'title'        => 'One',
+						'post_type'    => 'post',
+						'author_login' => 'guest',
+						'author_name'  => 'Guest Writer',
+					),
+					array(
+						'title'       => 'Two',
+						'post_type'   => 'post',
+						'author_name' => 'Maya Lindqvist',
+						'author_login' => 'maya',
+					),
+					array(
+						'title'        => 'Three',
+						'post_type'    => 'post',
+						'author_login' => 'maya',
+					),
+					array(
+						'title'     => 'Four',
+						'post_type' => 'post',
+					),
+				),
+			)
+		);
+		$out = $this->ajax( 'source_authors', array( 'job' => $job->data['id'] ) );
+		$this->assertTrue( $out['success'], wp_json_encode( $out ) );
+		$this->assertFalse( $out['data']['truncated'] );
+		// The attachment and the authorless record are left out; a subscriber is no match.
+		$this->assertSame(
+			array(
+				array(
+					'key'   => 'maya',
+					'login' => 'maya',
+					'name'  => 'Maya Lindqvist',
+					'count' => 2,
+					'match' => array(
+						'id'    => $maya,
+						'name'  => 'Maya Here',
+						'login' => 'maya',
+					),
+				),
+				array(
+					'key'   => 'guest',
+					'login' => 'guest',
+					'name'  => 'Guest Writer',
+					'count' => 1,
+					'match' => null,
+				),
+			),
+			$out['data']['authors']
+		);
 	}
 
 	public function test_records_stop_a_search_after_5000_records() {
@@ -872,10 +962,12 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 					'kind'           => 'before',
 					'label'          => '',
 					'changed'        => true,
+					'compared'       => true,
 					'changes'        => array( 'title' ),
 					'view_url'       => get_permalink( $dune ),
 					'edit_url'       => get_edit_post_link( $dune, 'raw' ),
 					'media'          => null,
+					'author'         => '',
 				),
 				array(
 					'index'          => 1,
@@ -886,10 +978,12 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 					'kind'           => 'before',
 					'label'          => '',
 					'changed'        => false,
+					'compared'       => true,
 					'changes'        => array(),
 					'view_url'       => get_permalink( $emma ),
 					'edit_url'       => get_edit_post_link( $emma, 'raw' ),
 					'media'          => null,
+					'author'         => '',
 				),
 			),
 			array_map(
@@ -1303,6 +1397,80 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 		$this->assertSame( 0, $this->ajax( 'export_count', $args )['data']['menus'] );
 	}
 
+	public function test_export_posts_searches_by_title_and_id() {
+		$post  = self::factory()->post->create( array( 'post_title' => 'Needle post' ) );
+		$draft = self::factory()->post->create(
+			array(
+				'post_type'   => 'page',
+				'post_title'  => 'Needle page',
+				'post_status' => 'draft',
+			)
+		);
+		$plain = self::factory()->post->create( array( 'post_title' => 'Haystack' ) );
+
+		$this->login( 'administrator' );
+		$this->assertSame( array(), $this->ajax( 'export_posts', array( 'search' => '' ) )['data']['posts'] );
+
+		$rows = $this->ajax( 'export_posts', array( 'search' => 'needle' ) )['data']['posts'];
+		$this->assertEqualsCanonicalizing( array( $post, $draft ), array_column( $rows, 'id' ) );
+		$page_row = $rows[ array_search( $draft, array_column( $rows, 'id' ), true ) ];
+		$this->assertSame( 'Needle page', $page_row['title'] );
+		$this->assertSame( 'page', $page_row['type'] );
+		$this->assertSame( 'Page', $page_row['label'] );
+		$this->assertSame( 'Draft', $page_row['status'] );
+		$this->assertNotEmpty( $page_row['date'] );
+
+		// A number finds that exact post first, even when its title doesn't match.
+		$rows = $this->ajax( 'export_posts', array( 'search' => (string) $plain ) )['data']['posts'];
+		$this->assertSame( $plain, $rows[0]['id'] );
+	}
+
+	public function test_export_posts_hides_types_the_user_cannot_edit() {
+		register_post_type(
+			'mp_invoice',
+			array(
+				'public'       => true,
+				'label'        => 'Invoices',
+				'capabilities' => array( 'edit_posts' => 'manage_options' ),
+			)
+		);
+		self::factory()->post->create(
+			array(
+				'post_type'  => 'mp_invoice',
+				'post_title' => 'Needle invoice',
+			)
+		);
+		$post = self::factory()->post->create( array( 'post_title' => 'Needle post' ) );
+
+		$this->give_editors_access();
+		$this->login( 'editor' );
+		$rows = $this->ajax( 'export_posts', array( 'search' => 'needle' ) )['data']['posts'];
+		$this->assertSame( array( $post ), array_column( $rows, 'id' ) );
+		unregister_post_type( 'mp_invoice' );
+	}
+
+	public function test_export_start_with_hand_picked_posts() {
+		$this->login( 'administrator' );
+		$pick = self::factory()->post->create(
+			array(
+				'post_title'  => 'Picked',
+				'post_status' => 'draft',
+			)
+		);
+		self::factory()->post->create( array( 'post_title' => 'Not picked' ) );
+
+		$start = $this->ajax( 'export_start', array( 'args' => wp_json_encode( array( 'post_ids' => array( $pick ) ) ) ) )['data'];
+		$this->assertSame( 1, $start['total'] );
+		do {
+			$run = $this->ajax( 'export_run', array( 'export' => $start['id'] ) )['data'];
+		} while ( ! $run['complete'] );
+
+		$file = MigratePlus_Exporter::load_state( $start['id'] )['file'];
+		$doc  = json_decode( (string) file_get_contents( $file ), true ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$this->assertSame( array( 'Picked' ), array_column( $doc['items'], 'title' ) );
+		$this->ajax( 'export_forget', array( 'export' => $start['id'] ) );
+	}
+
 	public function test_export_refuses_a_type_the_user_cannot_edit() {
 		register_post_type(
 			'mp_invoice',
@@ -1456,6 +1624,314 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 		$state = MigratePlus_Exporter::start( MigratePlus_Exporter::sanitize_args( array( 'post_type' => 'post' ) ) );
 		$out   = $this->ajax( 'export_download', array( 'export' => $state['id'] ) );
 		$this->assertSame( array( 'die' => 'This export is not ready or has expired. Run it again.' ), $out );
+	}
+
+	// Pull from another site: the endpoints call the old site's Migrate Plus REST
+	// routes with the application password from the request and relay the answers.
+
+	/**
+	 * Play the old site: answer every HTTP request the pull makes and record it.
+	 *
+	 * @param array|callable $answer A pre_http_request response, or a function of ( $args, $url ) returning one.
+	 * @return ArrayObject Each request as { url, args }.
+	 */
+	protected function mock_old_site( $answer ) {
+		// Earlier tests can leave the core/plugin/theme update checks due; admin_init would
+		// then fire them into this mock, whose answers update.php cannot parse.
+		remove_action( 'admin_init', '_maybe_update_core' );
+		remove_action( 'admin_init', '_maybe_update_plugins' );
+		remove_action( 'admin_init', '_maybe_update_themes' );
+		$calls = new ArrayObject();
+		add_filter(
+			'pre_http_request',
+			static function ( $preempt, $args, $url ) use ( $answer, $calls ) {
+				$calls[] = array(
+					'url'  => $url,
+					'args' => $args,
+				);
+				return is_callable( $answer ) ? $answer( $args, $url ) : $answer;
+			},
+			10,
+			3
+		);
+		return $calls;
+	}
+
+	/**
+	 * What the old site's REST API answers with.
+	 *
+	 * @param array|string $body Decoded body, or raw.
+	 * @param int          $code HTTP status.
+	 * @return array
+	 */
+	protected function old_site_says( $body, $code = 200 ) {
+		return array(
+			'response' => array( 'code' => $code ),
+			'headers'  => array( 'content-type' => 'application/json' ),
+			'body'     => is_string( $body ) ? $body : wp_json_encode( $body ),
+		);
+	}
+
+	protected function pull_creds() {
+		return array(
+			'url'  => 'https://old.test',
+			'user' => 'kenny',
+			'pass' => 'abcd efgh ijkl',
+		);
+	}
+
+	public function test_pull_check_asks_the_old_site_with_the_application_password() {
+		$this->login( 'administrator' );
+		$calls = $this->mock_old_site(
+			$this->old_site_says(
+				array(
+					'name'    => "Old <b>Site</b>\n",
+					'url'     => 'https://old.test',
+					'version' => '0.1.0',
+					'types'   => array(
+						array(
+							'type'  => 'post',
+							'label' => 'Posts',
+							'count' => '12',
+						),
+						'not-a-type',
+					),
+				)
+			)
+		);
+
+		$out = $this->ajax( 'pull_check', $this->pull_creds() );
+
+		$this->assertTrue( $out['success'], wp_json_encode( $out ) );
+		$this->assertSame( 'Old Site', $out['data']['name'] );
+		$this->assertSame(
+			array(
+				array(
+					'type'  => 'post',
+					'label' => 'Posts',
+					'count' => 12,
+				),
+			),
+			$out['data']['types']
+		);
+
+		$this->assertCount( 1, $calls );
+		$query = array();
+		wp_parse_str( (string) wp_parse_url( $calls[0]['url'], PHP_URL_QUERY ), $query );
+		$this->assertSame( '/migrateplus/v1/site', $query['rest_route'] );
+		$this->assertStringStartsWith( 'https://old.test/?', $calls[0]['url'] );
+		$headers = $calls[0]['args']['headers'];
+		$this->assertSame( 'Basic ' . base64_encode( 'kenny:abcd efgh ijkl' ), $headers['Authorization'] );
+		$this->assertGreaterThanOrEqual( 30, $calls[0]['args']['timeout'] );
+	}
+
+	public function test_pull_needs_an_address_and_an_application_password() {
+		$this->login( 'administrator' );
+		$creds = $this->pull_creds();
+		$this->assertRefused(
+			$this->ajax( 'pull_check', array_merge( $creds, array( 'url' => '' ) ) ),
+			"Enter the old site's address, starting with http:// or https://."
+		);
+		$this->assertRefused(
+			$this->ajax( 'pull_check', array_merge( $creds, array( 'pass' => '' ) ) ),
+			'Enter a username and an application password from the old site, or its pull key.'
+		);
+	}
+
+	public function test_pull_check_with_the_pull_key_sends_the_key_header_instead() {
+		$this->login( 'administrator' );
+		$calls = $this->mock_old_site(
+			$this->old_site_says(
+				array(
+					'name'    => 'Old Site',
+					'url'     => 'https://old.test',
+					'version' => '0.1.0',
+					'types'   => array(),
+				)
+			)
+		);
+
+		$out = $this->ajax(
+			'pull_check',
+			array(
+				'url' => 'https://old.test',
+				'key' => 'k3y-from-the-old-site',
+			)
+		);
+
+		$this->assertTrue( $out['success'], wp_json_encode( $out ) );
+		$this->assertCount( 1, $calls );
+		$headers = $calls[0]['args']['headers'];
+		$this->assertSame( 'k3y-from-the-old-site', $headers['X-MigratePlus-Key'] );
+		$this->assertArrayNotHasKey( 'Authorization', $headers );
+	}
+
+	public function test_pull_check_spots_a_site_without_the_plugin() {
+		$this->login( 'administrator' );
+		$this->mock_old_site(
+			$this->old_site_says(
+				array(
+					'code'    => 'rest_no_route',
+					'message' => 'No route was found matching the URL and request method.',
+				),
+				404
+			)
+		);
+		$this->assertRefused(
+			$this->ajax( 'pull_check', $this->pull_creds() ),
+			'Migrate Plus is not active on the old site, or its version there is too old to pull from.'
+		);
+	}
+
+	public function test_pull_check_relays_what_the_old_site_said() {
+		$this->login( 'administrator' );
+		$this->mock_old_site(
+			$this->old_site_says(
+				array(
+					'code'    => 'migrateplus_rest_forbidden',
+					'message' => 'This needs a user allowed to run Migrate Plus.',
+				),
+				403
+			)
+		);
+		$this->assertRefused(
+			$this->ajax( 'pull_check', $this->pull_creds() ),
+			'The old site said: This needs a user allowed to run Migrate Plus.'
+		);
+	}
+
+	public function test_pull_check_on_a_site_that_is_not_wordpress() {
+		$this->login( 'administrator' );
+		$this->mock_old_site( $this->old_site_says( '<!doctype html><html></html>' ) );
+		$this->assertRefused(
+			$this->ajax( 'pull_check', $this->pull_creds() ),
+			'The old site did not answer like a WordPress site (HTTP 200). Check the address.'
+		);
+	}
+
+	public function test_pull_check_when_the_old_site_is_unreachable() {
+		$this->login( 'administrator' );
+		$this->mock_old_site( new WP_Error( 'http_request_failed', 'cURL error 6: Could not resolve host' ) );
+		$this->assertRefused(
+			$this->ajax( 'pull_check', $this->pull_creds() ),
+			'Could not reach the old site: cURL error 6: Could not resolve host'
+		);
+	}
+
+	public function test_pull_start_sends_the_types_and_relays_the_export() {
+		$this->login( 'administrator' );
+		$calls = $this->mock_old_site(
+			$this->old_site_says(
+				array(
+					'id'    => 'exp123',
+					'total' => 40,
+				)
+			)
+		);
+
+		$this->assertRefused(
+			$this->ajax( 'pull_start', $this->pull_creds() ),
+			'Choose at least one content type to pull.'
+		);
+		$out = $this->ajax( 'pull_start', array_merge( $this->pull_creds(), array( 'post_types' => 'post,page' ) ) );
+
+		$this->assertSame(
+			array(
+				'export' => 'exp123',
+				'total'  => 40,
+			),
+			$out['data']
+		);
+		$this->assertCount( 1, $calls );
+		$this->assertSame( 'POST', $calls[0]['args']['method'] );
+		$this->assertSame( 'application/json', $calls[0]['args']['headers']['Content-Type'] );
+		$this->assertSame( array( 'args' => array( 'post_types' => array( 'post', 'page' ) ) ), json_decode( $calls[0]['args']['body'], true ) );
+		$query = array();
+		wp_parse_str( (string) wp_parse_url( $calls[0]['url'], PHP_URL_QUERY ), $query );
+		$this->assertSame( '/migrateplus/v1/export', $query['rest_route'] );
+	}
+
+	public function test_pull_run_relays_progress_and_the_old_sites_error() {
+		$this->login( 'administrator' );
+		$calls = $this->mock_old_site(
+			function ( $args ) {
+				$sent = json_decode( $args['body'], true );
+				$this->assertSame( array( 'export' => 'exp123' ), $sent );
+				return $this->old_site_says(
+					array(
+						'id'       => 'exp123',
+						'done'     => 50,
+						'total'    => 80,
+						'complete' => false,
+					)
+				);
+			}
+		);
+
+		$out = $this->ajax( 'pull_run', array_merge( $this->pull_creds(), array( 'export' => 'exp123' ) ) );
+
+		$this->assertSame(
+			array(
+				'done'     => 50,
+				'total'    => 80,
+				'complete' => false,
+				'filename' => '',
+			),
+			$out['data']
+		);
+		$this->assertCount( 1, $calls );
+
+		$this->mock_old_site( $this->old_site_says( array( 'error' => 'Could not write the export file.' ) ) );
+		$this->assertRefused(
+			$this->ajax( 'pull_run', array_merge( $this->pull_creds(), array( 'export' => 'exp123' ) ) ),
+			'The old site said: Could not write the export file.'
+		);
+	}
+
+	public function test_pull_fetch_downloads_the_file_and_previews_it() {
+		self::factory()->post->create( array( 'post_title' => 'Pulled over HTTP' ) );
+		$this->login( 'administrator' );
+		$export = $this->finished_export();
+		$file   = MigratePlus_Exporter::load_state( $export )['file'];
+
+		// The old site streams the finished export; the mock writes it where the download would land.
+		$calls = $this->mock_old_site(
+			function ( $args ) use ( $file ) {
+				copy( $file, $args['filename'] );
+				return $this->old_site_says( '' );
+			}
+		);
+
+		$out = $this->ajax(
+			'pull_fetch',
+			array_merge(
+				$this->pull_creds(),
+				array(
+					'export'   => 'exp123',
+					'filename' => 'old-site.json',
+				)
+			)
+		);
+
+		$this->assertTrue( $out['success'], wp_json_encode( $out ) );
+		$this->assertSame( 'json', $out['data']['job']['source'] );
+		$this->assertSame( 'old-site.json', $out['data']['job']['settings']['file_name'] );
+		$this->assertSame( array( 'Pulled over HTTP' ), array_column( $out['data']['records'], 'title' ) );
+
+		$this->assertCount( 1, $calls );
+		$query = array();
+		wp_parse_str( (string) wp_parse_url( $calls[0]['url'], PHP_URL_QUERY ), $query );
+		$this->assertSame( '/migrateplus/v1/export/file', $query['rest_route'] );
+		$this->assertSame( 'exp123', $query['export'] );
+		$this->assertTrue( $calls[0]['args']['stream'] );
+	}
+
+	public function test_pull_fetch_needs_a_finished_export() {
+		$this->login( 'administrator' );
+		$this->assertRefused(
+			$this->ajax( 'pull_fetch', $this->pull_creds() ),
+			'Run the export on the old site first.'
+		);
 	}
 
 	public function test_replace_dry_run() {

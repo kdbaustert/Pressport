@@ -161,3 +161,85 @@ describe('An author for each post or page', () => {
     assert.deepEqual(json(env.sent('save')[0], 'options').authors, {})
   })
 })
+
+// The authors the old site's file names, for an author per old author.
+const sourceAuthors = {
+  authors: [
+    { key: 'maya', login: 'maya', name: 'Maya Lindqvist', count: 80, match: { id: 6, name: 'Maya Lindqvist', login: 'maya' } },
+    { key: 'Guest Writer', login: '', name: 'Guest Writer', count: 40, match: null },
+  ],
+  truncated: false,
+}
+
+async function exportMappingStep(routes) {
+  const env = boot({
+    routes: {
+      preview: {
+        job: job({ total: 120, settings: { file_name: 'site.json', migrateplus_site: 'https://old.test', migrateplus_post_type: 'post' }, mapping: { fields: { post_title: 'title' } } }),
+        records: [{ title: 'Hello world' }],
+        fields: ['title'],
+      },
+      duplicates: { count: 0, total: 120 },
+      source_authors: sourceAuthors,
+      records,
+      save: { job: job({ status: 'running' }) },
+      ...routes,
+    },
+  })
+  env.chooseFile(env.$('#migrateplus-import-file'), env.file('site.json'))
+  await env.flush()
+  env.click(env.byText('button', 'Review mapping'))
+  await env.flush()
+  env.click(env.byText('button', 'Choose an author for each author on the old site'))
+  await env.flush()
+  return env
+}
+
+describe('An author for each author on the old site', () => {
+  it('lists the file’s authors with their posts, most first, only on Review mapping of an export', async () => {
+    const env = await exportMappingStep()
+    const rows = env.$$('#migrateplus-authors-source tbody tr')
+    assert.deepEqual(rows.map(tr => tr.children[0].textContent), ['Maya Lindqvist (maya)', 'Guest Writer'])
+    assert.deepEqual(rows.map(tr => tr.children[1].textContent), ['80', '40'])
+    assert.equal(env.$('#migrateplus-source-author-0').value, '')
+    assert.deepEqual(json(env.sent('source_authors')[0], 'mapping').fields, { post_title: 'title' })
+
+    const feed = await mappingStep()
+    assert.equal(feed.byText('button', 'Choose an author for each author on the old site'), undefined)
+  })
+
+  it('sends the authors picked for old authors, keyed by login or name', async () => {
+    const env = await exportMappingStep()
+    env.choose(env.$('#migrateplus-source-author-1'), '2')
+    assert.equal(env.$$('.migrateplus-authors-count')[0].textContent, '1 old author has an author here.')
+    env.click(env.byText('button', 'Dry run'))
+    await env.flush()
+    assert.deepEqual(json(env.sent('save')[0], 'options').author_map, { 'Guest Writer': 2 })
+  })
+
+  it('takes every account with the same login in one click', async () => {
+    const env = await exportMappingStep()
+    assert.ok(env.byText('#migrateplus-authors-source span', '1 of them has an account here with the same login.'))
+    env.click(env.byText('button', 'Use the accounts with the same login'))
+    assert.equal(env.$('#migrateplus-source-author-0').value, '6')
+    assert.equal(env.byText('button', 'Use the accounts with the same login').disabled, true)
+    env.click(env.byText('button', 'Dry run'))
+    await env.flush()
+    assert.deepEqual(json(env.sent('save')[0], 'options').author_map, { maya: 6 })
+  })
+
+  it('starts a new file with no old authors mapped, whatever the job options say', async () => {
+    const env = boot({
+      routes: {
+        preview: { job: job({ total: 120, options: { ...job().options, author_map: { maya: 2 } } }), records: [{ title: 'Hello world' }], fields: ['title'] },
+        records,
+        save: { job: job({ status: 'running' }) },
+      },
+    })
+    env.chooseFile(env.$('#migrateplus-import-file'), env.file('posts.json'))
+    await env.flush()
+    env.click(env.byText('button', 'Dry run'))
+    await env.flush()
+    assert.deepEqual(json(env.sent('save')[0], 'options').author_map, {})
+  })
+})

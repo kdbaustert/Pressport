@@ -142,6 +142,12 @@ class MigratePlus_Importer {
 		} elseif ( $existing && in_array( $existing, $approved, true ) ) {
 			$opts['duplicate'] = 'update';
 		} elseif ( $existing && ! $resume && '' !== $rest ) {
+			// The duplicates screen offers Update only on rows that differ; a duplicate past the
+			// list it showed gets the same treatment, so "update the rest" rewrites nothing as it is.
+			if ( 'update' === $rest && self::unchanged( $record, $job, $existing, $type, $index ) ) {
+				/* translators: 1: title, 2: post id */
+				return self::result( 'skipped', $existing, sprintf( __( 'Not updated: "%1$s" (#%2$d) is unchanged.', 'migrateplus' ), $label, $existing ) );
+			}
 			$opts['duplicate'] = 'copy' === $rest ? 'create' : $rest;
 		}
 		if ( $existing && 'skip' === $opts['duplicate'] ) {
@@ -154,6 +160,10 @@ class MigratePlus_Importer {
 			if ( $match && ( in_array( $match['post_id'], $copy, true ) || ( 'copy' === $rest && ! in_array( $match['post_id'], array_merge( $approved, $skips ), true ) ) ) ) {
 				$force_new = true;
 			} elseif ( $match && ( in_array( $match['post_id'], $approved, true ) || ( 'update' === $rest && ! in_array( $match['post_id'], $skips, true ) ) ) ) {
+				if ( ! in_array( $match['post_id'], $approved, true ) && self::unchanged( $record, $job, $match['post_id'], $type, $index ) ) {
+					/* translators: 1: title, 2: post id */
+					return self::result( 'skipped', $match['post_id'], sprintf( __( 'Not updated: "%1$s" (#%2$d) is unchanged.', 'migrateplus' ), $label, $match['post_id'] ) );
+				}
 				$existing          = $match['post_id'];
 				$opts['duplicate'] = 'update';
 			} elseif ( $match && ( $skip || in_array( $match['post_id'], $skips, true ) ) ) {
@@ -459,16 +469,34 @@ class MigratePlus_Importer {
 	 * @param array $mapping Mapping.
 	 */
 	protected static function keep_source_author( $post_id, array $record, array $mapping ) {
+		$who = self::source_author( $record, $mapping );
+		if ( '' !== $who['login'] ) {
+			update_post_meta( $post_id, self::SOURCE_AUTHOR_META, wp_slash( sanitize_user( $who['login'] ) ) );
+		}
+		if ( '' !== $who['name'] ) {
+			update_post_meta( $post_id, self::SOURCE_AUTHOR_NAME_META, wp_slash( sanitize_text_field( $who['name'] ) ) );
+		}
+	}
+
+	/**
+	 * Who wrote a record on the old site, as the mapping reads it: the login (the author
+	 * field stands in for it unless it holds an email), the display name, and the key an
+	 * author picked for them goes by in the "author_map" option, the login or else the name.
+	 *
+	 * @param array $record  Flat record.
+	 * @param array $mapping Mapping.
+	 * @return string[] { key, login, name }, '' where the file doesn't say.
+	 */
+	public static function source_author( array $record, array $mapping ) {
 		$login = trim( MigratePlus_Util::stringify( self::value( $record, $mapping, 'post_author_login' ) ) );
 		$other = trim( MigratePlus_Util::stringify( self::value( $record, $mapping, 'post_author' ) ) );
 		$login = '' !== $login || is_email( $other ) ? $login : $other;
 		$name  = trim( MigratePlus_Util::stringify( self::value( $record, $mapping, 'post_author_name' ) ) );
-		if ( '' !== $login ) {
-			update_post_meta( $post_id, self::SOURCE_AUTHOR_META, wp_slash( sanitize_user( $login ) ) );
-		}
-		if ( '' !== $name ) {
-			update_post_meta( $post_id, self::SOURCE_AUTHOR_NAME_META, wp_slash( sanitize_text_field( $name ) ) );
-		}
+		return array(
+			'key'   => '' !== $login ? $login : $name,
+			'login' => $login,
+			'name'  => $name,
+		);
 	}
 
 	/**
@@ -852,6 +880,23 @@ class MigratePlus_Importer {
 	}
 
 	/**
+	 * Whether importing a record would change nothing in an existing post. Only for the
+	 * types changes_for() can compare: media and products carry more than it reads, so
+	 * for them the answer is no.
+	 *
+	 * @param array           $record  Flat record.
+	 * @param MigratePlus_Job $job     Job.
+	 * @param int             $post_id Existing post.
+	 * @param string          $type    Post type the record imports as.
+	 * @param int|null        $index   The record's position in the file, as for import().
+	 * @return bool
+	 */
+	protected static function unchanged( array $record, MigratePlus_Job $job, $post_id, $type, $index ) {
+		return 'attachment' !== $type && ! MigratePlus_Woo::is_product_type( $type )
+			&& ! self::changes_for( $record, $job, $post_id, $type, $index );
+	}
+
+	/**
 	 * What importing a record would change in an existing post, for the core
 	 * fields the import writes, each worked out the way import() writes it.
 	 * Products and media carry much more than these fields, so they are not
@@ -969,7 +1014,8 @@ class MigratePlus_Importer {
 
 		// User ids and accounts differ from site to site, so the old site's author is only kept as
 		// a note (keep_source_author()): the post gets the author picked here.
-		$author = self::author_for( $opts, $index );
+		$who    = self::source_author( $record, $mapping );
+		$author = self::author_for( $opts, $index, $who['key'] );
 		if ( $author ) {
 			$postarr['post_author'] = $author;
 		}
@@ -991,17 +1037,21 @@ class MigratePlus_Importer {
 
 	/**
 	 * The author a record gets: the one picked for it by its position in the file, else the
-	 * one picked for all, else whoever runs the import. Each pick counts only while it is
-	 * someone who may write posts (an account can be removed while a job waits).
+	 * one picked for its author on the old site, else the one picked for all, else whoever
+	 * runs the import. Each pick counts only while it is someone who may write posts (an
+	 * account can be removed while a job waits).
 	 *
-	 * @param array    $opts  Job options.
-	 * @param int|null $index The record's position in the file, or null when unknown.
+	 * @param array    $opts   Job options.
+	 * @param int|null $index  The record's position in the file, or null when unknown.
+	 * @param string   $source The record's author on the old site (source_author()'s key), or ''.
 	 * @return int User id; 0 under WP-CLI without --user, which leaves the author to WordPress.
 	 */
-	public static function author_for( array $opts, $index ) {
+	public static function author_for( array $opts, $index, $source = '' ) {
 		$authors = isset( $opts['authors'] ) && is_array( $opts['authors'] ) ? $opts['authors'] : array();
+		$map     = isset( $opts['author_map'] ) && is_array( $opts['author_map'] ) ? $opts['author_map'] : array();
 		$picks   = array(
 			null !== $index && isset( $authors[ $index ] ) ? (int) $authors[ $index ] : 0,
+			'' !== (string) $source && isset( $map[ $source ] ) ? (int) $map[ $source ] : 0,
 			isset( $opts['author'] ) ? (int) $opts['author'] : 0,
 		);
 		foreach ( $picks as $pick ) {

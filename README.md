@@ -18,8 +18,9 @@ Migrate Plus is for moving *some* content into a site that already exists: stagi
 
 ## Features
 
-- Export one or several post types into one file, with terms, featured images, custom fields, ACF, WooCommerce data, approved comments and navigation menus. Optionally gzip-compressed.
+- Export one or several post types into one file, with terms, featured images, custom fields, ACF, WooCommerce data, approved comments and navigation menus. Optionally gzip-compressed. Or hand-pick exactly the posts to export, whatever their type.
 - Import with a preview, a dry run, batched progress with pause and resume, and a log.
+- Pull content straight from the old site over HTTP, with an application password or a pull key, instead of moving a file by hand.
 - Re-imports are safe: records are tracked by their ID on the old site, so they're skipped or updated, not duplicated. Before importing you can review what would change on posts that already exist.
 - References link up in any order: parents, related products and ACF relationships are connected when the item they point at arrives, in the same file or a later one.
 - Rollback removes what an import created, including comments and menus.
@@ -46,12 +47,23 @@ Activate **Migrate Plus** on the site you're copying from and the one you're cop
 
 ### Copy content between sites
 
-1. On the old site, open **Migrate Plus → Export**, tick the content types (Media, Pages, Posts…), pick statuses, switch on comments or menus if you want them, and click **Export**. The download link works for 24 hours.
+1. On the old site, open **Migrate Plus → Export**, tick the content types (Media, Pages, Posts…), pick statuses, switch on comments or menus if you want them, and click **Export**. The download link works for 24 hours. To export specific posts instead, tick **Hand-picked content** and search by title or paste an ID; picked items are exported whatever their type, and the status and date filters don't apply to them.
 2. On the new site, open **Migrate Plus → Import** and drop the file on the page.
 3. Confirm. If some items are already on the site, you're asked whether to skip them, import them anyway or review the changes.
 4. If something looks wrong, open **Migrate Plus → History** and click **Roll back**.
 
-To check the mapping or dry-run first, choose **Review mapping** instead of confirming. Files with several post types don't offer that; dry-run them with `wp migrateplus import --dry-run`.
+To check the mapping or dry-run first, choose **Review mapping** instead of confirming.
+
+### Pull from the old site
+
+Instead of moving a file by hand, the Import page can fetch the export itself. Under **Or pull from another site**, enter the old site's address and connect with one of:
+
+- **Application password**: a WordPress user on the old site with an [application password](https://wordpress.org/documentation/article/application-passwords/) (Users → Profile). Needs HTTPS.
+- **Pull key**: generated on the **old site** under **Migrate Plus → Settings → Access** ("Generate a pull key on save"). Copy it from there and paste it into the Pull form. It works over plain `http://` too, which application passwords refuse, so it suits local and staging sites without certificates.
+
+Either way the export runs on the old site and streams over; nothing is stored on the pulling site — credentials and key ride along with each request only. Pulls with a key run as the user who generated it. Revoke a key from the same Settings screen.
+
+Pulling from a localhost address, a private network address or a non-standard port also needs the **Local sources** setting (Settings → Downloads) turned on on the pulling site.
 
 ### Import JSON from somewhere else
 
@@ -67,7 +79,7 @@ Save the mapping under a name to reuse it. A later file with the same top-level 
 
 | Page | What it's for |
 | --- | --- |
-| **Import** | Drop or choose a `.json` or `.json.gz` file. |
+| **Import** | Drop or choose a `.json` or `.json.gz` file, or pull one from another site. |
 | **Export** | Export one or more content types to a file. |
 | **Find & Replace** | Replace text across the database (administrators only; on multisite, network administrators). |
 | **History** | Past imports and exports: logs, resume, run again, roll back, delete. Tick several rows to delete them together. |
@@ -77,7 +89,7 @@ Save the mapping under a name to reuse it. A later file with the same top-level 
 
 - **Post type.** A Migrate Plus export imports into the type it came from when this site has it. A multi-type file imports Media first, then the other types, then menus, as one job with one rollback.
 - **Status.** *Default status* only fills in missing or unknown statuses. *Status for every item* overrides all of them, which is handy for importing everything as drafts on staging. Future-dated posts set to Published are scheduled.
-- **Authors** are matched by email, then login, then display name. Missing ones are created if *Create missing authors* is on; otherwise the default author is used and the log says so.
+- **Authors.** User accounts differ between sites, so authors aren't taken from the file. Each post goes to the author picked for it (on **Review mapping** or the duplicates screen), else the *Author for all posts and pages* from **Review mapping** (`--author` on the command line), else whoever runs the import. The old site's author login and name are kept with the post as a note.
 - **Comments.** Only approved comments are exported. They're imported threaded, linked to local users by email, and never added twice.
 - **Menus** are rebuilt after the posts. Items point at the imported post or term (or one with the same slug), links to the old site are rewritten, and theme locations are assigned only if the active theme has them. A menu with the same slug is filled rather than copied.
 - **Duplicates.** Before starting, Migrate Plus looks for items imported before or with the same slug (SKU for products, file name for media) and asks what to do. Changed posts can be reviewed one by one; duplicate images are shown side by side. A dry run skips duplicates so its counts match a real run.
@@ -89,6 +101,7 @@ Save the mapping under a name to reuse it. A later file with the same top-level 
 ```bash
 wp migrateplus export page --status=publish,draft --output=pages.json
 wp migrateplus export attachment,page,post --menus --comments --gzip
+wp migrateplus export --posts=12,34,56
 wp migrateplus import json --file=pages.json --duplicate=update
 wp migrateplus import json --file=feed.json --map=mapping.json --post_type=page
 wp migrateplus import json --file=feed.json --mapping="Books feed" --dry-run
@@ -99,7 +112,7 @@ wp migrateplus resume <job-id>
 wp migrateplus rollback <job-id> --yes
 ```
 
-Import flags: `--post_type`, `--status`, `--force-status`, `--author`, `--duplicate=skip|update|create`, `--duplicates=skip|import|update`, `--batch_size`, `--[no-]featured-images`, `--content-images`, `--create-authors`, `--[no-]create-terms`, `--[no-]rewrite-links`, `--[no-]comments`, `--[no-]menus`, `--dry-run`, `--mapping`. Export also takes `--after`, `--exclude-meta`, `--no-meta`, `--no-woo` and `--[no-]gzip`. Anything left out uses the values from Settings.
+Import flags: `--post_type`, `--status`, `--force-status`, `--author`, `--duplicate=skip|update|create`, `--duplicates=skip|import|update`, `--batch_size`, `--[no-]featured-images`, `--content-images`, `--[no-]create-terms`, `--[no-]rewrite-links`, `--[no-]comments`, `--[no-]menus`, `--dry-run`, `--mapping`. Export also takes `--after`, `--posts` (exactly these IDs, whatever their type; the type list and the status and date filters don't apply), `--exclude-meta`, `--no-meta`, `--no-woo` and `--[no-]gzip`. Anything left out uses the values from Settings.
 
 On/off flags also take a value: `--comments=no`, `--content-images=yes` (yes, no, true, false, 1 or 0). When records are already on the site and `--duplicates` is left out, the import asks; with `--yes`, in a dry run or without a terminal it skips them instead, or imports them as copies if you passed `--duplicate=create`. An import with failed records ends with an error and a non-zero exit status, after the summary, so scripts can catch it. `wp migrateplus resume` only continues imports that were started.
 

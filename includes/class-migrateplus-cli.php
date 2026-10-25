@@ -119,7 +119,7 @@ class MigratePlus_CLI {
 	 * : json (or a custom registered source). Optional when --config is given.
 	 *
 	 * [--config=<file>]
-	 * : JSON file: { "source": "...", "settings": {...}, "mapping": {...}, "options": {...} }. Its options may give "authors", an author for single records: { "0": "id|login|email", ... }, by the record's position in the file (0 for the first). Those records get it instead of --author.
+	 * : JSON file: { "source": "...", "settings": {...}, "mapping": {...}, "options": {...} }. Its options may give "authors", an author for single records: { "0": "id|login|email", ... }, by the record's position in the file (0 for the first), and "author_map", an author for each author on the old site: { "old-login": "id|login|email", ... }, by login, or display name when the file has no login. A record's own author wins over its old author's, and both win over --author.
 	 *
 	 * [--map=<file>]
 	 * : JSON mapping file: { "fields": { "post_title": "title", ... }, "meta": [{ "key": "...", "source": "..." }], "taxonomies": [{ "taxonomy": "...", "source": "..." }], "acf": { "field_name_or_key": "source_field" } }. Defaults to the suggested mapping.
@@ -300,6 +300,11 @@ class MigratePlus_CLI {
 		}
 		// Positions past the file's records are dropped.
 		$options['authors'] = MigratePlus_Mappings::clean_authors( $authors, $job->data['total'] );
+		$map                = array();
+		foreach ( isset( $given['author_map'] ) && is_array( $given['author_map'] ) ? $given['author_map'] : array() as $old => $one ) {
+			$map[ $old ] = $this->author_id( $job, is_scalar( $one ) ? (string) $one : '' );
+		}
+		$options['author_map'] = MigratePlus_Mappings::clean_author_map( $map );
 		// The flags are already in $options, from $given.
 		foreach ( $this->switches as $key ) {
 			$options[ $key ] = empty( $options[ $key ] ) ? 0 : 1;
@@ -411,6 +416,9 @@ class MigratePlus_CLI {
 	 * [--before=<date>]
 	 * : Only content published on or before this date (YYYY-MM-DD).
 	 *
+	 * [--posts=<ids>]
+	 * : Export exactly these posts by ID, comma separated, whatever their type. The type list and the status and date filters don't apply.
+	 *
 	 * [--[no-]acf]
 	 * : Include ACF fields. Defaults to the export defaults in Settings; --no-acf leaves them out.
 	 *
@@ -470,6 +478,7 @@ class MigratePlus_CLI {
 	 *     wp migrateplus export product,orders
 	 *     wp migrateplus export site-settings --output=settings.json
 	 *     wp migrateplus export product --gzip
+	 *     wp migrateplus export --posts=12,34,56
 	 *
 	 * @param array $args  Args.
 	 * @param array $assoc Assoc args.
@@ -496,6 +505,7 @@ class MigratePlus_CLI {
 		$export = MigratePlus_Exporter::sanitize_args(
 			array(
 				'post_type'               => implode( ',', array_diff( $kinds, $records ) ),
+				'post_ids'                => isset( $assoc['posts'] ) ? $assoc['posts'] : array(),
 				'statuses'                => isset( $assoc['status'] ) ? $assoc['status'] : $defaults['statuses'],
 				'after'                   => isset( $assoc['after'] ) ? $assoc['after'] : '',
 				'before'                  => isset( $assoc['before'] ) ? $assoc['before'] : '',
@@ -520,10 +530,8 @@ class MigratePlus_CLI {
 		if ( is_wp_error( $export ) ) {
 			WP_CLI::error( $export->get_error_message() );
 		}
-		// The admin only loads on admin requests; its class holds the rule the Export screen uses.
-		require_once MIGRATEPLUS_DIR . 'includes/class-migrateplus-admin.php';
 		foreach ( $export['post_types'] as $type ) {
-			if ( ! MigratePlus_Admin::exportable_type( $type ) ) {
+			if ( ! MigratePlus_Exporter::exportable_type( $type ) ) {
 				WP_CLI::error( sprintf( '"%s" can\'t be exported: Migrate Plus exports content types with an admin screen, other than ACF\'s settings and WooCommerce orders.', $type ) );
 			}
 		}
