@@ -343,7 +343,9 @@
 .migrateplus-dups-tools input[type="search"] { min-width: 220px; }
 .migrateplus-dups-title { overflow-wrap: anywhere; font-weight: 500; }
 .migrateplus-dups-table .migrateplus-badge { margin-right: 8px; }
-.migrateplus-badge-differs { background: var(--pp-tide-wash); color: var(--pp-tide-dark); }
+/* Scoped to the table: the base .migrateplus-badge rule comes later and would win otherwise. */
+.migrateplus-dups-table .migrateplus-badge-differs { background: var(--pp-buoy-wash); color: #7a5600; }
+.migrateplus-dups-table .migrateplus-badge-unchanged { background: var(--pp-tide-wash); color: var(--pp-tide-dark); }
 .migrateplus-dups-changes > td { background: var(--pp-deck); }
 .migrateplus-dups-rest { margin-top: 16px; }
 .migrateplus-media-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }

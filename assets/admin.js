@@ -1273,11 +1273,19 @@
 
 	function choiceOf( it ) {
 		const v = state.dups.choices.get( it.index );
-		return v && ( it.media ? MEDIA_CHOICES : POST_CHOICES ).some( ( c ) => c[ 0 ] === v ) ? v : defaultChoice( it );
+		return v && choicesFor( it ).some( ( c ) => c[ 0 ] === v ) ? v : defaultChoice( it );
 	}
 
 	const POST_CHOICES = [ [ 'update', __( 'Update', 'migrateplus' ) ], [ 'skip', __( 'Skip', 'migrateplus' ) ], [ 'copy', __( 'Import as copy', 'migrateplus' ) ] ];
 	const MEDIA_CHOICES = [ [ 'update', __( 'Update details', 'migrateplus' ) ], [ 'replace', __( 'Replace file', 'migrateplus' ) ], [ 'skip', __( 'Skip', 'migrateplus' ) ] ];
+
+	/** What can be done with a duplicate: a post or page the same as the one here has nothing to update. */
+	function choicesFor( it ) {
+		if ( it.media ) {
+			return MEDIA_CHOICES;
+		}
+		return it.changed ? POST_CHOICES : POST_CHOICES.filter( ( c ) => 'update' !== c[ 0 ] );
+	}
 
 	/** How many records each choice covers, the duplicates past the list included. */
 	function duplicateCounts() {
@@ -1474,7 +1482,7 @@
 									edit ? [ ' · ', createElement( 'a', { key: 'edit', href: edit, target: '_blank', rel: 'noopener', 'aria-label': sprintf( __( 'Edit “%s”', 'migrateplus' ), it.existing_title ) }, __( 'Edit', 'migrateplus' ) ) ] : null ) ),
 							createElement( 'td', null, matchedBy( it ) ),
 							createElement( 'td', null,
-								createElement( 'span', { className: 'migrateplus-badge' + ( it.changed ? ' migrateplus-badge-differs' : '' ) }, it.changed ? __( 'Differs', 'migrateplus' ) : __( 'Unchanged', 'migrateplus' ) ),
+								createElement( 'span', { className: 'migrateplus-badge ' + ( it.changed ? 'migrateplus-badge-differs' : 'migrateplus-badge-unchanged' ) }, it.changed ? __( 'Differs', 'migrateplus' ) : __( 'Unchanged', 'migrateplus' ) ),
 								it.changed || it.media ? createElement( 'button', { type: 'button', className: 'button-link migrateplus-dups-toggle', 'aria-expanded': open ? 'true' : 'false', 'aria-controls': id + '-changes', onClick: () => {
 									if ( open ) {
 										s.open.delete( it.index );
@@ -1498,7 +1506,7 @@
 								/* translators: %s: the title of a record in the file */
 								createElement( 'label', { className: 'screen-reader-text', htmlFor: id }, sprintf( __( 'What to do with “%s”', 'migrateplus' ), title ) ),
 								createElement( 'select', { id, value: choiceOf( it ), onChange: ( e ) => set( [ it ], e.target.value ) },
-									( it.media ? MEDIA_CHOICES : POST_CHOICES ).map( ( [ v, l ] ) => createElement( 'option', { key: v, value: v }, l ) ) ) ) );
+									choicesFor( it ).map( ( [ v, l ] ) => createElement( 'option', { key: v, value: v }, l ) ) ) ) );
 						return open ? [ row, createElement( 'tr', { key: it.index + '-changes', className: 'migrateplus-dups-changes' },
 							createElement( 'td', { colSpan: 6, id: id + '-changes' },
 								it.media ? createElement( MediaCompare, { it } ) : null,

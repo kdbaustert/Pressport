@@ -356,6 +356,7 @@ describe('Duplicates', () => {
 
     assert.equal(env.$('label[for="migrateplus-dup-0"]').textContent, 'What to do with “Dune”')
     assert.deepEqual([...choice(env, 0).options].map(o => o.textContent), ['Update', 'Skip', 'Import as copy'])
+    assert.deepEqual([...choice(env, 1).options].map(o => o.textContent), ['Skip', 'Import as copy'])
     assert.deepEqual([...choice(env, 4).options].map(o => o.textContent), ['Update details', 'Replace file', 'Skip'])
     assert.equal(env.$('.migrateplus-stepper'), null)
   })
