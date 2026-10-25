@@ -126,10 +126,9 @@ describe('modal focus', () => {
     return { env, opener }
   }
 
-  it('gives focus back to the new copy of the control that opened it', async () => {
+  it('gives focus back to the control that opened it', async () => {
     const { env, opener } = await bulkDelete(env => env.$('#migrateplus-history-search'))
-    assert.notEqual(env.$('#migrateplus-history-search'), opener)
-    assert.equal(env.document.activeElement, env.$('#migrateplus-history-search'))
+    assert.equal(env.document.activeElement, opener)
   })
 
   it('falls back to the page heading when that control is gone', async () => {

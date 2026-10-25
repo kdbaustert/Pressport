@@ -212,11 +212,11 @@ class MigratePlus_Settings {
 				'request_timeout'     => array( 'number', __( 'Download timeout', 'migrateplus' ), array( 5, 300 ), __( 'Seconds to wait for each file Migrate Plus downloads. Values under 60 count as 60.', 'migrateplus' ), __( 'seconds', 'migrateplus' ) ),
 				'max_remote_size'     => array( 'number', __( 'Remote file size limit', 'migrateplus' ), array( 1, 2048 ), __( 'Only for custom sources added with the migrateplus_sources filter that read their file from a URL: the largest file they may download. Uploaded JSON files are limited by the server\'s upload size instead.', 'migrateplus' ), __( 'MB', 'migrateplus' ) ),
 				'max_media_size'      => array( 'number', __( 'Image and media size limit', 'migrateplus' ), array( 0, 2048 ), __( 'Skip images and media files larger than this when importing. 0 means no limit.', 'migrateplus' ), __( 'MB', 'migrateplus' ) ),
-				'allow_local_sources' => array( 'checkbox', __( 'Local sources', 'migrateplus' ), __( 'Allow downloads from localhost, private network addresses and non-standard ports', 'migrateplus' ), __( 'Turn this on to migrate from a local dev site (for example http://oldsite.test:8888). WordPress blocks these addresses by default; this only relaxes the rule for MigratePlus\'s own requests.', 'migrateplus' ) ),
+				'allow_local_sources' => array( 'checkbox', __( 'Local sources', 'migrateplus' ), __( 'Allow downloads from localhost, private network addresses and non-standard ports', 'migrateplus' ), __( 'Turn this on to migrate from a local dev site (for example http://oldsite.test:8888). WordPress blocks these addresses by default; this only relaxes the rule for Migrate Plus\'s own requests.', 'migrateplus' ) ),
 			),
 			'migrateplus_housekeeping' => array(
 				'job_retention_days'       => array( 'number', __( 'Keep import history', 'migrateplus' ), array( 0, 3650 ), __( 'Delete history entries older than this. 0 keeps them forever. Imported content is never touched, but a deleted entry can no longer be rolled back.', 'migrateplus' ), __( 'days', 'migrateplus' ) ),
-				'remove_meta_on_uninstall' => array( 'checkbox', __( 'On uninstall', 'migrateplus' ), __( 'Also remove MigratePlus\'s tracking data from imported posts', 'migrateplus' ), __( 'History and settings are always removed on uninstall. The tracking data is what lets a reinstall skip or update posts it already imported.', 'migrateplus' ) ),
+				'remove_meta_on_uninstall' => array( 'checkbox', __( 'On uninstall', 'migrateplus' ), __( 'Also remove Migrate Plus\'s tracking data from imported posts', 'migrateplus' ), __( 'History and settings are always removed on uninstall. The tracking data is what lets a reinstall skip or update posts it already imported.', 'migrateplus' ) ),
 			),
 		);
 		if ( ! MigratePlus_Util::zlib_available() ) {
@@ -233,6 +233,8 @@ class MigratePlus_Settings {
 					$section,
 					array(
 						'key'       => $key,
+						'title'     => $def[1],
+						'type'      => $def[0],
 						'label_for' => in_array( $def[0], array( 'checkbox', 'checkboxes' ), true ) ? null : 'migrateplus_' . $key,
 						'choices'   => isset( $def[2] ) ? $def[2] : null,
 						'help'      => isset( $def[3] ) ? $def[3] : '',
@@ -288,7 +290,7 @@ class MigratePlus_Settings {
 	 */
 	public static function field_number( $args ) {
 		printf(
-			'<input type="number" class="small-text" id="migrateplus_%1$s" name="%2$s[%1$s]" value="%3$d" min="%4$d" max="%5$d"> %6$s',
+			'<span class="migrateplus-number"><input type="number" id="migrateplus_%1$s" name="%2$s[%1$s]" value="%3$d" min="%4$d" max="%5$d"> %6$s</span>',
 			esc_attr( $args['key'] ),
 			esc_attr( self::OPTION ),
 			(int) self::get( $args['key'] ),
@@ -303,14 +305,16 @@ class MigratePlus_Settings {
 	 * @param array $args Field args.
 	 */
 	public static function field_checkbox( $args ) {
+		// The switch the Import and Export screens use: the field title as its label, what it does underneath.
+		$what = rtrim( (string) $args['choices'], '.' ) . '.';
 		printf(
-			'<label><input type="checkbox" name="%2$s[%1$s]" value="1"%3$s> %4$s</label>',
+			'<div class="migrateplus-toggle"><input type="checkbox" class="migrateplus-switch" id="migrateplus_%1$s" name="%2$s[%1$s]" value="1"%3$s><label for="migrateplus_%1$s">%4$s<span class="migrateplus-help">%5$s</span></label></div>',
 			esc_attr( $args['key'] ),
 			esc_attr( self::OPTION ),
 			checked( (int) self::get( $args['key'] ), 1, false ),
-			esc_html( $args['choices'] )
+			esc_html( $args['title'] ),
+			esc_html( trim( $what . ' ' . $args['help'] ) )
 		);
-		self::help( $args );
 	}
 
 	/**
@@ -318,10 +322,10 @@ class MigratePlus_Settings {
 	 */
 	public static function field_checkboxes( $args ) {
 		$value = (array) self::get( $args['key'] );
-		echo '<fieldset>';
+		printf( '<fieldset class="migrateplus-chips"><legend class="screen-reader-text">%s</legend>', esc_html( $args['title'] ) );
 		foreach ( $args['choices'] as $option => $label ) {
 			printf(
-				'<label><input type="checkbox" name="%2$s[%1$s][]" value="%3$s"%4$s> %5$s</label><br>',
+				'<label class="migrateplus-check-chip"><input type="checkbox" name="%2$s[%1$s][]" value="%3$s"%4$s><span>%5$s</span></label>',
 				esc_attr( $args['key'] ),
 				esc_attr( self::OPTION ),
 				esc_attr( $option ),
@@ -351,7 +355,7 @@ class MigratePlus_Settings {
 	 */
 	protected static function help( $args ) {
 		if ( $args['help'] ) {
-			echo '<p class="description">' . esc_html( $args['help'] ) . '</p>';
+			echo '<p class="migrateplus-field-help">' . esc_html( $args['help'] ) . '</p>';
 		}
 	}
 
@@ -410,23 +414,62 @@ class MigratePlus_Settings {
 		}
 		?>
 		<div class="wrap migrateplus-wrap migrateplus-settings">
-			<h1><?php esc_html_e( 'Migrate Plus Settings', 'migrateplus' ); ?></h1>
+			<h1 class="wp-heading-inline"><?php esc_html_e( 'Settings', 'migrateplus' ); ?></h1>
+			<hr class="wp-header-end">
+			<p class="migrateplus-intro"><?php esc_html_e( 'Starting values for imports and exports, who can run them, and limits for the files Migrate Plus downloads. Each import and export can still change its own options.', 'migrateplus' ); ?></p>
 			<?php settings_errors(); ?>
-			<div class="migrateplus-settings-layout">
-				<form action="options.php" method="post" class="migrateplus-card">
+			<div class="migrateplus-settings-layout migrateplus-app">
+				<form action="options.php" method="post">
 					<?php
 					settings_fields( self::GROUP );
-					do_settings_sections( self::PAGE );
-					submit_button();
+					self::render_sections();
 					?>
+					<div class="migrateplus-actionbar">
+						<span class="migrateplus-muted"><?php esc_html_e( 'Applies to imports and exports started after you save.', 'migrateplus' ); ?></span>
+						<?php submit_button( null, 'primary migrateplus-btn-lg', 'submit', false ); ?>
+					</div>
 				</form>
-				<aside class="migrateplus-card migrateplus-status">
+				<aside class="migrateplus-panel migrateplus-status">
 					<h2><?php esc_html_e( 'Server check', 'migrateplus' ); ?></h2>
 					<?php self::render_status(); ?>
 				</aside>
 			</div>
 		</div>
 		<?php
+	}
+
+	/**
+	 * Each settings section as a panel, like the other screens, instead of
+	 * do_settings_sections()'s one long form table. Fields keep the Settings API
+	 * callbacks and names, so what is saved is unchanged.
+	 */
+	protected static function render_sections() {
+		global $wp_settings_sections, $wp_settings_fields;
+		foreach ( isset( $wp_settings_sections[ self::PAGE ] ) ? (array) $wp_settings_sections[ self::PAGE ] : array() as $section ) {
+			$fields = isset( $wp_settings_fields[ self::PAGE ][ $section['id'] ] ) ? (array) $wp_settings_fields[ self::PAGE ][ $section['id'] ] : array();
+			echo '<section class="migrateplus-panel migrateplus-settings-section">';
+			echo '<div class="migrateplus-section-head"><h2>' . esc_html( $section['title'] ) . '</h2>';
+			if ( $section['callback'] ) {
+				call_user_func( $section['callback'], $section );
+			}
+			echo '</div><div class="migrateplus-fields">';
+			foreach ( $fields as $field ) {
+				// A toggle carries its own label; every other control gets the field title above it.
+				if ( 'checkbox' === $field['args']['type'] ) {
+					call_user_func( $field['callback'], $field['args'] );
+					continue;
+				}
+				echo '<div class="migrateplus-field">';
+				if ( ! empty( $field['args']['label_for'] ) ) {
+					printf( '<label class="migrateplus-field-label" for="%s">%s</label>', esc_attr( $field['args']['label_for'] ), esc_html( $field['title'] ) );
+				} else {
+					printf( '<span class="migrateplus-field-label">%s</span>', esc_html( $field['title'] ) );
+				}
+				call_user_func( $field['callback'], $field['args'] );
+				echo '</div>';
+			}
+			echo '</div></section>';
+		}
 	}
 
 	/**

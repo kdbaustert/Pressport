@@ -4,10 +4,18 @@
 // response back, or with `offline` or `hang`. The window's timers are fake:
 // admin.js debounces the export count, retries a busy run and times requests
 // out, and those only fire on clock.tick().
+//
+// WordPress gives admin.js its React as wp.element. The tests build that from
+// React 18's UMD builds, the last React with them; the development builds
+// print React's warnings.
 import { readFileSync } from 'node:fs'
 import { JSDOM } from 'jsdom'
 
-const source = readFileSync(new URL('../../assets/admin.js', import.meta.url), 'utf8')
+const read = path => readFileSync(new URL(path, import.meta.url), 'utf8')
+const source = read('../../assets/admin.js')
+// By path: the UMD builds are not in React's package exports.
+const react = read('../../node_modules/react/umd/react.development.js')
+const reactDom = read('../../node_modules/react-dom/umd/react-dom.development.js')
 const site = 'https://example.test'
 
 const defaults = {
@@ -184,6 +192,13 @@ export function boot({ data = {}, routes = {}, prompt } = {}) {
   const prompts = []
   const clock = fakeClock()
 
+  // Before the fake timers go in: React's scheduler keeps the setTimeout it finds.
+  window.eval(react)
+  window.eval(reactDom)
+  // What react-dom/client sets, so createRoot doesn't warn that it came from react-dom.
+  window.ReactDOM.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED.usingClientEntryPoint = true
+  window.wp = { element: { ...window.React, ...window.ReactDOM } }
+
   window.MIGRATEPLUS_DATA = { ...bootstrap(), ...data }
   window.confirm = () => nativeDialogs.push('confirm')
   window.alert = () => nativeDialogs.push('alert')
@@ -248,6 +263,7 @@ export function boot({ data = {}, routes = {}, prompt } = {}) {
   window.eval(source + '\n//# sourceURL=assets/admin.js')
 
   const event = (node, type, init) => node.dispatchEvent(new window.Event(type, { bubbles: true, cancelable: true, ...init }))
+  const click = node => node.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }))
   const actions = () => [...doc.querySelectorAll('.migrateplus-modal-actions > *')]
 
   const env = {
@@ -266,15 +282,17 @@ export function boot({ data = {}, routes = {}, prompt } = {}) {
     async flush() {
       for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r))
     },
-    click: node => node.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true })),
+    click,
     // Whether leaving the page now would ask first.
     leaveWarns: () => !window.dispatchEvent(new window.Event('beforeunload', { cancelable: true })),
+    // As a user does it: React reads a checkbox's change from the click.
     check(box, on = true) {
-      box.checked = on
-      event(box, 'change')
+      if (box.checked !== on) click(box)
     },
+    // Through the prototype's setter, as typing does: React ignores a value set
+    // on the node itself, which is how it tells its own writes apart.
     type(input, value) {
-      input.value = value
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(input, value)
       event(input, 'input')
     },
     submit: form => event(form, 'submit'),

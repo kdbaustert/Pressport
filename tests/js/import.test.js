@@ -243,11 +243,14 @@ describe('Import', () => {
     env.click(env.modal.button('Hide'))
     for (const id of ['migrateplus-run-toggle', 'migrateplus-log-filter-error']) {
       const before = env.$('#' + id)
+      const runs = env.sent('run').length
       before.focus()
       env.clock.tick(3000)
       await env.flush()
-      assert.notEqual(env.$('#' + id), before, 'not re-rendered')
-      assert.equal(env.document.activeElement, env.$('#' + id))
+      // The retry gets a batch, and the next request finds the lock again.
+      assert.equal(env.sent('run').length, runs + 2)
+      assert.equal(env.$('#' + id), before)
+      assert.equal(env.document.activeElement, before)
     }
   })
 })

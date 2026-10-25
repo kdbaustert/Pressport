@@ -94,7 +94,7 @@ class MigratePlus_Admin {
 		if ( MigratePlus_Settings::PAGE === $page ) {
 			return;
 		}
-		wp_enqueue_script( 'migrateplus', MIGRATEPLUS_URL . 'assets/admin.js', array(), MIGRATEPLUS_VERSION, true );
+		wp_enqueue_script( 'migrateplus', MIGRATEPLUS_URL . 'assets/admin.js', array( 'wp-element' ), MIGRATEPLUS_VERSION, true );
 		$views = array(
 			self::HISTORY_SLUG => 'history',
 			self::EXPORT_SLUG  => 'export',

@@ -1,13 +1,23 @@
-/* MigratePlus admin screen. Plain JS, no build step. */
+/* Migrate Plus admin screen. React from wp-element, written with createElement so there is no build step. */
 ( function () {
 	'use strict';
 
 	const D = window.MIGRATEPLUS_DATA;
-	const root = document.getElementById( 'migrateplus-app' );
-	if ( ! D || ! root ) {
+	const mount = document.getElementById( 'migrateplus-app' );
+	const wpElement = window.wp && window.wp.element;
+	if ( ! D || ! mount || ! wpElement ) {
 		return;
 	}
+	const { createElement, createPortal, Fragment, useLayoutEffect, useRef, useState } = wpElement;
 
+	// Handlers read the DOM straight after render(), so it has to commit before it returns. A
+	// createRoot root only does that inside flushSync. WordPress before 6.3 is missing one of
+	// them, and its legacy render() is synchronous anyway.
+	const concurrent = !! ( wpElement.createRoot && wpElement.flushSync );
+	const flushSync = concurrent ? wpElement.flushSync : ( fn ) => fn();
+	const reactRoot = concurrent ? wpElement.createRoot( mount ) : null;
+
+	// Handlers change this and call render(). State only one component uses stays in that component.
 	const state = {
 		tab: [ 'history', 'export', 'replace' ].includes( D.view ) ? D.view : 'new',
 		step: 'source',
@@ -17,23 +27,49 @@
 		fields: [],
 		mapping: { fields: {}, meta: [], taxonomies: [], acf: {} },
 		options: Object.assign( {}, D.defaults ),
+		suggested: {},
 		running: false,
 		paused: false,
 		results: [],
 		error: '',
+		sourceError: '', // A failed preview, shown above the source form as it was typed.
 		busy: false,
 		fileMode: {}, // 'source:fieldKey' => 'upload' | 'url'
 		modalHidden: false, // user chose to watch the import in the page instead of the modal
 		runClock: null, // { t, processed } when the current run started, for the ETA
 		logFilter: 'all',
 		logQuery: '',
+		review: null,
 		historyQuery: '',
-		historyJobs: null,
+		historyJobs: null, // null while loading.
+		historyError: '',
+		historyExports: null,
+		exportsError: '',
+		picked: { job: new Set(), export: new Set() }, // History rows ticked for bulk delete.
 		direct: false, // A MigratePlus export imported straight from the upload screen, without the mapping step.
 		savedMappings: D.mappings || [], // Saved mappings for JSON that is not a MigratePlus export.
 		savedPick: '', // The saved mapping chosen in the select, or offered because the file has its fields.
 		savedName: '',
 		savedNotice: null, // { type, text } shown on the saved mappings panel.
+		exportArgs: Object.assign( {}, D.exportDefaults, {
+			statuses: ( D.exportDefaults.statuses || [ 'publish' ] ).slice(),
+			post_types: ( D.exportDefaults.post_types || [ 'post' ] ).slice(),
+		} ),
+		exportCount: { text: 'Counting…', warn: false, empty: false },
+		lastExport: null,
+		replace: {
+			search: '',
+			replace: '',
+			tables: ( D.tables || [] ).map( ( t ) => t.name ),
+			case_insensitive: 0,
+			whole_urls: 1,
+			guids: 0,
+			dry_run: 1,
+			result: null,
+			problem: '',
+		},
+		replaceRuns: null, // null while loading.
+		replaceRunsError: '',
 	};
 
 	// Helpers
@@ -44,40 +80,15 @@
 	 * and control characters before it, so they are dropped here too before reading the scheme.
 	 */
 	function safeUrl( url ) {
-		const s = String( url ).replace( /[\t\n\r]/g, '' ).replace( /^[\u0000-\u0020]+/, '' );
+		const s = String( url ).replace( /[\t\n\r]/g, '' ).replace( /^[\u0000- ]+/, '' );
 		const scheme = /^([a-z][a-z0-9+.-]*):/i.exec( s );
 		return ! scheme || /^https?$/i.test( scheme[ 1 ] ) ? url : null;
 	}
 
-	function el( tag, attrs, children ) {
-		const node = document.createElement( tag );
-		Object.entries( attrs || {} ).forEach( ( [ k, v ] ) => {
-			if ( v === null || v === undefined || v === false ) {
-				return;
-			}
-			if ( k === 'class' ) {
-				node.className = v;
-			} else if ( k === 'text' ) {
-				node.textContent = v;
-			} else if ( k.startsWith( 'on' ) && typeof v === 'function' ) {
-				node.addEventListener( k.slice( 2 ), v );
-			} else if ( k === 'value' ) {
-				node.value = v;
-			} else if ( k === 'checked' || k === 'selected' || k === 'disabled' ) {
-				node[ k ] = !! v;
-			} else if ( ( k === 'href' || k === 'src' ) && null === safeUrl( v ) ) {
-				return;
-			} else {
-				node.setAttribute( k, v === true ? '' : v );
-			}
-		} );
-		( Array.isArray( children ) ? children : [ children ] ).forEach( ( c ) => {
-			if ( c === null || c === undefined || c === false ) {
-				return;
-			}
-			node.appendChild( typeof c === 'string' || typeof c === 'number' ? document.createTextNode( String( c ) ) : c );
-		} );
-		return node;
+	/** Component state whose setter redraws before it returns, like render(). */
+	function useImmediateState( initial ) {
+		const [ value, setValue ] = useState( initial );
+		return [ value, ( next ) => flushSync( () => setValue( next ) ) ];
 	}
 
 	function apiBody( action, data ) {
@@ -187,8 +198,7 @@
 	// Progress modal
 
 	/**
-	 * A single reusable modal with a progress bar. Lives outside #migrateplus-app so
-	 * re-renders of the page never tear it down.
+	 * A single reusable modal with a progress bar, drawn by <Modal> into document.body.
 	 *
 	 * modal.open( { title, message, percent, detail, stats, actions, tone, icon, dismissible } )
 	 * modal.update( { ...same keys } )   percent: number 0-100, or null for indeterminate.
@@ -196,62 +206,108 @@
 	 *
 	 * The header icon follows the tone (spinner while working, check on success, pause, error);
 	 * icon: 'file' overrides it. The primary action is always placed last (rightmost).
+	 * open( { kind: 'run' } ) shows the running import, worked out from the job on every render.
 	 */
 	const modal = ( function () {
-		let overlay = null;
-		let parts = {};
-		let opts = {};
+		let opts = null;
+		let opened = 0; // Bumped by open(), so the dialog moves focus to its default button again.
 		let lastFocus = null;
 		let lastFocusId = '';
-		// Disabled and hidden controls can't take focus; focusing one drops it to the page behind.
-		const FOCUSABLE = 'button:not(:disabled):not([hidden]), a[href]:not([hidden])';
 
-		const ICONS = { success: 'dashicons-yes', error: 'dashicons-warning', paused: 'dashicons-controls-pause', file: 'dashicons-database-import', danger: 'dashicons-trash', question: 'dashicons-editor-help', working: '' };
-
-		function build() {
-			parts.icon = el( 'span', { class: 'migrateplus-modal-icon', 'aria-hidden': 'true' }, el( 'span', { class: 'dashicons' } ) );
-			// Announced when it changes, e.g. to "Import complete"; the message changes every batch, so it is not.
-			parts.title = el( 'h2', { class: 'migrateplus-modal-title', id: 'migrateplus-modal-title', 'aria-live': 'polite' } );
-			parts.message = el( 'p', { class: 'migrateplus-modal-message', id: 'migrateplus-modal-message' } );
-			parts.close = el( 'button', { type: 'button', class: 'migrateplus-modal-close', 'aria-label': 'Close', title: 'Close', onclick: dismiss }, el( 'span', { class: 'dashicons dashicons-no-alt', 'aria-hidden': 'true' } ) );
-			parts.head = el( 'header', { class: 'migrateplus-modal-head' }, [
-				parts.icon,
-				el( 'div', { class: 'migrateplus-modal-heading' }, [ parts.title, parts.message ] ),
-				parts.close,
-			] );
-			parts.fill = el( 'span', { class: 'migrateplus-modal-fill' } );
-			parts.obar = outcomeBar( {}, 0, {} );
-			parts.bar = el( 'div', { class: 'migrateplus-progress migrateplus-modal-bar', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-labelledby': 'migrateplus-modal-title' }, parts.fill );
-			parts.percent = el( 'span', { class: 'migrateplus-modal-percent' } );
-			parts.detail = el( 'span', { class: 'migrateplus-modal-detail' } );
-			parts.meta = el( 'div', { class: 'migrateplus-modal-meta' }, [ parts.percent, parts.detail ] );
-			parts.stats = el( 'ul', { class: 'migrateplus-legend migrateplus-modal-stats' } );
-			parts.note = el( 'p', { class: 'migrateplus-modal-note', 'aria-live': 'polite' } );
-			parts.actions = el( 'div', { class: 'migrateplus-modal-actions' } );
-			parts.dialog = el( 'div', { class: 'migrateplus-modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'migrateplus-modal-title', 'aria-describedby': 'migrateplus-modal-message' }, [
-				parts.head, parts.meta, parts.bar, parts.obar, parts.stats, parts.note, parts.actions,
-			] );
-			overlay = el( 'div', { class: 'migrateplus-modal-overlay' }, parts.dialog );
-			overlay.addEventListener( 'keydown', onKey );
-			document.body.appendChild( overlay );
+		function open( next ) {
+			if ( ! opts ) {
+				lastFocus = document.activeElement;
+				lastFocusId = lastFocus ? lastFocus.id : '';
+				document.body.classList.add( 'migrateplus-modal-open' );
+			}
+			opts = Object.assign( {}, next );
+			opened++;
+			render();
 		}
+
+		function update( next ) {
+			if ( ! opts ) {
+				return;
+			}
+			opts = Object.assign( opts, next || {} );
+			render();
+		}
+
+		function close() {
+			if ( ! opts ) {
+				return;
+			}
+			opts = null;
+			document.body.classList.remove( 'migrateplus-modal-open' );
+			render();
+			// A control that is gone, or disabled now, can't take focus back: then one with its id, or the page heading.
+			let back = lastFocus && document.body.contains( lastFocus ) && ! lastFocus.disabled ? lastFocus : null;
+			back = back || ( lastFocusId && document.getElementById( lastFocusId ) ) || document.querySelector( '.migrateplus-wrap h1' );
+			if ( back ) {
+				if ( 'H1' === back.tagName ) {
+					back.setAttribute( 'tabindex', '-1' );
+				}
+				back.focus( { preventScroll: true } );
+			}
+			lastFocus = null;
+			lastFocusId = '';
+		}
+
+		function current() {
+			return opts && 'run' === opts.kind ? runModalOptions() : opts;
+		}
+
+		return {
+			open,
+			update,
+			close,
+			current,
+			opened: () => opened,
+			isOpen: () => !! opts,
+			kind: () => ( opts && opts.kind ) || '',
+			dismissible: () => !! ( opts && current().dismissible ),
+		};
+	}() );
+
+	// Disabled and hidden controls can't take focus; focusing one drops it to the page behind.
+	const FOCUSABLE = 'button:not(:disabled):not([hidden]), a[href]:not([hidden])';
+
+	const ICONS = { success: 'dashicons-yes', error: 'dashicons-warning', paused: 'dashicons-controls-pause', file: 'dashicons-database-import', danger: 'dashicons-trash', question: 'dashicons-editor-help', working: '' };
+
+	function Modal( { o } ) {
+		const dialog = useRef( null );
+		const buttons = useRef( null );
+		const status = o.icon || { success: 'success', error: 'error', paused: 'paused' }[ o.tone ] || 'working';
+		const indeterminate = o.percent === null || o.percent === undefined;
+		const pct = indeterminate ? 0 : Math.max( 0, Math.min( 100, o.percent ) );
+		// A soft moving sheen on the bar while work is in progress.
+		const running = 'working' === status && ! indeterminate && pct < 100;
+		// Primary action last, so it sits on the right.
+		const actions = ( o.actions || [] ).filter( ( a ) => ! a.primary ).concat( ( o.actions || [] ).filter( ( a ) => a.primary ) );
+		const sig = JSON.stringify( actions.map( ( a ) => [ a.label, a.primary, a.danger, a.href, a.disabled ] ) );
+
+		// Focus the default button when the dialog opens and when its buttons change, not on every tick.
+		useLayoutEffect( () => {
+			const target = buttons.current.querySelector( '.button-primary:not(:disabled)' ) || buttons.current.querySelector( FOCUSABLE ) || dialog.current;
+			target.focus( { preventScroll: true } );
+		}, [ sig, modal.opened() ] );
 
 		/** Escape and the ✕ button do the same thing: the caller's onDismiss, or close. */
-		function dismiss() {
-			if ( typeof opts.onDismiss === 'function' ) {
-				opts.onDismiss();
+		const dismiss = () => {
+			if ( typeof o.onDismiss === 'function' ) {
+				o.onDismiss();
 			} else {
-				close();
+				modal.close();
 			}
-		}
+		};
 
-		function onKey( e ) {
-			if ( e.key === 'Escape' && opts.dismissible ) {
+		const onKeyDown = ( e ) => {
+			if ( e.key === 'Escape' && o.dismissible ) {
 				e.preventDefault();
 				dismiss();
 			} else if ( e.key === 'Tab' ) {
 				// Keep focus inside the dialog.
-				const focusables = parts.dialog.querySelectorAll( FOCUSABLE );
+				const focusables = dialog.current.querySelectorAll( FOCUSABLE );
 				if ( ! focusables.length ) {
 					e.preventDefault();
 					return;
@@ -266,143 +322,53 @@
 					first.focus();
 				}
 			}
-		}
-
-		function update( next ) {
-			if ( ! overlay ) {
-				return;
-			}
-			opts = Object.assign( opts, next || {} );
-			parts.title.textContent = opts.title || '';
-			parts.message.textContent = opts.message || '';
-			parts.message.hidden = ! opts.message;
-
-			const status = opts.icon || { success: 'success', error: 'error', paused: 'paused' }[ opts.tone ] || 'working';
-			parts.dialog.setAttribute( 'data-status', status );
-			parts.icon.firstChild.className = 'dashicons ' + ( ICONS[ status ] || '' );
-			parts.close.hidden = ! opts.dismissible;
-
-			const indeterminate = opts.percent === null || opts.percent === undefined;
-			const pct = indeterminate ? 0 : Math.max( 0, Math.min( 100, opts.percent ) );
-			parts.bar.classList.toggle( 'is-indeterminate', indeterminate );
-			parts.bar.classList.toggle( 'is-error', opts.tone === 'error' );
-			parts.bar.classList.toggle( 'is-paused', opts.tone === 'paused' );
-			parts.bar.classList.toggle( 'is-success', opts.tone === 'success' );
-			parts.fill.style.width = indeterminate ? '' : pct + '%';
-			if ( indeterminate ) {
-				parts.bar.removeAttribute( 'aria-valuenow' );
-			} else {
-				parts.bar.setAttribute( 'aria-valuenow', Math.round( pct ) );
-			}
-			parts.percent.textContent = indeterminate || opts.tone === 'error' ? '' : Math.floor( pct ) + '%';
-			// Outcome mode: the bar is split into created / updated / skipped / failed.
-			// bar: false hides the progress bar and its numbers (e.g. for a confirmation).
-			parts.bar.hidden = !! opts.outcome || false === opts.bar;
-			parts.obar.hidden = ! opts.outcome;
-			parts.meta.hidden = false === opts.bar;
-			if ( opts.outcome ) {
-				setOutcomeBar( parts.obar, opts.outcome.stats, opts.outcome.total, { size: 'lg', indeterminate, tone: opts.tone, label: opts.title } );
-			}
-			// A soft moving sheen on the bar while work is in progress.
-			const running = 'working' === status && ! indeterminate && pct < 100;
-			parts.bar.classList.toggle( 'is-running', running );
-			parts.obar.classList.toggle( 'is-running', running );
-			parts.detail.textContent = opts.detail || '';
-
-			parts.stats.innerHTML = '';
-			( opts.stats || [] ).forEach( ( s ) => parts.stats.appendChild(
-				el( 'li', { class: 'is-' + s.key + ( Number( s.value ) ? '' : ' is-zero' ) }, [ el( 'strong', { text: ( Number( s.value ) || 0 ).toLocaleString() } ), el( 'span', { text: s.label } ) ] )
-			) );
-			parts.stats.hidden = ! ( opts.stats && opts.stats.length );
-
-			parts.note.textContent = opts.note || '';
-			parts.note.hidden = ! opts.note;
-			parts.note.classList.toggle( 'is-error', opts.tone === 'error' );
-
-			// Primary action last, so it sits on the right.
-			const actions = ( opts.actions || [] ).filter( ( a ) => ! a.primary ).concat( ( opts.actions || [] ).filter( ( a ) => a.primary ) );
-
-			// Only rebuild buttons when they change, so focus is not lost on every tick.
-			const sig = JSON.stringify( actions.map( ( a ) => [ a.label, a.primary, a.danger, a.href, a.disabled ] ) );
-			if ( sig !== parts.actionsSig ) {
-				parts.actionsSig = sig;
-				const hadFocus = parts.dialog.contains( document.activeElement );
-				parts.actions.innerHTML = '';
-				actions.forEach( ( a ) => {
-					const cls = 'button' + ( a.primary ? ' button-primary' : '' ) + ( a.danger ? ' migrateplus-danger' : '' );
-					parts.actions.appendChild( a.href
-						? el( 'a', { class: cls, href: a.href, text: a.label } )
-						: el( 'button', { type: 'button', class: cls, text: a.label, disabled: a.disabled, onclick: a.onClick } ) );
-				} );
-				if ( hadFocus || ! parts.dialog.contains( document.activeElement ) ) {
-					focusDefault();
-				}
-			} else {
-				// Handlers may close over fresh state; refresh them without rebuilding.
-				Array.from( parts.actions.children ).forEach( ( node, i ) => {
-					const a = actions[ i ];
-					if ( a && ! a.href ) {
-						node.onclick = a.onClick;
-					}
-				} );
-			}
-			parts.actions.hidden = ! actions.length;
-		}
-
-		function focusDefault() {
-			const target = parts.actions.querySelector( '.button-primary:not(:disabled)' ) || parts.actions.querySelector( FOCUSABLE ) || parts.dialog;
-			if ( target === parts.dialog ) {
-				parts.dialog.setAttribute( 'tabindex', '-1' );
-			}
-			target.focus( { preventScroll: true } );
-		}
-
-		function open( next ) {
-			if ( ! overlay ) {
-				lastFocus = document.activeElement;
-				lastFocusId = lastFocus ? lastFocus.id : '';
-				build();
-				document.body.classList.add( 'migrateplus-modal-open' );
-			}
-			opts = {};
-			parts.actionsSig = null;
-			update( next );
-			if ( ! parts.dialog.contains( document.activeElement ) ) {
-				focusDefault();
-			}
-		}
-
-		function close() {
-			if ( ! overlay ) {
-				return;
-			}
-			overlay.remove();
-			overlay = null;
-			parts = {};
-			opts = {};
-			document.body.classList.remove( 'migrateplus-modal-open' );
-			// render() often replaces the control that opened the modal: then its new copy, or the page heading.
-			let back = lastFocus && document.body.contains( lastFocus ) ? lastFocus : null;
-			back = back || ( lastFocusId && document.getElementById( lastFocusId ) ) || document.querySelector( '.migrateplus-wrap h1' );
-			if ( back ) {
-				if ( 'H1' === back.tagName ) {
-					back.setAttribute( 'tabindex', '-1' );
-				}
-				back.focus( { preventScroll: true } );
-			}
-			lastFocus = null;
-			lastFocusId = '';
-		}
-
-		return {
-			open,
-			update,
-			close,
-			isOpen: () => !! overlay,
-			kind: () => opts.kind || '',
-			dismissible: () => !! opts.dismissible,
 		};
-	}() );
+
+		const barClass = 'migrateplus-progress migrateplus-modal-bar' +
+			( indeterminate ? ' is-indeterminate' : '' ) +
+			( 'error' === o.tone ? ' is-error' : '' ) +
+			( 'paused' === o.tone ? ' is-paused' : '' ) +
+			( 'success' === o.tone ? ' is-success' : '' ) +
+			( running ? ' is-running' : '' );
+
+		return createPortal( createElement( 'div', { className: 'migrateplus-modal-overlay', onKeyDown },
+			createElement( 'div', { ref: dialog, className: 'migrateplus-modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'migrateplus-modal-title', 'aria-describedby': 'migrateplus-modal-message', 'data-status': status, tabIndex: -1 },
+				createElement( 'header', { className: 'migrateplus-modal-head' },
+					createElement( 'span', { className: 'migrateplus-modal-icon', 'aria-hidden': 'true' }, createElement( 'span', { className: 'dashicons ' + ( ICONS[ status ] || '' ) } ) ),
+					createElement( 'div', { className: 'migrateplus-modal-heading' },
+						// Announced when it changes, e.g. to "Import complete"; the message changes every batch, so it is not.
+						createElement( 'h2', { className: 'migrateplus-modal-title', id: 'migrateplus-modal-title', 'aria-live': 'polite' }, o.title || '' ),
+						createElement( 'p', { className: 'migrateplus-modal-message', id: 'migrateplus-modal-message', hidden: ! o.message }, o.message || '' )
+					),
+					createElement( 'button', { type: 'button', className: 'migrateplus-modal-close', 'aria-label': 'Close', title: 'Close', hidden: ! o.dismissible, onClick: dismiss },
+						createElement( 'span', { className: 'dashicons dashicons-no-alt', 'aria-hidden': 'true' } ) )
+				),
+				// bar: false hides the progress bar and its numbers (e.g. for a confirmation).
+				createElement( 'div', { className: 'migrateplus-modal-meta', hidden: false === o.bar },
+					createElement( 'span', { className: 'migrateplus-modal-percent' }, indeterminate || o.tone === 'error' ? '' : Math.floor( pct ) + '%' ),
+					createElement( 'span', { className: 'migrateplus-modal-detail' }, o.detail || '' )
+				),
+				createElement( 'div', { className: barClass, role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': indeterminate ? null : Math.round( pct ), 'aria-labelledby': 'migrateplus-modal-title', hidden: !! o.outcome || false === o.bar },
+					createElement( 'span', { className: 'migrateplus-modal-fill', style: indeterminate ? null : { width: pct + '%' } } ) ),
+				// Outcome mode: the bar is split into created / updated / skipped / failed.
+				createElement( OutcomeBar, o.outcome
+					? { stats: o.outcome.stats, total: o.outcome.total, size: 'lg', indeterminate, tone: o.tone, label: o.title, running }
+					: { stats: {}, total: 0, hidden: true } ),
+				createElement( 'ul', { className: 'migrateplus-legend migrateplus-modal-stats', hidden: ! ( o.stats && o.stats.length ) }, ( o.stats || [] ).map( ( s, i ) =>
+					createElement( 'li', { key: i, className: 'is-' + s.key + ( Number( s.value ) ? '' : ' is-zero' ) },
+						createElement( 'strong', null, ( Number( s.value ) || 0 ).toLocaleString() ),
+						createElement( 'span', null, s.label ) )
+				) ),
+				createElement( 'p', { className: 'migrateplus-modal-note' + ( 'error' === o.tone ? ' is-error' : '' ), 'aria-live': 'polite', hidden: ! o.note }, o.note || '' ),
+				createElement( 'div', { ref: buttons, className: 'migrateplus-modal-actions', hidden: ! actions.length }, actions.map( ( a, i ) => {
+					const className = 'button' + ( a.primary ? ' button-primary' : '' ) + ( a.danger ? ' migrateplus-danger' : '' );
+					return a.href
+						? createElement( 'a', { key: i, className, href: safeUrl( a.href ) }, a.label )
+						: createElement( 'button', { key: i, type: 'button', className, disabled: a.disabled, onClick: a.onClick }, a.label );
+				} ) )
+			)
+		), document.body );
+	}
 
 	function normalizeMapping( m ) {
 		m = m || {};
@@ -448,7 +414,6 @@
 	 */
 	function suggestExtras() {
 		const pt = state.options.post_type;
-		state.suggested = state.suggested || {};
 		if ( state.suggested[ pt ] ) {
 			return;
 		}
@@ -526,59 +491,35 @@
 
 	/**
 	 * Above this many source fields, a select gets its options when it is focused. Every mapping
-	 * row has a select listing every field, and render() rebuilds them all on most changes: a
-	 * few hundred fields is a few thousand options, but a very wide file makes hundreds of
-	 * thousands and freezes the tab.
+	 * row has a select listing every field, and each render goes over them all: a few hundred
+	 * fields is a few thousand options, but a very wide file makes hundreds of thousands and
+	 * freezes the tab.
 	 */
 	const LAZY_FIELDS = 300;
 
-	function fieldSelect( value, onChange, opts ) {
-		const select = el( 'select', { class: 'migrateplus-field-select', 'aria-label': ( opts && opts.label ) || 'Source field', onchange: ( e ) => onChange( e.target.value ) }, [
-			el( 'option', { value: '', text: '(not mapped)' } ),
-		] );
-		const fill = () => {
-			state.fields.forEach( ( f ) => select.appendChild( el( 'option', { value: f, text: f, selected: f === value } ) ) );
-			if ( opts && opts.nested ) {
-				const parents = nestedFields();
-				if ( parents.length ) {
-					select.appendChild( el( 'optgroup', { label: 'Nested data (lists and objects)' }, parents.map( ( f ) =>
-						el( 'option', { value: f, text: f + ' (all)', selected: f === value } ) ) ) );
-				}
-			}
-		};
-		if ( state.fields.length <= LAZY_FIELDS ) {
-			fill();
-		} else {
-			// Only the mapped field until then, so the select still shows it.
-			const parent = value && opts && opts.nested && ! state.fields.includes( value ) && nestedFields().includes( value );
-			const placeholder = value && ( parent || state.fields.includes( value ) ) ? el( 'option', { value, text: parent ? value + ' (all)' : value, selected: true } ) : null;
-			if ( placeholder ) {
-				select.appendChild( placeholder );
-			}
-			select.addEventListener( 'focus', () => {
-				const current = select.value;
-				if ( placeholder ) {
-					placeholder.remove();
-				}
-				fill();
-				select.value = current;
-			}, { once: true } );
-		}
-		if ( value && ! select.value ) {
-			select.appendChild( el( 'option', { value, text: value + ' (not in preview)', selected: true } ) );
-		}
-		return select;
+	function FieldSelect( { value, onChange, nested, label } ) {
+		const [ filled, setFilled ] = useImmediateState( state.fields.length <= LAZY_FIELDS );
+		const parents = nested ? nestedFields() : [];
+		const isParent = !! value && ! state.fields.includes( value ) && parents.includes( value );
+		const known = !! value && ( isParent || state.fields.includes( value ) );
+		return createElement( 'select', {
+			className: 'migrateplus-field-select',
+			'aria-label': label || 'Source field',
+			value: value || '',
+			onChange: ( e ) => onChange( e.target.value ),
+			onFocus: filled ? null : () => setFilled( true ),
+		},
+			createElement( 'option', { value: '' }, '(not mapped)' ),
+			filled ? state.fields.map( ( f ) => createElement( 'option', { key: f, value: f }, f ) ) : null,
+			filled && parents.length ? createElement( 'optgroup', { label: 'Nested data (lists and objects)' }, parents.map( ( f ) => createElement( 'option', { key: f, value: f }, f + ' (all)' ) ) ) : null,
+			// Until then only the mapped field, so the select still shows it.
+			! filled && known ? createElement( 'option', { value }, isParent ? value + ' (all)' : value ) : null,
+			value && ! known ? createElement( 'option', { value }, value + ' (not in preview)' ) : null
+		);
 	}
 
-	function notice( type, message ) {
-		return el( 'div', { class: 'notice notice-' + type + ' inline migrateplus-notice' }, el( 'p', { text: message } ) );
-	}
-
-	/** Show a failed request's message at the top of the page. */
-	function showError( err ) {
-		const n = notice( 'error', err.message );
-		root.insertBefore( n, root.firstChild );
-		n.scrollIntoView( { block: 'nearest' } );
+	function Notice( { type, message } ) {
+		return createElement( 'div', { className: 'notice notice-' + type + ' inline migrateplus-notice' }, createElement( 'p', null, message ) );
 	}
 
 	/**
@@ -632,8 +573,8 @@
 			return Math.floor( diff / 60 ) + ' min ago';
 		}
 		if ( diff < 86400 ) {
-			const h = Math.floor( diff / 3600 );
-			return h + ' hour' + ( h === 1 ? '' : 's' ) + ' ago';
+			const hours = Math.floor( diff / 3600 );
+			return hours + ' hour' + ( hours === 1 ? '' : 's' ) + ' ago';
 		}
 		if ( diff < 86400 * 7 ) {
 			const d = Math.floor( diff / 86400 );
@@ -660,42 +601,40 @@
 
 	/**
 	 * Progress bar split by outcome: created / updated / skipped / failed.
-	 * Segments are sized against the total (or the processed count when the total is unknown).
-	 * opts: { size: 'lg'|'sm', indeterminate, tone, label }
+	 * Segments are sized against the total (or the processed count when the total is unknown);
+	 * the same nodes are kept between renders, so widths animate.
 	 */
-	function outcomeBar( stats, total, opts ) {
-		const bar = el( 'div', { role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100 } );
-		OUTCOMES.forEach( ( [ key ] ) => bar.appendChild( el( 'span', { class: 'migrateplus-obar-seg is-' + key } ) ) );
-		bar.appendChild( el( 'span', { class: 'migrateplus-obar-runner' } ) );
-		setOutcomeBar( bar, stats, total, opts );
-		return bar;
-	}
-
-	/** Update an outcome bar in place so widths animate. */
-	function setOutcomeBar( bar, stats, total, opts ) {
-		opts = opts || {};
+	function OutcomeBar( { stats, total, size, indeterminate, tone, label, running, hidden } ) {
 		const processed = Number( stats.processed ) || 0;
 		const base = Math.max( Number( total ) || 0, processed, 1 );
-		bar.className = 'migrateplus-obar' + ( opts.size ? ' is-' + opts.size : '' ) + ( opts.indeterminate ? ' is-indeterminate' : '' ) + ( opts.tone ? ' is-' + opts.tone : '' );
-		bar.setAttribute( 'aria-label', opts.label || 'Progress' );
-		if ( opts.indeterminate ) {
-			bar.removeAttribute( 'aria-valuenow' );
-		} else {
-			bar.setAttribute( 'aria-valuenow', Math.round( ( processed / base ) * 100 ) );
-		}
-		OUTCOMES.forEach( ( [ key ], i ) => {
-			const n = Number( stats[ key ] ) || 0;
-			bar.children[ i ].style.width = ( ( n / base ) * 100 ) + '%';
-		} );
+		return createElement( 'div', {
+			className: 'migrateplus-obar' + ( size ? ' is-' + size : '' ) + ( indeterminate ? ' is-indeterminate' : '' ) + ( tone ? ' is-' + tone : '' ) + ( running ? ' is-running' : '' ),
+			role: 'progressbar',
+			'aria-valuemin': 0,
+			'aria-valuemax': 100,
+			'aria-valuenow': indeterminate ? null : Math.round( ( processed / base ) * 100 ),
+			'aria-label': label || 'Progress',
+			hidden,
+		},
+			OUTCOMES.map( ( [ key ] ) => createElement( 'span', { key, className: 'migrateplus-obar-seg is-' + key, style: { width: ( ( ( Number( stats[ key ] ) || 0 ) / base ) * 100 ) + '%' } } ) ),
+			createElement( 'span', { className: 'migrateplus-obar-runner' } )
+		);
 	}
 
-	function outcomeLegend( stats, dry ) {
-		return el( 'ul', { class: 'migrateplus-legend' }, OUTCOMES.map( ( [ key, label, dryLabel ] ) =>
-			el( 'li', { class: 'is-' + key + ( Number( stats[ key ] ) ? '' : ' is-zero' ) }, [
-				el( 'strong', { text: ( Number( stats[ key ] ) || 0 ).toLocaleString() } ),
-				el( 'span', { text: dry ? dryLabel : label } ),
-			] )
+	function OutcomeLegend( { stats, dry } ) {
+		return createElement( 'ul', { className: 'migrateplus-legend' }, OUTCOMES.map( ( [ key, label, dryLabel ] ) =>
+			createElement( 'li', { key, className: 'is-' + key + ( Number( stats[ key ] ) ? '' : ' is-zero' ) },
+				createElement( 'strong', null, ( Number( stats[ key ] ) || 0 ).toLocaleString() ),
+				createElement( 'span', null, dry ? dryLabel : label ) )
 		) );
+	}
+
+	/** A switch with its label and help text, as the options, Export and Find & Replace screens use. */
+	function Toggle( { id, label, help, checked, disabled, onChange } ) {
+		return createElement( 'div', { className: 'migrateplus-toggle' + ( disabled ? ' is-disabled' : '' ) },
+			createElement( 'input', { type: 'checkbox', role: 'switch', id, className: 'migrateplus-switch', disabled, checked, onChange } ),
+			createElement( 'label', { htmlFor: id }, createElement( 'span', null, label ), help ? createElement( 'span', { className: 'migrateplus-help' }, help ) : null )
+		);
 	}
 
 	const SOURCE_BLURBS = {
@@ -705,155 +644,132 @@
 	// Render
 
 	function render() {
-		// Re-renders rebuild the DOM; keep focus (and caret) on the same control.
-		const active = document.activeElement;
-		const keep = active && root.contains( active ) && active.id ? { id: active.id, start: active.selectionStart, end: active.selectionEnd } : null;
-		draw();
-		if ( keep ) {
-			const again = document.getElementById( keep.id );
-			if ( again ) {
-				again.focus( { preventScroll: true } );
-				if ( typeof keep.start === 'number' && again.setSelectionRange ) {
-					try {
-						again.setSelectionRange( keep.start, keep.end );
-					} catch ( e ) {}
-				}
-			}
+		// The mapping step fills in suggestions for a post type the first time it shows it.
+		if ( 'new' === state.tab && 'map' === state.step ) {
+			suggestExtras();
 		}
-	}
-
-	function draw() {
-		root.innerHTML = '';
-		root.classList.add( 'migrateplus-app' );
-		if ( state.tab === 'history' ) {
-			renderHistory();
-			return;
-		}
-		if ( state.tab === 'export' ) {
-			renderExport();
-			return;
-		}
-		if ( state.tab === 'replace' ) {
-			renderReplace();
-			return;
-		}
-		const dropScreen = state.step === 'source' && isDropSource();
-		if ( ! dropScreen && ! state.direct && 'review' !== state.step ) {
-			root.appendChild( stepper() );
-		}
-		if ( state.error ) {
-			root.appendChild( notice( 'error', state.error ) );
-		}
-		if ( 'review' === state.step ) {
-			renderReview();
-		} else if ( dropScreen ) {
-			renderDrop();
-		} else if ( state.step === 'source' ) {
-			renderSource();
-		} else if ( state.step === 'map' ) {
-			renderMap();
+		if ( concurrent ) {
+			flushSync( () => reactRoot.render( createElement( App ) ) );
 		} else {
-			renderRun();
+			wpElement.render( createElement( App ), mount );
 		}
 	}
 
-	function stepper() {
+	function App() {
+		const Screen = { history: History, export: Export, replace: Replace }[ state.tab ] || Import;
+		const o = modal.current();
+		return createElement( Fragment, null, createElement( Screen ), o ? createElement( Modal, { o } ) : null );
+	}
+
+	function Import() {
+		const dropScreen = state.step === 'source' && isDropSource();
+		let body;
+		if ( 'review' === state.step ) {
+			body = createElement( Review );
+		} else if ( dropScreen ) {
+			body = createElement( Drop );
+		} else if ( state.step === 'source' ) {
+			body = createElement( Source );
+		} else if ( state.step === 'map' ) {
+			body = createElement( MapStep );
+		} else {
+			body = createElement( Run );
+		}
+		return createElement( Fragment, null,
+			! dropScreen && ! state.direct && 'review' !== state.step ? createElement( Stepper ) : null,
+			state.error ? createElement( Notice, { type: 'error', message: state.error } ) : null,
+			body
+		);
+	}
+
+	function Stepper() {
 		const steps = [
 			[ 'source', isDropSource() ? 'Upload a file' : 'Choose a source' ],
 			[ 'map', 'Map fields' ],
 			[ 'run', 'Import' ],
 		];
 		const idx = steps.findIndex( ( s ) => s[ 0 ] === state.step );
-		return el( 'ol', { class: 'migrateplus-route', 'aria-label': 'Import steps' }, steps.map( ( s, i ) =>
-			el( 'li', {
-				class: i === idx ? 'is-current' : ( i < idx ? 'is-done' : '' ),
+		return createElement( 'ol', { className: 'migrateplus-route', 'aria-label': 'Import steps' }, steps.map( ( s, i ) =>
+			createElement( 'li', {
+				key: s[ 0 ],
+				className: i === idx ? 'is-current' : ( i < idx ? 'is-done' : '' ),
 				'aria-current': i === idx ? 'step' : null,
-			}, [
-				el( 'span', { class: 'migrateplus-route-dot', 'aria-hidden': 'true', text: i < idx ? '✓' : String( i + 1 ) } ),
-				el( 'span', { class: 'migrateplus-route-label', text: s[ 1 ] } ),
-			] )
+			},
+				createElement( 'span', { className: 'migrateplus-route-dot', 'aria-hidden': 'true' }, i < idx ? '✓' : String( i + 1 ) ),
+				createElement( 'span', { className: 'migrateplus-route-label' }, s[ 1 ] ) )
 		) );
 	}
 
 	// Step 1
 
-	function renderSource() {
-		const cards = el( 'div', { class: 'migrateplus-tiles', role: 'radiogroup', 'aria-label': 'Source' }, D.sources.map( ( s ) =>
-			el( 'label', { class: 'migrateplus-tile' + ( s.id === state.sourceId ? ' is-selected' : '' ) }, [
-				el( 'input', { type: 'radio', name: 'migrateplus_source', value: s.id, checked: s.id === state.sourceId, onchange: () => {
-					state.sourceId = s.id;
-					state.error = '';
-					render();
-					const first = root.querySelector( '.migrateplus-tile.is-selected input' );
-					if ( first ) {
-						first.focus();
-					}
-				} } ),
-				el( 'span', { class: 'migrateplus-source-icon migrateplus-icon-' + s.id, 'aria-hidden': 'true' } ),
-				el( 'span', { class: 'migrateplus-tile-text' }, [
-					el( 'strong', { text: s.label } ),
-					SOURCE_BLURBS[ s.id ] ? el( 'span', { text: SOURCE_BLURBS[ s.id ] } ) : null,
-				] ),
-			] )
-		) );
-
+	function Source() {
 		const source = D.sources.find( ( s ) => s.id === state.sourceId );
-		const form = el( 'form', { class: 'migrateplus-panel migrateplus-source-form', onsubmit: onPreview } );
-		const fields = el( 'div', { class: 'migrateplus-fields' } );
-		source.schema.forEach( ( f ) => {
-			const id = 'migrateplus-set-' + f.key;
-			let input;
-			const name = f.type === 'file' ? 'file_' + f.key : 'settings[' + f.key + ']';
-			if ( f.type === 'select' ) {
-				input = el( 'select', { id, name }, Object.entries( f.options ).map( ( [ v, l ] ) =>
-					el( 'option', { value: v, text: l, selected: v === f.default } )
-				) );
-			} else if ( f.type === 'textarea' ) {
-				input = el( 'textarea', { id, name, rows: 3, class: 'code', spellcheck: 'false' } );
-			} else if ( f.type === 'file' ) {
-				input = fileInput( f, id, name );
-			} else {
-				input = el( 'input', {
-					id, name,
-					type: f.type === 'password' ? 'password' : ( f.type === 'url' ? 'url' : ( f.type === 'number' ? 'number' : 'text' ) ),
-					value: f.default || '',
-					placeholder: f.type === 'url' ? 'https://' : null,
-					autocomplete: f.type === 'password' ? 'new-password' : 'off',
-					required: f.required && f.type !== 'file' ? true : null,
-				} );
-			}
-			const help = [];
-			if ( f.help ) {
-				help.push( el( 'p', { class: 'migrateplus-field-help', text: f.help } ) );
-			}
-			if ( f.type === 'file' && f.remote === false ) {
-				help.push( el( 'p', { class: 'migrateplus-field-help', text: 'Max upload size: ' + D.maxUpload } ) );
-			}
-			fields.appendChild( el( 'div', { class: 'migrateplus-field migrateplus-field-' + f.type }, [
-				el( 'label', { class: 'migrateplus-field-label', for: f.type === 'file' ? null : id }, [
-					f.label,
-					f.required ? el( 'span', { class: 'migrateplus-req', text: 'Required' } ) : null,
-				] ),
-				input,
-			].concat( help ) ) );
-		} );
-		form.appendChild( el( 'header', { class: 'migrateplus-panel-head' }, [
-			el( 'span', { class: 'migrateplus-source-icon migrateplus-icon-' + source.id, 'aria-hidden': 'true' } ),
-			el( 'div', {}, [
-				el( 'h2', { text: source.label } ),
-				SOURCE_BLURBS[ source.id ] ? el( 'p', { text: SOURCE_BLURBS[ source.id ] } ) : null,
-			] ),
-		] ) );
-		form.appendChild( fields );
-		form.appendChild( el( 'footer', { class: 'migrateplus-panel-foot' }, [
-			el( 'p', { class: 'migrateplus-foot-note', text: 'Nothing is imported yet. You will see a preview and map the fields first.' } ),
-			el( 'button', { type: 'submit', class: 'button button-primary migrateplus-btn-lg', disabled: state.busy, text: 'Connect and preview' } ),
-		] ) );
+		return createElement( Fragment, null,
+			D.sources.length > 1 ? createElement( 'div', { className: 'migrateplus-tiles', role: 'radiogroup', 'aria-label': 'Source' }, D.sources.map( ( s ) =>
+				createElement( 'label', { key: s.id, className: 'migrateplus-tile' + ( s.id === state.sourceId ? ' is-selected' : '' ) },
+					createElement( 'input', { type: 'radio', name: 'migrateplus_source', value: s.id, checked: s.id === state.sourceId, onChange: () => {
+						state.sourceId = s.id;
+						state.error = '';
+						state.sourceError = '';
+						render();
+					} } ),
+					createElement( 'span', { className: 'migrateplus-source-icon migrateplus-icon-' + s.id, 'aria-hidden': 'true' } ),
+					createElement( 'span', { className: 'migrateplus-tile-text' },
+						createElement( 'strong', null, s.label ),
+						SOURCE_BLURBS[ s.id ] ? createElement( 'span', null, SOURCE_BLURBS[ s.id ] ) : null )
+				)
+			) ) : null,
+			// Keep the form as typed; just surface the error.
+			state.sourceError ? createElement( Notice, { type: 'error', message: state.sourceError } ) : null,
+			// Keyed by source, so switching sources starts from that source's empty form.
+			createElement( 'form', { key: source.id, className: 'migrateplus-panel migrateplus-source-form', onSubmit: onPreview },
+				createElement( 'header', { className: 'migrateplus-panel-head' },
+					createElement( 'span', { className: 'migrateplus-source-icon migrateplus-icon-' + source.id, 'aria-hidden': 'true' } ),
+					createElement( 'div', null,
+						createElement( 'h2', null, source.label ),
+						SOURCE_BLURBS[ source.id ] ? createElement( 'p', null, SOURCE_BLURBS[ source.id ] ) : null )
+				),
+				createElement( 'div', { className: 'migrateplus-fields' }, source.schema.map( ( f ) => createElement( SourceField, { key: f.key, f } ) ) ),
+				createElement( 'footer', { className: 'migrateplus-panel-foot' },
+					createElement( 'p', { className: 'migrateplus-foot-note' }, 'Nothing is imported yet. You will see a preview and map the fields first.' ),
+					createElement( 'button', { type: 'submit', className: 'button button-primary migrateplus-btn-lg', disabled: state.busy }, 'Connect and preview' )
+				)
+			)
+		);
+	}
 
-		if ( D.sources.length > 1 ) {
-			root.appendChild( cards );
+	/** One setting from a source's schema. The inputs are left uncontrolled: the form is read with FormData on submit. */
+	function SourceField( { f } ) {
+		const id = 'migrateplus-set-' + f.key;
+		const name = f.type === 'file' ? 'file_' + f.key : 'settings[' + f.key + ']';
+		let input;
+		if ( f.type === 'select' ) {
+			input = createElement( 'select', { id, name, defaultValue: f.default }, Object.entries( f.options ).map( ( [ v, l ] ) =>
+				createElement( 'option', { key: v, value: v }, l )
+			) );
+		} else if ( f.type === 'textarea' ) {
+			input = createElement( 'textarea', { id, name, rows: 3, className: 'code', spellCheck: false } );
+		} else if ( f.type === 'file' ) {
+			input = createElement( FileField, { f, id, name } );
+		} else {
+			input = createElement( 'input', {
+				id,
+				name,
+				type: f.type === 'password' ? 'password' : ( f.type === 'url' ? 'url' : ( f.type === 'number' ? 'number' : 'text' ) ),
+				defaultValue: f.default || '',
+				placeholder: f.type === 'url' ? 'https://' : null,
+				autoComplete: f.type === 'password' ? 'new-password' : 'off',
+				required: f.required && f.type !== 'file' ? true : null,
+			} );
 		}
-		root.appendChild( form );
+		return createElement( 'div', { className: 'migrateplus-field migrateplus-field-' + f.type },
+			createElement( 'label', { className: 'migrateplus-field-label', htmlFor: f.type === 'file' ? null : id },
+				f.label,
+				f.required ? createElement( 'span', { className: 'migrateplus-req' }, 'Required' ) : null ),
+			input,
+			f.help ? createElement( 'p', { className: 'migrateplus-field-help' }, f.help ) : null,
+			f.type === 'file' && f.remote === false ? createElement( 'p', { className: 'migrateplus-field-help' }, 'Max upload size: ' + D.maxUpload ) : null
+		);
 	}
 
 	/** A source whose only setting is a file upload gets the drop-and-import screen. */
@@ -866,44 +782,50 @@
 	 * Upload screen: one large drop area and a button to choose the file, with the
 	 * upload limit underneath. Dropping a MigratePlus export imports it straight away.
 	 */
-	function renderDrop() {
+	function Drop() {
 		const field = D.sources.find( ( s ) => s.id === state.sourceId ).schema[ 0 ];
-		const input = el( 'input', { type: 'file', id: 'migrateplus-import-file', accept: field.accept || '', class: 'migrateplus-drop-input', 'aria-label': 'File to import', onchange: ( e ) => {
-			const file = e.target.files && e.target.files[ 0 ];
-			e.target.value = ''; // Choosing the same file again still fires change.
-			if ( file ) {
-				uploadFile( field, file );
-			}
-		} } );
-
-		const area = el( 'div', { class: 'migrateplus-import-drop' }, [
-			el( 'span', { class: 'dashicons dashicons-cloud-upload', 'aria-hidden': 'true' } ),
-			el( 'strong', { text: 'Drop a JSON file (.json or .json.gz) here to import it' } ),
-			el( 'span', { class: 'migrateplus-muted', text: 'A Migrate Plus export imports straight away. Other JSON files go to field mapping first.' } ),
-			el( 'button', { type: 'button', class: 'button button-primary migrateplus-btn-lg', disabled: state.busy, text: 'Choose a JSON file', onclick: () => input.click() } ),
-		] );
-		[ 'dragenter', 'dragover' ].forEach( ( t ) => area.addEventListener( t, ( e ) => {
+		const input = useRef( null );
+		const [ over, setOver ] = useImmediateState( false );
+		const markDragOver = ( e ) => {
 			e.preventDefault();
-			area.classList.add( 'is-dragover' );
-		} ) );
-		[ 'dragleave', 'dragend', 'drop' ].forEach( ( t ) => area.addEventListener( t, ( e ) => {
-			if ( 'dragleave' !== t || ! area.contains( e.relatedTarget ) ) {
-				area.classList.remove( 'is-dragover' );
+			if ( ! over ) {
+				setOver( true );
 			}
-		} ) );
-		area.addEventListener( 'drop', ( e ) => {
-			e.preventDefault();
-			const file = e.dataTransfer && e.dataTransfer.files[ 0 ];
-			if ( file && ! state.busy ) {
-				uploadFile( field, file );
-			}
-		} );
-
-		root.appendChild( el( 'section', { class: 'migrateplus-panel migrateplus-import' }, [
-			area,
-			input,
-			el( 'p', { class: 'migrateplus-import-limit', text: 'Maximum upload size: ' + D.maxUpload } ),
-		] ) );
+		};
+		return createElement( 'section', { className: 'migrateplus-panel migrateplus-import' },
+			createElement( 'div', {
+				className: 'migrateplus-import-drop' + ( over ? ' is-dragover' : '' ),
+				onDragEnter: markDragOver,
+				onDragOver: markDragOver,
+				onDragLeave: ( e ) => {
+					if ( ! e.currentTarget.contains( e.relatedTarget ) ) {
+						setOver( false );
+					}
+				},
+				onDragEnd: () => setOver( false ),
+				onDrop: ( e ) => {
+					e.preventDefault();
+					setOver( false );
+					const file = e.dataTransfer && e.dataTransfer.files[ 0 ];
+					if ( file && ! state.busy ) {
+						uploadFile( field, file );
+					}
+				},
+			},
+				createElement( 'span', { className: 'dashicons dashicons-cloud-upload', 'aria-hidden': 'true' } ),
+				createElement( 'strong', null, 'Drop a JSON file (.json or .json.gz) here to import it' ),
+				createElement( 'span', { className: 'migrateplus-muted' }, 'A Migrate Plus export imports straight away. Other JSON files go to field mapping first.' ),
+				createElement( 'button', { type: 'button', className: 'button button-primary migrateplus-btn-lg', disabled: state.busy, onClick: () => input.current.click() }, 'Choose a JSON file' )
+			),
+			createElement( 'input', { ref: input, type: 'file', id: 'migrateplus-import-file', accept: field.accept || '', className: 'migrateplus-drop-input', 'aria-label': 'File to import', onChange: ( e ) => {
+				const file = e.target.files && e.target.files[ 0 ];
+				e.target.value = ''; // Choosing the same file again still fires change.
+				if ( file ) {
+					uploadFile( field, file );
+				}
+			} } ),
+			createElement( 'p', { className: 'migrateplus-import-limit' }, 'Maximum upload size: ' + D.maxUpload )
+		);
 	}
 
 	/** Check the file type, then upload it. */
@@ -1110,162 +1032,133 @@
 	 * Review screen: each duplicate that differs from the post on this site, with what
 	 * would change. Only the ticked ones are updated; every other duplicate is skipped.
 	 */
-	function renderReview() {
+	function Review() {
 		const r = state.review;
 		const items = r.d.changed || [];
 		const images = r.d.images || [];
-		const count = el( 'span', { class: 'migrateplus-actionbar-status', 'aria-live': 'polite' } );
-		const go = el( 'button', { type: 'button', class: 'button button-primary' } );
-		const boxes = [];
-		const radios = [];
-		const sync = () => {
-			const n = r.selected.size + r.media.size;
-			count.textContent = n + ' of ' + ( items.length + images.length ) + ' selected';
-			go.textContent = n ? 'Import with ' + n + ' selected' : 'Import without updating';
-			boxes.forEach( ( b ) => {
-				b.checked = r.selected.has( Number( b.value ) );
-			} );
-			radios.forEach( ( [ b, id, v ] ) => {
-				b.checked = ( r.media.get( id ) || 'skip' ) === v;
-			} );
-		};
+		const n = r.selected.size + r.media.size;
 		const setAll = ( on ) => {
 			items.forEach( ( it ) => ( on ? r.selected.add( it.post_id ) : r.selected.delete( it.post_id ) ) );
-			sync();
+			render();
 		};
 		const setAllMedia = ( v ) => {
 			images.forEach( ( it ) => ( 'skip' === v ? r.media.delete( it.post_id ) : r.media.set( it.post_id, v ) ) );
-			sync();
+			render();
 		};
-
-		if ( items.length ) {
-			root.appendChild( el( 'section', { class: 'migrateplus-panel migrateplus-review-head' }, [
-				el( 'h2', { text: 'Review changes' } ),
-				el( 'p', { text: items.length + ( 1 === items.length ? ' item in this import is' : ' items in this import are' ) + ' already on this site and differ from it. Tick the ones to update with the imported version. Everything else that is already here is skipped.' } ),
-				el( 'p', { class: 'migrateplus-muted', text: 'Custom fields, terms and images are updated too and are not shown here. WordPress keeps a revision of each post or page that is updated, so you can restore the old version from the editor.' } ),
-				el( 'div', { class: 'migrateplus-review-tools' }, [
-					el( 'button', { type: 'button', class: 'button button-small', text: 'Select all', onclick: () => setAll( true ) } ),
-					el( 'button', { type: 'button', class: 'button button-small', text: 'Select none', onclick: () => setAll( false ) } ),
-				] ),
-			] ) );
-		}
-
-		root.appendChild( el( 'ol', { class: 'migrateplus-review' }, items.map( ( it, i ) => {
-			const id = 'migrateplus-review-' + it.post_id;
-			const box = el( 'input', { type: 'checkbox', id, value: it.post_id, onchange: ( e ) => {
-				if ( e.target.checked ) {
-					r.selected.add( it.post_id );
-				} else {
-					r.selected.delete( it.post_id );
-				}
-				sync();
-			} } );
-			boxes.push( box );
-			const fields = Object.keys( it.changes ).map( ( k ) => it.changes[ k ] );
-			return el( 'li', { class: 'migrateplus-panel migrateplus-review-item' }, [
-				el( 'div', { class: 'migrateplus-review-row' }, [
-					box,
-					el( 'label', { for: id }, [
-						el( 'strong', { text: it.title || '(untitled)' } ),
-						el( 'span', { class: 'migrateplus-muted', text: it.type + ' #' + it.post_id + ' · ' + ( 'before' === it.kind ? 'imported before' : 'same ' + it.label ) + ' · changes: ' + fields.map( ( f ) => f.label.toLowerCase() ).join( ', ' ) } ),
-					] ),
-				] ),
-				el( 'details', { class: 'migrateplus-review-body', open: i < 3 }, [
-					el( 'summary', { text: 'Show changes' } ),
-					...fieldChanges( fields ),
-				] ),
-			] );
-		} ) ) );
-
-		if ( images.length ) {
-			root.appendChild( el( 'section', { class: 'migrateplus-panel migrateplus-review-head' }, [
-				el( 'h2', { text: 'Compare media' } ),
-				el( 'p', { text: images.length + ( 1 === images.length ? ' file in this import is' : ' files in this import are' ) + ' already in the Media Library. For each one, choose what to do. Skipped files are left as they are.' } ),
-				el( 'p', { class: 'migrateplus-muted', text: '"Update details" keeps the file on this site and copies the title, caption, description and alt text. "Replace image" also swaps in the imported file, in the same Media Library item, so pages that use it show the new image. A replaced file cannot be rolled back. "Keep both" adds the imported file as a new item and leaves this one alone.' } ),
-				el( 'div', { class: 'migrateplus-review-tools' }, [
-					el( 'button', { type: 'button', class: 'button button-small', text: 'Skip all', onclick: () => setAllMedia( 'skip' ) } ),
-					el( 'button', { type: 'button', class: 'button button-small', text: 'Update all details', onclick: () => setAllMedia( 'update' ) } ),
-					el( 'button', { type: 'button', class: 'button button-small', text: 'Replace all', onclick: () => setAllMedia( 'replace' ) } ),
-					el( 'button', { type: 'button', class: 'button button-small', text: 'Keep both for all', onclick: () => setAllMedia( 'copy' ) } ),
-				] ),
-			] ) );
-			root.appendChild( el( 'ol', { class: 'migrateplus-review' }, images.map( ( it ) => {
-				const fields = Object.keys( it.changes ).map( ( k ) => it.changes[ k ] );
-				const choice = ( v, label ) => {
-					const id = 'migrateplus-media-' + it.post_id + '-' + v;
-					const radio = el( 'input', { type: 'radio', id, name: 'migrateplus-media-' + it.post_id, value: v, onchange: () => {
-						if ( 'skip' === v ) {
-							r.media.delete( it.post_id );
-						} else {
-							r.media.set( it.post_id, v );
-						}
-						sync();
-					} } );
-					radios.push( [ radio, it.post_id, v ] );
-					return el( 'label', { class: 'migrateplus-check-chip', for: id }, [ radio, el( 'span', { text: label } ) ] );
-				};
-				const figure = ( src, href, caption ) => el( 'figure', { class: 'migrateplus-media-pick' }, [
-					src && it.is_image
-						? el( 'a', { href, target: '_blank', rel: 'noopener' }, el( 'img', { src, alt: caption + ': ' + ( it.title || 'image' ), loading: 'lazy' } ) )
-						: el( 'span', { class: 'migrateplus-media-file', text: ( href || '' ).split( '/' ).pop() || '(no preview)' } ),
-					el( 'figcaption', { text: caption } ),
-				] );
-				return el( 'li', { class: 'migrateplus-panel migrateplus-review-item' }, [
-					el( 'div', { class: 'migrateplus-review-row' }, [
-						el( 'div', { class: 'migrateplus-review-title' }, [
-							el( 'strong', { text: it.title || '(untitled)' } ),
-							el( 'span', { class: 'migrateplus-muted', text: 'Media #' + it.post_id + ' · ' + ( 'before' === it.kind ? 'imported before' : 'same ' + it.label ) + ( fields.length ? ' · details differ: ' + fields.map( ( f ) => f.label.toLowerCase() ).join( ', ' ) : ' · same details' ) } ),
-						] ),
-					] ),
-					el( 'div', { class: 'migrateplus-media-compare' }, [
-						figure( it.current, it.current_full, 'On this site' ),
-						figure( it.imported_preview || it.imported, it.imported, 'In the import' ),
-					] ),
-					el( 'div', { class: 'migrateplus-chips', role: 'radiogroup', 'aria-label': 'What to do with ' + ( it.title || 'this file' ) }, [
-						choice( 'skip', 'Skip' ),
-						choice( 'update', 'Update details' ),
-						choice( 'replace', 'Replace image' ),
-						choice( 'copy', 'Keep both' ),
-					] ),
-					fields.length ? el( 'details', { class: 'migrateplus-review-body' }, [ el( 'summary', { text: 'Show detail changes' } ), ...fieldChanges( fields ) ] ) : null,
-				] );
-			} ) ) );
-		}
-
-		go.addEventListener( 'click', () => {
+		const importSelected = () => {
 			const ids = Array.from( r.selected );
 			const lists = { update: ids, replace: [], copy: [] };
 			r.media.forEach( ( v, id ) => lists[ v ].push( id ) );
 			state.step = r.back;
 			state.review = null;
 			r.apply( ids, lists.replace, lists.copy );
-		} );
-		root.appendChild( el( 'div', { class: 'migrateplus-actionbar' }, [
-			count,
-			el( 'div', { class: 'migrateplus-actionbar-buttons' }, [
-				el( 'button', { type: 'button', class: 'button', text: 'Back', onclick: () => {
-					state.step = r.back;
-					state.review = null;
+		};
+
+		return createElement( Fragment, null,
+			items.length ? createElement( 'section', { className: 'migrateplus-panel migrateplus-review-head' },
+				createElement( 'h2', null, 'Review changes' ),
+				createElement( 'p', null, items.length + ( 1 === items.length ? ' item in this import is' : ' items in this import are' ) + ' already on this site and differ from it. Tick the ones to update with the imported version. Everything else that is already here is skipped.' ),
+				createElement( 'p', { className: 'migrateplus-muted' }, 'Custom fields, terms and images are updated too and are not shown here. WordPress keeps a revision of each post or page that is updated, so you can restore the old version from the editor.' ),
+				createElement( 'div', { className: 'migrateplus-review-tools' },
+					createElement( 'button', { type: 'button', className: 'button button-small', onClick: () => setAll( true ) }, 'Select all' ),
+					createElement( 'button', { type: 'button', className: 'button button-small', onClick: () => setAll( false ) }, 'Select none' ) )
+			) : null,
+			createElement( 'ol', { className: 'migrateplus-review' }, items.map( ( it, i ) => {
+				const id = 'migrateplus-review-' + it.post_id;
+				const fields = Object.keys( it.changes ).map( ( k ) => it.changes[ k ] );
+				return createElement( 'li', { key: it.post_id, className: 'migrateplus-panel migrateplus-review-item' },
+					createElement( 'div', { className: 'migrateplus-review-row' },
+						createElement( 'input', { type: 'checkbox', id, value: it.post_id, checked: r.selected.has( it.post_id ), onChange: ( e ) => {
+							if ( e.target.checked ) {
+								r.selected.add( it.post_id );
+							} else {
+								r.selected.delete( it.post_id );
+							}
+							render();
+						} } ),
+						createElement( 'label', { htmlFor: id },
+							createElement( 'strong', null, it.title || '(untitled)' ),
+							createElement( 'span', { className: 'migrateplus-muted' }, it.type + ' #' + it.post_id + ' · ' + ( 'before' === it.kind ? 'imported before' : 'same ' + it.label ) + ' · changes: ' + fields.map( ( f ) => f.label.toLowerCase() ).join( ', ' ) ) )
+					),
+					createElement( 'details', { className: 'migrateplus-review-body', open: i < 3 },
+						createElement( 'summary', null, 'Show changes' ),
+						createElement( FieldChanges, { fields } ) )
+				);
+			} ) ),
+			images.length ? createElement( 'section', { className: 'migrateplus-panel migrateplus-review-head' },
+				createElement( 'h2', null, 'Compare media' ),
+				createElement( 'p', null, images.length + ( 1 === images.length ? ' file in this import is' : ' files in this import are' ) + ' already in the Media Library. For each one, choose what to do. Skipped files are left as they are.' ),
+				createElement( 'p', { className: 'migrateplus-muted' }, '"Update details" keeps the file on this site and copies the title, caption, description and alt text. "Replace image" also swaps in the imported file, in the same Media Library item, so pages that use it show the new image. A replaced file cannot be rolled back. "Keep both" adds the imported file as a new item and leaves this one alone.' ),
+				createElement( 'div', { className: 'migrateplus-review-tools' },
+					createElement( 'button', { type: 'button', className: 'button button-small', onClick: () => setAllMedia( 'skip' ) }, 'Skip all' ),
+					createElement( 'button', { type: 'button', className: 'button button-small', onClick: () => setAllMedia( 'update' ) }, 'Update all details' ),
+					createElement( 'button', { type: 'button', className: 'button button-small', onClick: () => setAllMedia( 'replace' ) }, 'Replace all' ),
+					createElement( 'button', { type: 'button', className: 'button button-small', onClick: () => setAllMedia( 'copy' ) }, 'Keep both for all' ) )
+			) : null,
+			images.length ? createElement( 'ol', { className: 'migrateplus-review' }, images.map( ( it ) => createElement( ReviewMedia, { key: it.post_id, it, r } ) ) ) : null,
+			createElement( 'div', { className: 'migrateplus-actionbar' },
+				createElement( 'span', { className: 'migrateplus-actionbar-status', 'aria-live': 'polite' }, n + ' of ' + ( items.length + images.length ) + ' selected' ),
+				createElement( 'div', { className: 'migrateplus-actionbar-buttons' },
+					createElement( 'button', { type: 'button', className: 'button', onClick: () => {
+						state.step = r.back;
+						state.review = null;
+						render();
+						r.reopen();
+					} }, 'Back' ),
+					createElement( 'button', { type: 'button', className: 'button button-primary', onClick: importSelected }, n ? 'Import with ' + n + ' selected' : 'Import without updating' ) )
+			)
+		);
+	}
+
+	/** One media duplicate: both copies side by side, and what to do with it. */
+	function ReviewMedia( { it, r } ) {
+		const fields = Object.keys( it.changes ).map( ( k ) => it.changes[ k ] );
+		const mediaChoice = ( v, label ) => {
+			const id = 'migrateplus-media-' + it.post_id + '-' + v;
+			return createElement( 'label', { className: 'migrateplus-check-chip', htmlFor: id },
+				createElement( 'input', { type: 'radio', id, name: 'migrateplus-media-' + it.post_id, value: v, checked: ( r.media.get( it.post_id ) || 'skip' ) === v, onChange: () => {
+					if ( 'skip' === v ) {
+						r.media.delete( it.post_id );
+					} else {
+						r.media.set( it.post_id, v );
+					}
 					render();
-					r.reopen();
 				} } ),
-				go,
-			] ),
-		] ) );
-		sync();
+				createElement( 'span', null, label ) );
+		};
+		const mediaFigure = ( src, href, caption ) => createElement( 'figure', { className: 'migrateplus-media-pick' },
+			src && it.is_image
+				? createElement( 'a', { href: safeUrl( href ), target: '_blank', rel: 'noopener' }, createElement( 'img', { src: safeUrl( src ), alt: caption + ': ' + ( it.title || 'image' ), loading: 'lazy' } ) )
+				: createElement( 'span', { className: 'migrateplus-media-file' }, ( href || '' ).split( '/' ).pop() || '(no preview)' ),
+			createElement( 'figcaption', null, caption ) );
+		return createElement( 'li', { className: 'migrateplus-panel migrateplus-review-item' },
+			createElement( 'div', { className: 'migrateplus-review-row' },
+				createElement( 'div', { className: 'migrateplus-review-title' },
+					createElement( 'strong', null, it.title || '(untitled)' ),
+					createElement( 'span', { className: 'migrateplus-muted' }, 'Media #' + it.post_id + ' · ' + ( 'before' === it.kind ? 'imported before' : 'same ' + it.label ) + ( fields.length ? ' · details differ: ' + fields.map( ( f ) => f.label.toLowerCase() ).join( ', ' ) : ' · same details' ) ) )
+			),
+			createElement( 'div', { className: 'migrateplus-media-compare' },
+				mediaFigure( it.current, it.current_full, 'On this site' ),
+				mediaFigure( it.imported_preview || it.imported, it.imported, 'In the import' ) ),
+			createElement( 'div', { className: 'migrateplus-chips', role: 'radiogroup', 'aria-label': 'What to do with ' + ( it.title || 'this file' ) },
+				mediaChoice( 'skip', 'Skip' ),
+				mediaChoice( 'update', 'Update details' ),
+				mediaChoice( 'replace', 'Replace image' ),
+				mediaChoice( 'copy', 'Keep both' ) ),
+			fields.length ? createElement( 'details', { className: 'migrateplus-review-body' }, createElement( 'summary', null, 'Show detail changes' ), createElement( FieldChanges, { fields } ) ) : null
+		);
 	}
 
 	/** Each changed field: a diff for longer text, "Now / Imported" for short values. */
-	function fieldChanges( fields ) {
-		return fields.map( ( f ) => el( 'div', { class: 'migrateplus-review-field' }, [
-			el( 'h3', { text: f.label } ),
+	function FieldChanges( { fields } ) {
+		return createElement( Fragment, null, fields.map( ( f, i ) => createElement( 'div', { key: i, className: 'migrateplus-review-field' },
+			createElement( 'h3', null, f.label ),
 			f.old.includes( '\n' ) || f.new.includes( '\n' ) || f.old.length + f.new.length > 160
-				? diffView( f.old, f.new )
-				: el( 'dl', { class: 'migrateplus-review-swap' }, [
-					el( 'dt', { text: 'Now' } ), el( 'dd', { class: 'is-old', text: f.old || '(empty)' } ),
-					el( 'dt', { text: 'Imported' } ), el( 'dd', { class: 'is-new', text: f.new || '(empty)' } ),
-				] ),
-		] ) );
+				? createElement( DiffView, { oldText: f.old, newText: f.new } )
+				: createElement( 'dl', { className: 'migrateplus-review-swap' },
+					createElement( 'dt', null, 'Now' ), createElement( 'dd', { className: 'is-old' }, f.old || '(empty)' ),
+					createElement( 'dt', null, 'Imported' ), createElement( 'dd', { className: 'is-new' }, f.new || '(empty)' ) )
+		) ) );
 	}
 
 	/**
@@ -1273,7 +1166,7 @@
 	 * Uses a longest-common-subsequence table after trimming the shared start and end;
 	 * a pair too large for that is shown as "all removed, all added".
 	 */
-	function diffView( oldText, newText ) {
+	function DiffView( { oldText, newText } ) {
 		const a = oldText.split( '\n' );
 		const b = newText.split( '\n' );
 		let start = 0;
@@ -1325,9 +1218,9 @@
 		} );
 		const out = [];
 		let folded = 0;
-		const flush = () => {
+		const addFoldedLines = ( k ) => {
 			if ( folded ) {
-				out.push( el( 'li', { class: 'is-fold', text: '⋯ ' + folded + ( 1 === folded ? ' unchanged line' : ' unchanged lines' ) } ) );
+				out.push( createElement( 'li', { key: 'fold-' + k, className: 'is-fold' }, '⋯ ' + folded + ( 1 === folded ? ' unchanged line' : ' unchanged lines' ) ) );
 				folded = 0;
 			}
 		};
@@ -1336,102 +1229,98 @@
 				folded++;
 				return;
 			}
-			flush();
+			addFoldedLines( k );
 			const kind = { ' ': 'is-same', '-': 'is-old', '+': 'is-new' }[ row[ 0 ] ];
-			out.push( el( 'li', { class: kind }, [ el( 'span', { class: 'migrateplus-diff-sign', 'aria-label': { ' ': 'Unchanged', '-': 'Removed', '+': 'Added' }[ row[ 0 ] ], text: ' ' === row[ 0 ] ? '' : ( '-' === row[ 0 ] ? '−' : '+' ) } ), el( 'span', { text: row[ 1 ] || ' ' } ) ] ) );
+			out.push( createElement( 'li', { key: k, className: kind },
+				createElement( 'span', { className: 'migrateplus-diff-sign', 'aria-label': { ' ': 'Unchanged', '-': 'Removed', '+': 'Added' }[ row[ 0 ] ] }, ' ' === row[ 0 ] ? '' : ( '-' === row[ 0 ] ? '−' : '+' ) ),
+				createElement( 'span', null, row[ 1 ] || ' ' ) ) );
 		} );
-		flush();
-		return el( 'ol', { class: 'migrateplus-diff' }, out );
+		addFoldedLines( rows.length );
+		return createElement( 'ol', { className: 'migrateplus-diff' }, out );
 	}
 
 	/**
 	 * File field with an "Upload file / From URL" switch (unless the schema sets remote: false).
 	 * The upload side is a drop zone.
 	 */
-	function fileInput( f, id, name ) {
-		const upload = el( 'input', { id, name, type: 'file', accept: f.accept || '', class: 'migrateplus-drop-input' } );
-		const fileName = el( 'span', { class: 'migrateplus-drop-file' } );
-		const zone = el( 'label', { class: 'migrateplus-drop', for: id }, [
-			upload,
-			el( 'span', { class: 'migrateplus-drop-icon', 'aria-hidden': 'true' } ),
-			el( 'span', { class: 'migrateplus-drop-text' }, [
-				el( 'strong', { text: 'Drop a file here or choose one' } ),
-				el( 'span', { text: ( f.accept || '' ).split( ',' ).filter( ( a ) => a.trim().startsWith( '.' ) ).join( ', ' ) + ', up to ' + D.maxUpload } ),
-			] ),
-			fileName,
-		] );
+	function FileField( { f, id, name } ) {
+		const upload = useRef( null );
+		const urlInput = useRef( null );
+		const [ dragging, setDragging ] = useImmediateState( false );
+		const [ chosen, setChosen ] = useImmediateState( '' );
+		const modeKey = state.sourceId + ':' + f.key;
+		const isUrl = f.remote !== false && 'url' === state.fileMode[ modeKey ];
 		const showFile = () => {
-			const file = upload.files && upload.files[ 0 ];
-			zone.classList.toggle( 'has-file', !! file );
-			fileName.textContent = file ? file.name + ' (' + formatBytes( file.size ) + ')' : '';
+			const file = upload.current.files && upload.current.files[ 0 ];
+			setChosen( file ? file.name + ' (' + formatBytes( file.size ) + ')' : '' );
 		};
-		upload.addEventListener( 'change', showFile );
-		[ 'dragenter', 'dragover' ].forEach( ( t ) => zone.addEventListener( t, ( e ) => {
+		const markDragging = ( e ) => {
 			e.preventDefault();
-			zone.classList.add( 'is-dragging' );
-		} ) );
-		[ 'dragleave', 'dragend', 'drop' ].forEach( ( t ) => zone.addEventListener( t, () => zone.classList.remove( 'is-dragging' ) ) );
-		zone.addEventListener( 'drop', ( e ) => {
-			e.preventDefault();
-			if ( e.dataTransfer && e.dataTransfer.files.length ) {
-				upload.files = e.dataTransfer.files;
-				showFile();
+			if ( ! dragging ) {
+				setDragging( true );
 			}
-		} );
+		};
+		const zone = createElement( 'label', {
+			className: 'migrateplus-drop' + ( chosen ? ' has-file' : '' ) + ( dragging ? ' is-dragging' : '' ),
+			htmlFor: id,
+			onDragEnter: markDragging,
+			onDragOver: markDragging,
+			onDragLeave: () => setDragging( false ),
+			onDragEnd: () => setDragging( false ),
+			onDrop: ( e ) => {
+				e.preventDefault();
+				setDragging( false );
+				if ( e.dataTransfer && e.dataTransfer.files.length ) {
+					upload.current.files = e.dataTransfer.files;
+					showFile();
+				}
+			},
+		},
+			// Disabled inputs are left out of the submitted form.
+			createElement( 'input', { ref: upload, id, name, type: 'file', accept: f.accept || '', className: 'migrateplus-drop-input', disabled: isUrl, onChange: showFile } ),
+			createElement( 'span', { className: 'migrateplus-drop-icon', 'aria-hidden': 'true' } ),
+			createElement( 'span', { className: 'migrateplus-drop-text' },
+				createElement( 'strong', null, 'Drop a file here or choose one' ),
+				createElement( 'span', null, ( f.accept || '' ).split( ',' ).filter( ( a ) => a.trim().startsWith( '.' ) ).join( ', ' ) + ', up to ' + D.maxUpload ) ),
+			createElement( 'span', { className: 'migrateplus-drop-file' }, chosen )
+		);
 
 		if ( f.remote === false ) {
 			return zone;
 		}
-		const modeKey = state.sourceId + ':' + f.key;
-		const mode = state.fileMode[ modeKey ] || 'upload';
-		const urlInput = el( 'input', {
-			id: id + '-url',
-			name: 'settings[' + f.key + '_url]',
-			type: 'url',
-			placeholder: 'https://',
-			autocomplete: 'off',
-			'aria-label': f.label + ' URL',
-		} );
-		const uploadPane = el( 'div', { class: 'migrateplus-file-pane' }, zone );
-		const urlPane = el( 'div', { class: 'migrateplus-file-pane' }, [
-			urlInput,
-			el( 'p', { class: 'migrateplus-field-help', text: 'Your server downloads the file (up to ' + D.maxRemote + '). Google Sheets, Google Drive, Dropbox and GitHub share links work too, as long as they are shared publicly.' } ),
-		] );
-
-		const tabs = {};
-		const setMode = ( m, focus ) => {
+		const setMode = ( m ) => {
 			state.fileMode[ modeKey ] = m;
-			const isUrl = m === 'url';
-			uploadPane.hidden = isUrl;
-			urlPane.hidden = ! isUrl;
-			// Disabled inputs are left out of the submitted form.
-			upload.disabled = isUrl;
-			urlInput.disabled = ! isUrl;
-			urlInput.required = isUrl && !! f.required;
-			Object.entries( tabs ).forEach( ( [ k, b ] ) => {
-				b.classList.toggle( 'is-active', k === m );
-				b.setAttribute( 'aria-pressed', k === m ? 'true' : 'false' );
-			} );
-			if ( focus ) {
-				( isUrl ? urlInput : upload ).focus();
-			}
+			render();
+			( 'url' === m ? urlInput : upload ).current.focus();
 		};
-		tabs.url = el( 'button', { type: 'button', class: 'migrateplus-seg', text: 'From a URL', onclick: () => setMode( 'url', true ) } );
-		tabs.upload = el( 'button', { type: 'button', class: 'migrateplus-seg', text: 'Upload a file', onclick: () => setMode( 'upload', true ) } );
-
-		const wrap = el( 'div', { class: 'migrateplus-file-field' }, [
-			el( 'div', { class: 'migrateplus-segmented', role: 'group', 'aria-label': f.label + ': how to provide it' }, [ tabs.upload, tabs.url ] ),
-			uploadPane,
-			urlPane,
-		] );
-		setMode( mode, false );
-		return wrap;
+		const modeButton = ( m, label ) => createElement( 'button', {
+			type: 'button',
+			className: 'migrateplus-seg' + ( ( 'url' === m ) === isUrl ? ' is-active' : '' ),
+			'aria-pressed': ( 'url' === m ) === isUrl ? 'true' : 'false',
+			onClick: () => setMode( m ),
+		}, label );
+		return createElement( 'div', { className: 'migrateplus-file-field' },
+			createElement( 'div', { className: 'migrateplus-segmented', role: 'group', 'aria-label': f.label + ': how to provide it' }, modeButton( 'upload', 'Upload a file' ), modeButton( 'url', 'From a URL' ) ),
+			createElement( 'div', { className: 'migrateplus-file-pane', hidden: isUrl }, zone ),
+			createElement( 'div', { className: 'migrateplus-file-pane', hidden: ! isUrl },
+				createElement( 'input', {
+					ref: urlInput,
+					id: id + '-url',
+					name: 'settings[' + f.key + '_url]',
+					type: 'url',
+					placeholder: 'https://',
+					autoComplete: 'off',
+					'aria-label': f.label + ' URL',
+					disabled: ! isUrl,
+					required: isUrl && !! f.required,
+				} ),
+				createElement( 'p', { className: 'migrateplus-field-help' }, 'Your server downloads the file (up to ' + D.maxRemote + '). Google Sheets, Google Drive, Dropbox and GitHub share links work too, as long as they are shared publicly.' ) )
+		);
 	}
 
 	function onPreview( e ) {
 		e.preventDefault();
-		const form = e.target;
-		const fd = new FormData( form );
+		const fd = new FormData( e.currentTarget );
 		fd.append( 'source', state.sourceId );
 		const source = D.sources.find( ( s ) => s.id === state.sourceId );
 
@@ -1451,20 +1340,10 @@
 		const urlField = source.schema.find( ( f ) => f.type === 'url' && fd.get( 'settings[' + f.key + ']' ) );
 		const connectTo = urlField ? hostOf( String( fd.get( 'settings[' + urlField.key + ']' ) ) ) : '';
 
-		const submit = form.querySelector( '[type="submit"]' );
-		if ( submit ) {
-			submit.disabled = true;
-		}
-		const oldNotice = root.querySelector( '.migrateplus-notice.notice-error' );
-		if ( oldNotice ) {
-			oldNotice.remove();
-		}
+		state.sourceError = '';
 		requestPreview( fd, { upload, remote, connectTo, label: source.label, onError: ( err ) => {
-			if ( submit ) {
-				submit.disabled = false;
-			}
-			// Keep the form as typed; just surface the error.
-			form.parentNode.insertBefore( notice( 'error', err.message ), form );
+			state.sourceError = err.message;
+			render();
 		} } );
 	}
 
@@ -1546,71 +1425,58 @@
 
 	// Step 2
 
-	function renderMap() {
-		suggestExtras();
+	function MapStep() {
 		const job = state.job;
 		const source = D.sources.find( ( s ) => s.id === job.source ) || D.sources.find( ( s ) => s.id === state.sourceId ) || { id: job.source, label: job.source };
 		const total = job.total === null || job.total === undefined ? null : Number( job.total );
-
-		root.appendChild( el( 'section', { class: 'migrateplus-summary' }, [
-			el( 'span', { class: 'migrateplus-source-icon migrateplus-icon-' + source.id, 'aria-hidden': 'true' } ),
-			el( 'div', { class: 'migrateplus-summary-text' }, [
-				el( 'strong', { text: 'Connected to ' + source.label } ),
-				el( 'span', { text: ( total === null ? 'Unknown number of' : total.toLocaleString() ) + ' records, ' + state.fields.length + ' fields' + ( job.settings.file_url || job.settings.url || job.settings.site_url ? ' from ' + hostOf( job.settings.file_url || job.settings.url || job.settings.site_url ) : '' ) } ),
-			] ),
-			el( 'button', { type: 'button', class: 'button', text: isDropSource() ? 'Choose another file' : 'Change source', onclick: () => {
-				state.step = 'source';
-				state.error = '';
-				render();
-			} } ),
-		] ) );
-
-		if ( ! isExport( job ) ) {
-			root.appendChild( renderSavedMappings() );
-		}
-
-		// Preview table.
 		const cols = state.fields.slice( 0, 40 );
-		// No records when a job's cached copy is gone: an empty table would only say "First 0 records".
-		if ( state.records.length ) {
-			root.appendChild( el( 'details', { class: 'migrateplus-panel migrateplus-preview-panel', open: true }, [
-				el( 'summary', {}, [
-					el( 'h2', { text: 'Preview' } ),
-					el( 'span', { class: 'migrateplus-muted', text: 'First ' + state.records.length + ' records' + ( state.fields.length > cols.length ? ', ' + cols.length + ' of ' + state.fields.length + ' fields shown' : '' ) } ),
-				] ),
-				el( 'div', { class: 'migrateplus-preview-scroll', tabindex: 0, 'aria-label': 'Preview records' }, el( 'table', { class: 'migrateplus-preview' }, [
-					el( 'thead', {}, el( 'tr', {}, cols.map( ( c ) => el( 'th', { scope: 'col', text: c } ) ) ) ),
-					el( 'tbody', {}, state.records.map( ( r ) => el( 'tr', {}, cols.map( ( c ) => el( 'td', { title: r[ c ] || '', text: truncate( r[ c ], 80 ) } ) ) ) ) ),
-				] ) ),
-			] ) );
-		}
-
-		const grid = el( 'div', { class: 'migrateplus-grid' } );
-		grid.appendChild( renderMappingCard() );
-		grid.appendChild( renderOptionsCard() );
-		root.appendChild( grid );
-
 		const mapped = D.targets.filter( ( t ) => state.mapping.fields[ t.key ] ).length;
 		const ready = !! ( state.mapping.fields.post_title || state.mapping.fields.post_content );
-		root.appendChild( el( 'div', { class: 'migrateplus-actionbar' }, [
-			el( 'span', { class: 'migrateplus-actionbar-status' + ( ready ? '' : ' is-warn' ), 'aria-live': 'polite', text: ready
-				? mapped + ' of ' + D.targets.length + ' fields mapped'
-				: 'Map the title or the content to continue' } ),
-			el( 'div', { class: 'migrateplus-actionbar-buttons' }, [
-				el( 'button', { type: 'button', class: 'button', disabled: state.busy, text: 'Dry run', title: 'Process everything without saving, to check the mapping', onclick: () => start( true ) } ),
-				el( 'button', { type: 'button', class: 'button button-primary', disabled: state.busy, text: 'Start import', onclick: () => start( false ) } ),
-			] ),
-		] ) );
+		const where = job.settings.file_url || job.settings.url || job.settings.site_url;
+
+		return createElement( Fragment, null,
+			createElement( 'section', { className: 'migrateplus-summary' },
+				createElement( 'span', { className: 'migrateplus-source-icon migrateplus-icon-' + source.id, 'aria-hidden': 'true' } ),
+				createElement( 'div', { className: 'migrateplus-summary-text' },
+					createElement( 'strong', null, 'Connected to ' + source.label ),
+					createElement( 'span', null, ( total === null ? 'Unknown number of' : total.toLocaleString() ) + ' records, ' + state.fields.length + ' fields' + ( where ? ' from ' + hostOf( where ) : '' ) ) ),
+				createElement( 'button', { type: 'button', className: 'button', onClick: () => {
+					state.step = 'source';
+					state.error = '';
+					render();
+				} }, isDropSource() ? 'Choose another file' : 'Change source' )
+			),
+			isExport( job ) ? null : createElement( SavedMappings ),
+			// No records when a job's cached copy is gone: an empty table would only say "First 0 records".
+			state.records.length ? createElement( 'details', { className: 'migrateplus-panel migrateplus-preview-panel', open: true },
+				createElement( 'summary', null,
+					createElement( 'h2', null, 'Preview' ),
+					createElement( 'span', { className: 'migrateplus-muted' }, 'First ' + state.records.length + ' records' + ( state.fields.length > cols.length ? ', ' + cols.length + ' of ' + state.fields.length + ' fields shown' : '' ) ) ),
+				createElement( 'div', { className: 'migrateplus-preview-scroll', tabIndex: 0, 'aria-label': 'Preview records' }, createElement( 'table', { className: 'migrateplus-preview' },
+					createElement( 'thead', null, createElement( 'tr', null, cols.map( ( c ) => createElement( 'th', { key: c, scope: 'col' }, c ) ) ) ),
+					createElement( 'tbody', null, state.records.map( ( r, i ) => createElement( 'tr', { key: i }, cols.map( ( c ) => createElement( 'td', { key: c, title: r[ c ] || '' }, truncate( r[ c ], 80 ) ) ) ) ) )
+				) )
+			) : null,
+			createElement( 'div', { className: 'migrateplus-grid' }, createElement( MappingCard ), createElement( OptionsCard ) ),
+			createElement( 'div', { className: 'migrateplus-actionbar' },
+				createElement( 'span', { className: 'migrateplus-actionbar-status' + ( ready ? '' : ' is-warn' ), 'aria-live': 'polite' }, ready
+					? mapped + ' of ' + D.targets.length + ' fields mapped'
+					: 'Map the title or the content to continue' ),
+				createElement( 'div', { className: 'migrateplus-actionbar-buttons' },
+					createElement( 'button', { type: 'button', className: 'button', disabled: state.busy, title: 'Process everything without saving, to check the mapping', onClick: () => start( true ) }, 'Dry run' ),
+					createElement( 'button', { type: 'button', className: 'button button-primary', disabled: state.busy, onClick: () => start( false ) }, 'Start import' ) )
+			)
+		);
 	}
 
 	/**
 	 * Save the mapping and options under a name, or load, rename or delete a saved one.
 	 * Saved mappings are only for JSON that is not a MigratePlus export.
 	 */
-	function renderSavedMappings() {
+	function SavedMappings() {
 		const list = state.savedMappings;
 		const pick = list.find( ( m ) => m.name === state.savedPick ) || null;
-		const say = ( type, text ) => {
+		const showNotice = ( type, text ) => {
 			state.savedNotice = { type, text };
 			render();
 		};
@@ -1618,24 +1484,17 @@
 			state.savedMappings = d.mappings || [];
 			state.savedPick = d.name || '';
 		};
-		const select = el( 'select', { id: 'migrateplus-saved-select', 'aria-label': 'Load saved mapping', disabled: ! list.length, onchange: ( e ) => {
-			state.savedPick = e.target.value;
-			state.savedNotice = null;
-			render();
-		} }, [ el( 'option', { value: '', text: list.length ? 'Choose a saved mapping' : 'No saved mappings yet' } ) ].concat(
-			list.map( ( m ) => el( 'option', { value: m.name, text: m.name, selected: pick && m.name === pick.name } ) )
-		) );
 		const save = () => {
 			const name = ( state.savedName || '' ).trim() || ( pick ? pick.name : '' );
 			if ( ! name ) {
-				say( 'error', 'Give the mapping a name first.' );
+				showNotice( 'error', 'Give the mapping a name first.' );
 				return;
 			}
 			const send = () => api( 'mapping_save', { job: state.job.id, name, mapping: mappingToSave(), options: state.options } ).then( ( d ) => {
 				refresh( d );
 				state.savedName = '';
-				say( 'success', 'Saved as “' + d.name + '”. A file with the same fields will offer it.' );
-			} ).catch( ( err ) => say( 'error', err.message ) );
+				showNotice( 'success', 'Saved as “' + d.name + '”. A file with the same fields will offer it.' );
+			} ).catch( ( err ) => showNotice( 'error', err.message ) );
 			if ( ! list.some( ( m ) => m.name === name ) ) {
 				send();
 				return;
@@ -1658,8 +1517,8 @@
 			}
 			api( 'mapping_rename', { name: pick.name, new_name: name.trim() } ).then( ( d ) => {
 				refresh( d );
-				say( 'success', 'Renamed to “' + d.name + '”.' );
-			} ).catch( ( err ) => say( 'error', err.message ) );
+				showNotice( 'success', 'Renamed to “' + d.name + '”.' );
+			} ).catch( ( err ) => showNotice( 'error', err.message ) );
 		};
 		const remove = () => ask( {
 			title: 'Delete saved mapping?',
@@ -1670,27 +1529,34 @@
 				modal.close();
 				api( 'mapping_delete', { name: pick.name } ).then( ( d ) => {
 					refresh( d );
-					say( 'success', 'Deleted “' + pick.name + '”.' );
-				} ).catch( ( err ) => say( 'error', err.message ) );
+					showNotice( 'success', 'Deleted “' + pick.name + '”.' );
+				} ).catch( ( err ) => showNotice( 'error', err.message ) );
 			},
 		} );
-		return el( 'section', { class: 'migrateplus-panel migrateplus-saved' }, [
-			el( 'h2', { text: 'Saved mappings' } ),
-			el( 'p', { class: 'migrateplus-muted', text: 'Save this mapping and the import options to use them again for the next file from the same place. Saved mappings are shared by everyone who imports on this site.' } ),
-			state.savedNotice ? notice( state.savedNotice.type, state.savedNotice.text ) : null,
-			el( 'div', { class: 'migrateplus-saved-row' }, [
-				select,
-				el( 'button', { type: 'button', class: 'button', disabled: ! pick, text: 'Apply', onclick: () => applySavedMapping( pick ) } ),
-				el( 'button', { type: 'button', class: 'button-link', disabled: ! pick, text: 'Rename', onclick: rename } ),
-				el( 'button', { type: 'button', class: 'migrateplus-link-danger', disabled: ! pick, text: 'Delete', onclick: remove } ),
-			] ),
-			el( 'div', { class: 'migrateplus-saved-row' }, [
-				el( 'input', { type: 'text', id: 'migrateplus-saved-name', 'aria-label': 'Name for this mapping', placeholder: pick ? pick.name : 'Name, for example Books feed', value: state.savedName, maxlength: 100, oninput: ( e ) => {
+		return createElement( 'section', { className: 'migrateplus-panel migrateplus-saved' },
+			createElement( 'h2', null, 'Saved mappings' ),
+			createElement( 'p', { className: 'migrateplus-muted' }, 'Save this mapping and the import options to use them again for the next file from the same place. Saved mappings are shared by everyone who imports on this site.' ),
+			state.savedNotice ? createElement( Notice, { type: state.savedNotice.type, message: state.savedNotice.text } ) : null,
+			createElement( 'div', { className: 'migrateplus-saved-row' },
+				createElement( 'select', { id: 'migrateplus-saved-select', 'aria-label': 'Load saved mapping', disabled: ! list.length, value: pick ? pick.name : '', onChange: ( e ) => {
+					state.savedPick = e.target.value;
+					state.savedNotice = null;
+					render();
+				} },
+					createElement( 'option', { value: '' }, list.length ? 'Choose a saved mapping' : 'No saved mappings yet' ),
+					list.map( ( m ) => createElement( 'option', { key: m.name, value: m.name }, m.name ) ) ),
+				createElement( 'button', { type: 'button', className: 'button', disabled: ! pick, onClick: () => applySavedMapping( pick ) }, 'Apply' ),
+				createElement( 'button', { type: 'button', className: 'button-link', disabled: ! pick, onClick: rename }, 'Rename' ),
+				createElement( 'button', { type: 'button', className: 'migrateplus-link-danger', disabled: ! pick, onClick: remove }, 'Delete' )
+			),
+			createElement( 'div', { className: 'migrateplus-saved-row' },
+				createElement( 'input', { type: 'text', id: 'migrateplus-saved-name', 'aria-label': 'Name for this mapping', placeholder: pick ? pick.name : 'Name, for example Books feed', value: state.savedName, maxLength: 100, onChange: ( e ) => {
 					state.savedName = e.target.value;
+					render();
 				} } ),
-				el( 'button', { type: 'button', class: 'button', text: 'Save mapping', onclick: save } ),
-			] ),
-		] );
+				createElement( 'button', { type: 'button', className: 'button', onClick: save }, 'Save mapping' )
+			)
+		);
 	}
 
 	/**
@@ -1740,98 +1606,82 @@
 		render();
 	}
 
-	function updateActionbar() {
-		const status = root.querySelector( '.migrateplus-actionbar-status' );
-		if ( ! status ) {
-			return;
-		}
-		const mapped = D.targets.filter( ( t ) => state.mapping.fields[ t.key ] ).length;
-		const ready = !! ( state.mapping.fields.post_title || state.mapping.fields.post_content );
-		status.classList.toggle( 'is-warn', ! ready );
-		status.textContent = ready ? mapped + ' of ' + D.targets.length + ' fields mapped' : 'Map the title or the content to continue';
-	}
-
-	function renderMappingCard() {
+	function MappingCard() {
 		const m = state.mapping;
-		const rows = D.targets.map( ( t ) => {
-			const sampleCell = el( 'td', { class: 'migrateplus-sample', text: truncate( sample( m.fields[ t.key ] ), 120 ) } );
-			const row = el( 'tr', { class: m.fields[ t.key ] ? 'is-mapped' : '' } );
-			[
-				el( 'th', { scope: 'row' }, [ el( 'span', { text: t.label } ), t.help ? el( 'span', { class: 'migrateplus-help', text: t.help } ) : null ] ),
-				el( 'td', { class: 'migrateplus-arrow', 'aria-hidden': 'true', text: '←' } ),
-				el( 'td', {}, fieldSelect( m.fields[ t.key ] || '', ( v ) => {
-					if ( v ) {
-						m.fields[ t.key ] = v;
-					} else {
-						delete m.fields[ t.key ];
-					}
-					row.classList.toggle( 'is-mapped', !! v );
-					sampleCell.textContent = truncate( sample( v ), 120 );
-					updateActionbar();
-				}, { nested: t.key === 'comments' } ) ),
-				sampleCell,
-			].forEach( ( c ) => row.appendChild( c ) );
-			return row;
-		} );
-
-		const metaRows = m.meta.map( ( row, i ) => el( 'div', { class: 'migrateplus-pair' }, [
-			el( 'input', { type: 'text', class: 'code', placeholder: 'meta_key', 'aria-label': 'Custom field name', value: row.key || '', oninput: ( e ) => {
-				row.key = e.target.value;
-			} } ),
-			el( 'span', { class: 'migrateplus-arrow', 'aria-hidden': 'true', text: '←' } ),
-			fieldSelect( row.source, ( v ) => {
-				row.source = v;
-			} ),
-			el( 'button', { type: 'button', class: 'migrateplus-icon-btn', 'aria-label': 'Remove custom field', title: 'Remove', text: '×', onclick: () => {
-				m.meta.splice( i, 1 );
-				render();
-			} } ),
-		] ) );
-
 		const taxes = postType( state.options.post_type ).taxonomies.filter( ( t ) => t.name !== 'category' && t.name !== 'post_tag' );
-		const taxRows = m.taxonomies.map( ( row, i ) => el( 'div', { class: 'migrateplus-pair' }, [
-			el( 'select', { 'aria-label': 'Taxonomy', onchange: ( e ) => {
-				row.taxonomy = e.target.value;
-			} }, [ el( 'option', { value: '', text: 'Choose taxonomy' } ) ].concat( taxes.map( ( t ) => el( 'option', { value: t.name, text: t.label + ' (' + t.name + ')', selected: t.name === row.taxonomy } ) ) ) ),
-			el( 'span', { class: 'migrateplus-arrow', 'aria-hidden': 'true', text: '←' } ),
-			fieldSelect( row.source, ( v ) => {
-				row.source = v;
-			} ),
-			el( 'button', { type: 'button', class: 'migrateplus-icon-btn', 'aria-label': 'Remove taxonomy', title: 'Remove', text: '×', onclick: () => {
-				m.taxonomies.splice( i, 1 );
-				render();
-			} } ),
-		] ) );
+		const remove = ( list, i ) => () => {
+			list.splice( i, 1 );
+			render();
+		};
 
-		return el( 'section', { class: 'migrateplus-panel migrateplus-mapping' }, [
-			el( 'header', { class: 'migrateplus-section-head' }, [
-				el( 'h2', { text: 'Field mapping' } ),
-				el( 'p', { class: 'migrateplus-muted', text: 'Pick which source field fills each WordPress field. Suggestions are already filled in.' } ),
-			] ),
-			el( 'table', { class: 'migrateplus-map-table' }, [
-				el( 'thead', {}, el( 'tr', {}, [ el( 'th', { scope: 'col', text: 'WordPress field' } ), el( 'th', { 'aria-hidden': 'true' } ), el( 'th', { scope: 'col', text: 'Source field' } ), el( 'th', { scope: 'col', text: 'Sample value' } ) ] ) ),
-				el( 'tbody', {}, rows ),
-			] ),
-			renderAcfSection(),
-			el( 'div', { class: 'migrateplus-subsection' }, [
-				el( 'h3', { text: 'Custom fields' } ),
-				m.meta.length ? el( 'div', { class: 'migrateplus-pairs' }, metaRows ) : el( 'p', { class: 'migrateplus-muted', text: 'Save any source field as post meta. ACF field names work too.' } ),
-				el( 'button', { type: 'button', class: 'button migrateplus-add', text: 'Add custom field', onclick: () => {
+		return createElement( 'section', { className: 'migrateplus-panel migrateplus-mapping' },
+			createElement( 'header', { className: 'migrateplus-section-head' },
+				createElement( 'h2', null, 'Field mapping' ),
+				createElement( 'p', { className: 'migrateplus-muted' }, 'Pick which source field fills each WordPress field. Suggestions are already filled in.' ) ),
+			createElement( 'table', { className: 'migrateplus-map-table' },
+				createElement( 'thead', null, createElement( 'tr', null,
+					createElement( 'th', { scope: 'col' }, 'WordPress field' ),
+					createElement( 'th', { 'aria-hidden': 'true' } ),
+					createElement( 'th', { scope: 'col' }, 'Source field' ),
+					createElement( 'th', { scope: 'col' }, 'Sample value' ) ) ),
+				createElement( 'tbody', null, D.targets.map( ( t ) => createElement( 'tr', { key: t.key, className: m.fields[ t.key ] ? 'is-mapped' : '' },
+					createElement( 'th', { scope: 'row' }, createElement( 'span', null, t.label ), t.help ? createElement( 'span', { className: 'migrateplus-help' }, t.help ) : null ),
+					createElement( 'td', { className: 'migrateplus-arrow', 'aria-hidden': 'true' }, '←' ),
+					createElement( 'td', null, createElement( FieldSelect, { value: m.fields[ t.key ] || '', nested: t.key === 'comments', onChange: ( v ) => {
+						if ( v ) {
+							m.fields[ t.key ] = v;
+						} else {
+							delete m.fields[ t.key ];
+						}
+						render();
+					} } ) ),
+					createElement( 'td', { className: 'migrateplus-sample' }, truncate( sample( m.fields[ t.key ] ), 120 ) )
+				) ) )
+			),
+			createElement( AcfSection ),
+			createElement( 'div', { className: 'migrateplus-subsection' },
+				createElement( 'h3', null, 'Custom fields' ),
+				m.meta.length ? createElement( 'div', { className: 'migrateplus-pairs' }, m.meta.map( ( row, i ) => createElement( 'div', { key: i, className: 'migrateplus-pair' },
+					createElement( 'input', { type: 'text', className: 'code', placeholder: 'meta_key', 'aria-label': 'Custom field name', value: row.key || '', onChange: ( e ) => {
+						row.key = e.target.value;
+						render();
+					} } ),
+					createElement( 'span', { className: 'migrateplus-arrow', 'aria-hidden': 'true' }, '←' ),
+					createElement( FieldSelect, { value: row.source, onChange: ( v ) => {
+						row.source = v;
+						render();
+					} } ),
+					createElement( 'button', { type: 'button', className: 'migrateplus-icon-btn', 'aria-label': 'Remove custom field', title: 'Remove', onClick: remove( m.meta, i ) }, '×' )
+				) ) ) : createElement( 'p', { className: 'migrateplus-muted' }, 'Save any source field as post meta. ACF field names work too.' ),
+				createElement( 'button', { type: 'button', className: 'button migrateplus-add', onClick: () => {
 					m.meta.push( { key: '', source: '' } );
 					render();
-				} } ),
-			] ),
-			el( 'div', { class: 'migrateplus-subsection' }, [
-				el( 'h3', { text: 'Other taxonomies' } ),
+				} }, 'Add custom field' )
+			),
+			createElement( 'div', { className: 'migrateplus-subsection' },
+				createElement( 'h3', null, 'Other taxonomies' ),
 				taxes.length
-					? ( m.taxonomies.length ? el( 'div', { class: 'migrateplus-pairs' }, taxRows ) : el( 'p', { class: 'migrateplus-muted', text: 'Assign terms in custom taxonomies registered for this post type.' } ) )
-					: el( 'p', { class: 'migrateplus-muted', text: 'This post type has no other taxonomies.' } ),
-				taxes.length ? el( 'button', { type: 'button', class: 'button migrateplus-add', text: 'Add taxonomy', onclick: () => {
+					? ( m.taxonomies.length ? createElement( 'div', { className: 'migrateplus-pairs' }, m.taxonomies.map( ( row, i ) => createElement( 'div', { key: i, className: 'migrateplus-pair' },
+						createElement( 'select', { 'aria-label': 'Taxonomy', value: row.taxonomy || '', onChange: ( e ) => {
+							row.taxonomy = e.target.value;
+							render();
+						} },
+							createElement( 'option', { value: '' }, 'Choose taxonomy' ),
+							taxes.map( ( t ) => createElement( 'option', { key: t.name, value: t.name }, t.label + ' (' + t.name + ')' ) ) ),
+						createElement( 'span', { className: 'migrateplus-arrow', 'aria-hidden': 'true' }, '←' ),
+						createElement( FieldSelect, { value: row.source, onChange: ( v ) => {
+							row.source = v;
+							render();
+						} } ),
+						createElement( 'button', { type: 'button', className: 'migrateplus-icon-btn', 'aria-label': 'Remove taxonomy', title: 'Remove', onClick: remove( m.taxonomies, i ) }, '×' )
+					) ) ) : createElement( 'p', { className: 'migrateplus-muted' }, 'Assign terms in custom taxonomies registered for this post type.' ) )
+					: createElement( 'p', { className: 'migrateplus-muted' }, 'This post type has no other taxonomies.' ),
+				taxes.length ? createElement( 'button', { type: 'button', className: 'button migrateplus-add', onClick: () => {
 					m.taxonomies.push( { taxonomy: '', source: '' } );
 					render();
-				} } ) : null,
-			] ),
-		] );
+				} }, 'Add taxonomy' ) : null
+			)
+		);
 	}
 
 	const ACF_TYPE_LABELS = {
@@ -1861,22 +1711,19 @@
 		date_time_picker: 'Any date format.',
 	};
 
-	function renderAcfSection() {
+	function AcfSection() {
 		if ( ! D.acf || ! D.acf.active ) {
 			return null;
 		}
-		const pt = state.options.post_type;
-		const fields = acfFields( pt );
+		const fields = acfFields( state.options.post_type );
 		const m = state.mapping;
-		const head = el( 'div', { class: 'migrateplus-acf-head' }, [
-			el( 'h3', { text: 'ACF fields' } ),
-			el( 'span', { class: 'migrateplus-badge', text: fields.length + ' field' + ( fields.length === 1 ? '' : 's' ) } ),
-		] );
+		const head = createElement( 'div', { className: 'migrateplus-acf-head' },
+			createElement( 'h3', null, 'ACF fields' ),
+			createElement( 'span', { className: 'migrateplus-badge' }, fields.length + ' field' + ( fields.length === 1 ? '' : 's' ) ) );
 		if ( ! fields.length ) {
-			return el( 'div', { class: 'migrateplus-subsection migrateplus-acf' }, [
+			return createElement( 'div', { className: 'migrateplus-subsection migrateplus-acf' },
 				head,
-				el( 'p', { class: 'migrateplus-muted', text: 'No ACF field groups are assigned to this post type. Assign one in ACF, or pick another post type under "Import as".' } ),
-			] );
+				createElement( 'p', { className: 'migrateplus-muted' }, 'No ACF field groups are assigned to this post type. Assign one in ACF, or pick another post type under "Import as".' ) );
 		}
 		const groups = {};
 		fields.forEach( ( f ) => {
@@ -1884,98 +1731,75 @@
 		} );
 		const body = [];
 		Object.entries( groups ).forEach( ( [ group, list ] ) => {
-			body.push( el( 'tr', { class: 'migrateplus-acf-group' }, el( 'th', { colspan: 4, scope: 'colgroup', text: group } ) ) );
+			body.push( createElement( 'tr', { key: 'group-' + group, className: 'migrateplus-acf-group' }, createElement( 'th', { colSpan: 4, scope: 'colgroup' }, group ) ) );
 			list.forEach( ( f ) => {
 				const current = m.acf[ f.key ] || m.acf[ f.name ] || '';
-				const sampleCell = el( 'td', { class: 'migrateplus-sample', text: truncate( sample( current ), 120 ) } );
-				const row = el( 'tr', { class: current ? 'is-mapped' : '' } );
-				[
-					el( 'th', { scope: 'row' }, [
-						el( 'span', { text: f.label + ( f.required ? ' *' : '' ) } ),
-						el( 'span', { class: 'migrateplus-help' }, [
-							el( 'code', { text: f.name } ),
+				body.push( createElement( 'tr', { key: f.key, className: current ? 'is-mapped' : '' },
+					createElement( 'th', { scope: 'row' },
+						createElement( 'span', null, f.label + ( f.required ? ' *' : '' ) ),
+						createElement( 'span', { className: 'migrateplus-help' },
+							createElement( 'code', null, f.name ),
 							' ' + ( ACF_TYPE_LABELS[ f.type ] || f.type ),
-							f.sub && f.sub.length ? ' (' + f.sub.join( ', ' ) + ')' : '',
-						] ),
-					] ),
-					el( 'td', { class: 'migrateplus-arrow', 'aria-hidden': 'true', text: '←' } ),
-					el( 'td', {}, [
-						fieldSelect( current, ( v ) => {
+							f.sub && f.sub.length ? ' (' + f.sub.join( ', ' ) + ')' : '' ) ),
+					createElement( 'td', { className: 'migrateplus-arrow', 'aria-hidden': 'true' }, '←' ),
+					createElement( 'td', null,
+						createElement( FieldSelect, { value: current, nested: true, label: f.label, onChange: ( v ) => {
 							delete m.acf[ f.name ];
 							if ( v ) {
 								m.acf[ f.key ] = v;
 							} else {
 								delete m.acf[ f.key ];
 							}
-							row.classList.toggle( 'is-mapped', !! v );
-							sampleCell.textContent = truncate( sample( v ), 120 );
-						}, { nested: true, label: f.label } ),
-						ACF_HINTS[ f.type ] ? el( 'span', { class: 'migrateplus-help', text: ACF_HINTS[ f.type ] } ) : null,
-					] ),
-					sampleCell,
-				].forEach( ( c ) => row.appendChild( c ) );
-				body.push( row );
+							render();
+						} } ),
+						ACF_HINTS[ f.type ] ? createElement( 'span', { className: 'migrateplus-help' }, ACF_HINTS[ f.type ] ) : null ),
+					createElement( 'td', { className: 'migrateplus-sample' }, truncate( sample( current ), 120 ) )
+				) );
 			} );
 		} );
-		return el( 'div', { class: 'migrateplus-subsection migrateplus-acf' }, [
+		return createElement( 'div', { className: 'migrateplus-subsection migrateplus-acf' },
 			head,
-			el( 'p', { class: 'migrateplus-muted', text: 'Values are converted for each field type: image URLs are downloaded, related posts and terms are looked up, dates and choices are normalised.' } ),
-			el( 'table', { class: 'migrateplus-map-table' }, el( 'tbody', {}, body ) ),
-		] );
+			createElement( 'p', { className: 'migrateplus-muted' }, 'Values are converted for each field type: image URLs are downloaded, related posts and terms are looked up, dates and choices are normalised.' ),
+			createElement( 'table', { className: 'migrateplus-map-table' }, createElement( 'tbody', null, body ) ) );
 	}
 
-	function renderOptionsCard() {
+	function OptionsCard() {
 		const o = state.options;
-		const set = ( k ) => ( e ) => {
+		const setOption = ( k ) => ( e ) => {
 			o[ k ] = e.target.type === 'checkbox' ? ( e.target.checked ? 1 : 0 ) : e.target.value;
+			render();
 		};
-		let uid = 0;
-		const toggle = ( k, label, help ) => {
-			const id = 'migrateplus-opt-' + k;
-			return el( 'div', { class: 'migrateplus-toggle' }, [
-				el( 'input', { type: 'checkbox', role: 'switch', id, class: 'migrateplus-switch', checked: !! Number( o[ k ] ), onchange: set( k ) } ),
-				el( 'label', { for: id }, [ el( 'span', { text: label } ), help ? el( 'span', { class: 'migrateplus-help', text: help } ) : null ] ),
-			] );
-		};
-		const row = ( label, control, help ) => {
-			const id = 'migrateplus-opt-row-' + ( ++uid );
-			control.id = id;
-			return el( 'div', { class: 'migrateplus-opt' }, [
-				el( 'label', { class: 'migrateplus-opt-label', for: id, text: label } ),
-				control,
-				help ? el( 'span', { class: 'migrateplus-help', text: help } ) : null,
-			] );
-		};
+		const toggle = ( k, label, help ) => createElement( Toggle, { id: 'migrateplus-opt-' + k, label, help, checked: !! Number( o[ k ] ), onChange: setOption( k ) } );
+		const optionRow = ( id, label, control, help ) => createElement( 'div', { className: 'migrateplus-opt' },
+			createElement( 'label', { className: 'migrateplus-opt-label', htmlFor: id }, label ),
+			control,
+			help ? createElement( 'span', { className: 'migrateplus-help' }, help ) : null );
+		const choices = ( list ) => list.map( ( [ v, l ] ) => createElement( 'option', { key: v, value: v }, l ) );
+		const statuses = [ [ 'publish', 'Published' ], [ 'draft', 'Draft' ], [ 'pending', 'Pending review' ], [ 'private', 'Private' ] ];
 
-		return el( 'aside', { class: 'migrateplus-panel migrateplus-options' }, [
-			el( 'header', { class: 'migrateplus-section-head' }, [
-				el( 'h2', { text: 'Import options' } ),
-				D.settingsUrl ? el( 'p', { class: 'migrateplus-muted' }, [ 'Defaults come from ', el( 'a', { href: D.settingsUrl, text: 'Settings' } ), '.' ] ) : null,
-			] ),
-			row( 'Import as', el( 'select', { onchange: ( e ) => {
-				o.post_type = e.target.value;
-				render();
-			} }, D.postTypes.map( ( p ) => el( 'option', { value: p.name, text: p.label + ' (' + p.name + ')', selected: p.name === o.post_type } ) ) ), 'Used for every record, unless "Post type" is mapped and names a type this site has.' ),
-			row( 'Default status', el( 'select', { onchange: set( 'default_status' ) }, [ [ 'publish', 'Published' ], [ 'draft', 'Draft' ], [ 'pending', 'Pending review' ], [ 'private', 'Private' ] ].map( ( [ v, l ] ) =>
-				el( 'option', { value: v, text: l, selected: v === o.default_status } ) ) ), 'Used when a record has no status, or one Migrate Plus does not recognise.' ),
-			row( 'Status for every item', el( 'select', { onchange: set( 'force_status' ) }, [ [ '', 'Keep each record’s status' ], [ 'publish', 'Published' ], [ 'draft', 'Draft' ], [ 'pending', 'Pending review' ], [ 'private', 'Private' ] ].map( ( [ v, l ] ) =>
-				el( 'option', { value: v, text: l, selected: v === ( o.force_status || '' ) } ) ) ), 'Overrides the status in the file, also for posts that are updated. Published posts with a future date are scheduled.' ),
-			row( 'Default author', el( 'select', { onchange: set( 'default_author' ) }, D.users.map( ( u ) =>
-				el( 'option', { value: u.id, text: u.name, selected: Number( u.id ) === Number( o.default_author ) } ) ) ) ),
-			row( 'Records imported before', el( 'select', { onchange: set( 'duplicate' ) }, [
+		return createElement( 'aside', { className: 'migrateplus-panel migrateplus-options' },
+			createElement( 'header', { className: 'migrateplus-section-head' },
+				createElement( 'h2', null, 'Import options' ),
+				D.settingsUrl ? createElement( 'p', { className: 'migrateplus-muted' }, 'Defaults come from ', createElement( 'a', { href: D.settingsUrl }, 'Settings' ), '.' ) : null ),
+			optionRow( 'migrateplus-opt-row-1', 'Import as', createElement( 'select', { id: 'migrateplus-opt-row-1', value: o.post_type, onChange: setOption( 'post_type' ) },
+				D.postTypes.map( ( p ) => createElement( 'option', { key: p.name, value: p.name }, p.label + ' (' + p.name + ')' ) ) ), 'Used for every record, unless "Post type" is mapped and names a type this site has.' ),
+			optionRow( 'migrateplus-opt-row-2', 'Default status', createElement( 'select', { id: 'migrateplus-opt-row-2', value: o.default_status, onChange: setOption( 'default_status' ) }, choices( statuses ) ), 'Used when a record has no status, or one Migrate Plus does not recognise.' ),
+			optionRow( 'migrateplus-opt-row-3', 'Status for every item', createElement( 'select', { id: 'migrateplus-opt-row-3', value: o.force_status || '', onChange: setOption( 'force_status' ) }, choices( [ [ '', 'Keep each record’s status' ] ].concat( statuses ) ) ), 'Overrides the status in the file, also for posts that are updated. Published posts with a future date are scheduled.' ),
+			optionRow( 'migrateplus-opt-row-4', 'Default author', createElement( 'select', { id: 'migrateplus-opt-row-4', value: String( o.default_author ), onChange: setOption( 'default_author' ) },
+				D.users.map( ( u ) => createElement( 'option', { key: u.id, value: String( u.id ) }, u.name ) ) ) ),
+			optionRow( 'migrateplus-opt-row-5', 'Records imported before', createElement( 'select', { id: 'migrateplus-opt-row-5', value: o.duplicate, onChange: setOption( 'duplicate' ) }, choices( [
 				[ 'skip', 'Skip them' ], [ 'update', 'Update them' ], [ 'create', 'Create duplicates' ],
-			].map( ( [ v, l ] ) => el( 'option', { value: v, text: l, selected: v === o.duplicate } ) ) ), 'Matched by the mapped Source ID.' ),
-			row( 'Batch size', el( 'input', { type: 'number', min: 1, max: 100, value: o.batch_size, onchange: set( 'batch_size' ) } ), 'Records per request. Lower it if image downloads time out.' ),
-			el( 'div', { class: 'migrateplus-toggles' }, [
+			] ) ), 'Matched by the mapped Source ID.' ),
+			optionRow( 'migrateplus-opt-row-6', 'Batch size', createElement( 'input', { id: 'migrateplus-opt-row-6', type: 'number', min: 1, max: 100, value: o.batch_size, onChange: setOption( 'batch_size' ) } ), 'Records per request. Lower it if image downloads time out.' ),
+			createElement( 'div', { className: 'migrateplus-toggles' },
 				toggle( 'import_featured_image', 'Download featured images' ),
 				toggle( 'import_content_images', 'Download images in content', 'Copies <img> files into the Media Library and rewrites their URLs.' ),
 				toggle( 'create_terms', 'Create missing categories and terms' ),
 				toggle( 'create_authors', 'Create missing authors', 'New users get the Author role and a random password.' ),
 				toggle( 'rewrite_links', 'Point links to the old site here', 'Migrate Plus exports only. Files in wp-content keep their old URLs unless images in content are downloaded.' ),
 				toggle( 'import_comments', 'Import comments', 'Migrate Plus exports that include comments. Importing the file again updates them instead of adding them twice.' ),
-				toggle( 'import_menus', 'Import menus', 'Migrate Plus exports that include menus, after all posts. A menu with the same slug is filled rather than copied.' ),
-			] ),
-		] );
+				toggle( 'import_menus', 'Import menus', 'Migrate Plus exports that include menus, after all posts. A menu with the same slug is filled rather than copied.' ) )
+		);
 	}
 
 	/**
@@ -1996,21 +1820,21 @@
 		if ( ! dry && ! checked ) {
 			state.options.skip_existing = 0;
 			modal.open( { kind: 'confirm', title: 'Checking for duplicates', message: 'Looking for items in this import that are already on this site…', percent: null, actions: [] } );
-			const ask = ( d ) => modal.open( Object.assign( {
+			const askAbout = ( d ) => modal.open( Object.assign( {
 				kind: 'confirm',
 				icon: 'file',
 				bar: false,
 				dismissible: true,
 				title: 'Some items are already here',
 				message: duplicateMessage( d, 'of ' + Number( d.total ).toLocaleString() + ' records' ) + changedMessage( d ),
-				actions: duplicateActions( d, () => start( false, true ), () => ask( d ) ).concat( { label: 'Cancel', onClick: () => modal.close() } ),
+				actions: duplicateActions( d, () => start( false, true ), () => askAbout( d ) ).concat( { label: 'Cancel', onClick: () => modal.close() } ),
 			}, duplicateSummary( d ) ) );
 			checkDuplicates().then( ( d ) => {
 				if ( ! d.count ) {
 					start( false, true );
 					return;
 				}
-				ask( d );
+				askAbout( d );
 			} ).catch( duplicateCheckFailed );
 			return;
 		}
@@ -2029,8 +1853,7 @@
 			state.busy = false;
 			state.paused = false;
 			state.modalHidden = false;
-			modal.open( runModalOptions() );
-			render();
+			modal.open( { kind: 'run' } );
 			runLoop();
 		} ).catch( ( err ) => {
 			modal.close();
@@ -2059,13 +1882,14 @@
 
 	// Step 3
 
-	function renderRun() {
+	function Run() {
 		const job = state.job;
 		const s = job.stats;
 		const total = job.total ? Number( job.total ) : 0;
 		const processed = Number( s.processed ) || 0;
 		const dry = Number( job.options.dry_run ) === 1;
 		const done = [ 'complete', 'rolled_back' ].includes( job.status );
+		const idle = done || 'draft' === job.status;
 		const pct = done ? 100 : ( total ? Math.min( 100, Math.floor( ( processed / total ) * 100 ) ) : null );
 
 		let statusText;
@@ -2087,48 +1911,41 @@
 			statusText = ( dry ? 'Dry run in progress' : 'Importing' ) + '. Keep this tab open.';
 		}
 
-		const actions = el( 'div', { class: 'migrateplus-actions' } );
-		if ( ! done && 'draft' !== job.status ) {
-			actions.appendChild( state.paused
-				// One id for both, so focus stays on the button when render() swaps it after each batch.
-				? el( 'button', { type: 'button', id: 'migrateplus-run-toggle', class: 'button button-primary', text: 'Resume', disabled: state.running, onclick: resume } )
-				: el( 'button', { type: 'button', id: 'migrateplus-run-toggle', class: 'button', text: 'Pause', onclick: pause } ) );
-			if ( ! modal.isOpen() ) {
-				actions.appendChild( el( 'button', { type: 'button', class: 'button', text: 'Show progress window', onclick: showRunModal } ) );
-			}
-		} else {
-			if ( dry ) {
-				actions.appendChild( el( 'button', { type: 'button', class: 'button button-primary', text: 'Run the real import', onclick: () => start( false ) } ) );
-				actions.appendChild( el( 'button', { type: 'button', class: 'button', text: 'Adjust mapping', onclick: () => {
-					state.step = 'map';
-					render();
-				} } ) );
-			} else if ( job.status === 'complete' ) {
-				actions.appendChild( el( 'a', { class: 'button button-primary', href: contentUrl( job ), text: 'View imported content' } ) );
-			}
-			actions.appendChild( el( 'button', { type: 'button', class: 'button', text: 'Import', onclick: reset } ) );
-			if ( ! dry && job.status === 'complete' && importedCount( job ) > 0 ) {
-				actions.appendChild( el( 'button', { type: 'button', class: 'button migrateplus-danger migrateplus-push', text: 'Roll back this import', onclick: () => rollback( job.id ) } ) );
-			}
-		}
+		return createElement( Fragment, null,
+			createElement( 'section', { className: 'migrateplus-panel migrateplus-run' + ( tone ? ' is-' + tone : '' ) },
+				createElement( 'div', { className: 'migrateplus-run-head' },
+					createElement( 'div', { className: 'migrateplus-run-figure', 'aria-hidden': 'true' }, pct === null
+						? createElement( 'span', { className: 'migrateplus-run-count' }, processed.toLocaleString() )
+						: createElement( Fragment, null, createElement( 'span', { className: 'migrateplus-run-count' }, String( pct ) ), createElement( 'span', { className: 'migrateplus-run-unit' }, '%' ) ) ),
+					createElement( 'div', { className: 'migrateplus-run-text' },
+						createElement( 'h2', { 'aria-live': 'polite' }, statusText ),
+						createElement( 'p', { className: 'migrateplus-muted' }, processed.toLocaleString() + ( total ? ' of ' + total.toLocaleString() : '' ) + ' records processed' + ( dry ? ' (dry run)' : '' ) ),
+						sectionsText( job ) ? createElement( 'p', { className: 'migrateplus-muted' }, sectionsText( job ) ) : null )
+				),
+				createElement( OutcomeBar, { stats: s, total, size: 'lg', indeterminate: ! done && ! total && ! state.paused, tone, label: 'Import progress' } ),
+				createElement( OutcomeLegend, { stats: s, dry } ),
+				createElement( 'div', { className: 'migrateplus-actions' },
+					// One button for Pause and Resume, so focus stays on it when it flips after each batch.
+					idle ? null : createElement( 'button', state.paused
+						? { type: 'button', id: 'migrateplus-run-toggle', className: 'button button-primary', disabled: state.running, onClick: resume }
+						: { type: 'button', id: 'migrateplus-run-toggle', className: 'button', onClick: pause }, state.paused ? 'Resume' : 'Pause' ),
+					! idle && ! modal.isOpen() ? createElement( 'button', { type: 'button', className: 'button', onClick: showRunModal }, 'Show progress window' ) : null,
+					idle && dry ? createElement( 'button', { type: 'button', className: 'button button-primary', onClick: () => start( false ) }, 'Run the real import' ) : null,
+					idle && dry ? createElement( 'button', { type: 'button', className: 'button', onClick: () => {
+						state.step = 'map';
+						render();
+					} }, 'Adjust mapping' ) : null,
+					idle && ! dry && job.status === 'complete' ? createElement( 'a', { className: 'button button-primary', href: contentUrl( job ) }, 'View imported content' ) : null,
+					idle ? createElement( 'button', { type: 'button', className: 'button', onClick: reset }, 'Import' ) : null,
+					idle && ! dry && job.status === 'complete' && importedCount( job ) > 0 ? createElement( 'button', { type: 'button', className: 'button migrateplus-danger migrateplus-push', onClick: () => rollback( job.id ) }, 'Roll back this import' ) : null
+				)
+			),
+			createElement( RunLog, { job } )
+		);
+	}
 
-		root.appendChild( el( 'section', { class: 'migrateplus-panel migrateplus-run' + ( tone ? ' is-' + tone : '' ) }, [
-			el( 'div', { class: 'migrateplus-run-head' }, [
-				el( 'div', { class: 'migrateplus-run-figure', 'aria-hidden': 'true' }, pct === null
-					? el( 'span', { class: 'migrateplus-run-count', text: processed.toLocaleString() } )
-					: [ el( 'span', { class: 'migrateplus-run-count', text: String( pct ) } ), el( 'span', { class: 'migrateplus-run-unit', text: '%' } ) ] ),
-				el( 'div', { class: 'migrateplus-run-text' }, [
-					el( 'h2', { 'aria-live': 'polite', text: statusText } ),
-					el( 'p', { class: 'migrateplus-muted', text: processed.toLocaleString() + ( total ? ' of ' + total.toLocaleString() : '' ) + ' records processed' + ( dry ? ' (dry run)' : '' ) } ),
-					sectionsText( job ) ? el( 'p', { class: 'migrateplus-muted', text: sectionsText( job ) } ) : null,
-				] ),
-			] ),
-			outcomeBar( s, total, { size: 'lg', indeterminate: ! done && ! total && ! state.paused, tone, label: 'Import progress' } ),
-			outcomeLegend( s, dry ),
-			actions,
-		] ) );
-
-		// Log with filters and search.
+	/** The run's log, newest first, with filters and search. */
+	function RunLog( { job } ) {
 		const counts = { all: 0, error: 0, warning: 0, success: 0 };
 		( job.log || [] ).forEach( ( e ) => {
 			counts.all++;
@@ -2136,54 +1953,37 @@
 				counts[ e.l ]++;
 			}
 		} );
-		const list = el( 'ol', { class: 'migrateplus-log' } );
-		const fillLog = () => {
-			list.innerHTML = '';
-			const q = state.logQuery.trim().toLowerCase();
-			const entries = ( job.log || [] ).slice().reverse().filter( ( e ) =>
-				( state.logFilter === 'all' || e.l === state.logFilter ) && ( ! q || String( e.m ).toLowerCase().includes( q ) )
-			);
-			entries.forEach( ( e ) => list.appendChild( el( 'li', { class: 'migrateplus-log-' + e.l }, [
-				el( 'time', { datetime: new Date( e.t * 1000 ).toISOString(), text: new Date( e.t * 1000 ).toLocaleTimeString() } ),
-				el( 'span', { text: e.m } ),
-			] ) ) );
-			if ( ! entries.length ) {
-				list.appendChild( el( 'li', { class: 'migrateplus-log-empty', text: counts.all ? 'No log lines match.' : 'Waiting for the first batch…' } ) );
-			}
-		};
-		const chip = ( key, label ) => el( 'button', {
+		const q = state.logQuery.trim().toLowerCase();
+		const entries = ( job.log || [] ).slice().reverse().filter( ( e ) =>
+			( state.logFilter === 'all' || e.l === state.logFilter ) && ( ! q || String( e.m ).toLowerCase().includes( q ) )
+		);
+		const filterChip = ( key, label ) => createElement( 'button', {
 			type: 'button',
-			id: 'migrateplus-log-filter-' + key, // Keeps focus across render().
-			class: 'migrateplus-chip' + ( state.logFilter === key ? ' is-active' : '' ),
+			id: 'migrateplus-log-filter-' + key,
+			className: 'migrateplus-chip' + ( state.logFilter === key ? ' is-active' : '' ),
 			'aria-pressed': state.logFilter === key ? 'true' : 'false',
-			onclick: ( e ) => {
+			onClick: () => {
 				state.logFilter = key;
-				Array.from( e.currentTarget.parentNode.children ).forEach( ( b ) => {
-					b.classList.toggle( 'is-active', b === e.currentTarget );
-					b.setAttribute( 'aria-pressed', b === e.currentTarget ? 'true' : 'false' );
-				} );
-				fillLog();
+				render();
 			},
-		}, [ label, el( 'span', { class: 'migrateplus-chip-count', text: String( counts[ key === 'all' ? 'all' : key ] || 0 ) } ) ] );
+		}, label, createElement( 'span', { className: 'migrateplus-chip-count' }, String( counts[ key ] || 0 ) ) );
 
-		fillLog();
-		root.appendChild( el( 'section', { class: 'migrateplus-panel migrateplus-log-panel' }, [
-			el( 'header', { class: 'migrateplus-log-head' }, [
-				el( 'h2', { text: 'Log' } ),
-				el( 'div', { class: 'migrateplus-chips', role: 'group', 'aria-label': 'Filter log' }, [
-					chip( 'all', 'All' ), chip( 'success', 'Saved' ), chip( 'warning', 'Warnings' ), chip( 'error', 'Errors' ),
-				] ),
-				el( 'input', { type: 'search', id: 'migrateplus-log-search', class: 'migrateplus-search', placeholder: 'Search the log', 'aria-label': 'Search the log', value: state.logQuery, oninput: ( e ) => {
+		return createElement( 'section', { className: 'migrateplus-panel migrateplus-log-panel' },
+			createElement( 'header', { className: 'migrateplus-log-head' },
+				createElement( 'h2', null, 'Log' ),
+				createElement( 'div', { className: 'migrateplus-chips', role: 'group', 'aria-label': 'Filter log' },
+					filterChip( 'all', 'All' ), filterChip( 'success', 'Saved' ), filterChip( 'warning', 'Warnings' ), filterChip( 'error', 'Errors' ) ),
+				createElement( 'input', { type: 'search', id: 'migrateplus-log-search', className: 'migrateplus-search', placeholder: 'Search the log', 'aria-label': 'Search the log', value: state.logQuery, onChange: ( e ) => {
 					state.logQuery = e.target.value;
-					fillLog();
-				} } ),
-			] ),
-			list,
-		] ) );
-
-		if ( modal.kind() === 'run' ) {
-			modal.update( runModalOptions() );
-		}
+					render();
+				} } )
+			),
+			createElement( 'ol', { className: 'migrateplus-log' }, entries.length
+				? entries.map( ( e, i ) => createElement( 'li', { key: i, className: 'migrateplus-log-' + e.l },
+					createElement( 'time', { dateTime: new Date( e.t * 1000 ).toISOString() }, new Date( e.t * 1000 ).toLocaleTimeString() ),
+					createElement( 'span', null, e.m ) ) )
+				: createElement( 'li', { className: 'migrateplus-log-empty' }, counts.all ? 'No log lines match.' : 'Waiting for the first batch…' ) )
+		);
 	}
 
 	/** Where the imported content is listed: the menus screen for an export of menus alone. */
@@ -2207,13 +2007,11 @@
 	function hideRunModal() {
 		state.modalHidden = true;
 		modal.close();
-		render();
 	}
 
 	function showRunModal() {
 		state.modalHidden = false;
-		modal.open( runModalOptions() );
-		render();
+		modal.open( { kind: 'run' } );
 	}
 
 	/**
@@ -2269,10 +2067,7 @@
 				]
 				: [
 					{ label: 'View imported content', primary: true, href: contentUrl( job ) },
-					{ label: 'Close', onClick: () => {
-						modal.close();
-						render();
-					} },
+					{ label: 'Close', onClick: () => modal.close() },
 				];
 		} else if ( state.error ) {
 			title = noun + ' stopped';
@@ -2323,10 +2118,7 @@
 			].map( ( [ key, label ] ) => ( { key, label, value: s[ key ] } ) ),
 			actions,
 			dismissible: true,
-			onDismiss: done ? () => {
-				modal.close();
-				render();
-			} : hideRunModal,
+			onDismiss: done ? () => modal.close() : hideRunModal,
 		};
 	}
 
@@ -2414,7 +2206,7 @@
 		let removed = 0;
 		const refresh = () => {
 			if ( state.tab === 'history' ) {
-				renderHistory();
+				loadHistory();
 			} else {
 				render();
 			}
@@ -2429,7 +2221,7 @@
 			actions: [],
 			dismissible: false,
 		} );
-		const step = () => api( 'rollback', { job: jobId } ).then( ( data ) => {
+		const nextBatch = () => api( 'rollback', { job: jobId } ).then( ( data ) => {
 			removed += Number( data.deleted ) || 0;
 			// The first response tells us how much there was to delete in total.
 			total = Math.max( total, removed + ( Number( data.remaining ) || 0 ) );
@@ -2457,7 +2249,7 @@
 				percent: total ? ( removed / total ) * 100 : null,
 				detail: removed.toLocaleString() + ' of ' + total.toLocaleString() + ' items deleted',
 			} );
-			return step();
+			return nextBatch();
 		} ).catch( ( err ) => {
 			modal.update( {
 				title: 'Rollback stopped',
@@ -2470,7 +2262,7 @@
 				actions: [
 					{ label: 'Try again', primary: true, onClick: () => {
 						modal.update( { title: 'Rolling back import', tone: '', note: '', dismissible: false, actions: [] } );
-						step();
+						nextBatch();
 					} },
 					{ label: 'Close', onClick: () => {
 						modal.close();
@@ -2479,155 +2271,143 @@
 				],
 			} );
 		} );
-		step();
+		nextBatch();
 	}
 
 	// Export
 
 	const EXPORT_STATUSES = [ [ 'publish', 'Published' ], [ 'draft', 'Draft' ], [ 'pending', 'Pending review' ], [ 'private', 'Private' ], [ 'future', 'Scheduled' ] ];
 
-	// Shared by every render of the export screen, so a change made just after a re-render still sends one count.
+	// One timer for the screen, so changes made close together still send one count.
 	let exportCountTimer = null;
 	// Counts can come back out of order; only the latest request's answer is shown.
 	let exportCountSeq = 0;
 
-	function renderExport() {
-		const x = state.exportArgs = state.exportArgs || Object.assign( {}, D.exportDefaults, {
-			statuses: ( D.exportDefaults.statuses || [ 'publish' ] ).slice(),
-			post_types: ( D.exportDefaults.post_types || [ 'post' ] ).slice(),
-		} );
-		const countEl = el( 'span', { class: 'migrateplus-export-count', 'aria-live': 'polite', text: 'Counting…' } );
-		const submit = el( 'button', { type: 'submit', class: 'button button-primary migrateplus-btn-lg', text: 'Export' } );
-		const recount = () => {
-			clearTimeout( exportCountTimer );
-			countEl.textContent = 'Counting…';
-			exportCountTimer = setTimeout( () => {
-				const seq = ++exportCountSeq;
-				api( 'export_count', { args: x } ).then( ( d ) => {
-					if ( seq !== exportCountSeq ) {
-						return;
-					}
-					const counts = Object.entries( d.counts || {} );
-					const each = counts.length > 1 ? ' (' + counts.map( ( [ type, n ] ) => n.toLocaleString() + ' ' + ( 1 === n ? postType( type ).label : postType( type ).plural || postType( type ).label ).toLowerCase() ).join( ', ' ) + ')' : '';
-					const menus = d.menus ? ', with ' + d.menus + ( 1 === d.menus ? ' menu' : ' menus' ) : '';
-					countEl.textContent = ! d.count && d.menus
+	/** Ask the server how much the export would hold, 250 ms after the last change. */
+	function recount() {
+		clearTimeout( exportCountTimer );
+		state.exportCount.text = 'Counting…';
+		render();
+		exportCountTimer = setTimeout( () => {
+			const seq = ++exportCountSeq;
+			api( 'export_count', { args: state.exportArgs } ).then( ( d ) => {
+				if ( seq !== exportCountSeq ) {
+					return;
+				}
+				const counts = Object.entries( d.counts || {} );
+				const each = counts.length > 1 ? ' (' + counts.map( ( [ type, n ] ) => n.toLocaleString() + ' ' + ( 1 === n ? postType( type ).label : postType( type ).plural || postType( type ).label ).toLowerCase() ).join( ', ' ) + ')' : '';
+				const menus = d.menus ? ', with ' + d.menus + ( 1 === d.menus ? ' menu' : ' menus' ) : '';
+				state.exportCount = {
+					text: ! d.count && d.menus
 						? 'No content matches: only ' + d.menus + ( 1 === d.menus ? ' menu' : ' menus' ) + ' will be exported'
-						: d.count.toLocaleString() + ' ' + ( d.count === 1 && 1 === counts.length ? postType( counts[ 0 ][ 0 ] ).label.toLowerCase() : 'items' ) + each + menus + ' will be exported';
-					countEl.classList.toggle( 'is-warn', ! d.count );
-					submit.disabled = ! d.count && ! d.menus; // Menus alone are worth a file.
-				} ).catch( ( e ) => {
-					if ( seq !== exportCountSeq ) {
-						return;
-					}
-					countEl.textContent = e.message;
-					countEl.classList.add( 'is-warn' );
-				} );
-			}, 250 );
-		};
-		const set = ( k, v ) => {
+						: d.count.toLocaleString() + ' ' + ( d.count === 1 && 1 === counts.length ? postType( counts[ 0 ][ 0 ] ).label.toLowerCase() : 'items' ) + each + menus + ' will be exported',
+					warn: ! d.count,
+					empty: ! d.count && ! d.menus, // Menus alone are worth a file.
+				};
+				render();
+			} ).catch( ( e ) => {
+				if ( seq !== exportCountSeq ) {
+					return;
+				}
+				state.exportCount = Object.assign( {}, state.exportCount, { text: e.message, warn: true } );
+				render();
+			} );
+		}, 250 );
+	}
+
+	function Export() {
+		const x = state.exportArgs;
+		const setArg = ( k, v ) => {
 			x[ k ] = v;
 			recount();
 		};
-		const toggle = ( k, label, help, disabled ) => {
-			const id = 'migrateplus-export-' + k;
-			return el( 'div', { class: 'migrateplus-toggle' + ( disabled ? ' is-disabled' : '' ) }, [
-				el( 'input', { type: 'checkbox', role: 'switch', id, class: 'migrateplus-switch', disabled, checked: ! disabled && !! Number( x[ k ] ), onchange: ( e ) => set( k, e.target.checked ? 1 : 0 ) } ),
-				el( 'label', { for: id }, [ el( 'span', { text: label } ), help ? el( 'span', { class: 'migrateplus-help', text: help } ) : null ] ),
-			] );
-		};
+		const toggle = ( k, label, help, disabled ) => createElement( Toggle, { id: 'migrateplus-export-' + k, label, help, disabled, checked: ! disabled && !! Number( x[ k ] ), onChange: ( e ) => setArg( k, e.target.checked ? 1 : 0 ) } );
 		const acfCount = x.post_types.reduce( ( n, t ) => n + acfFields( t ).length, 0 );
 		// Statuses, featured images and the like don't apply to media.
 		const isMedia = x.post_types.every( ( t ) => t === 'attachment' );
+		const le = state.lastExport;
 
-		const form = el( 'form', { class: 'migrateplus-panel migrateplus-export', onsubmit: ( e ) => {
-			e.preventDefault();
-			runExport();
-		} }, [
-			el( 'div', { class: 'migrateplus-export-grid' }, [
-				el( 'section', {}, [
-					el( 'h2', { text: 'What to export' } ),
-					el( 'fieldset', { class: 'migrateplus-opt' }, [
-						el( 'legend', { class: 'migrateplus-opt-label', text: 'Content types' } ),
-						el( 'div', { class: 'migrateplus-chips' }, exportTypes().map( ( p ) => {
-							const id = 'migrateplus-export-type-' + p.name;
-							return el( 'label', { class: 'migrateplus-check-chip', for: id, title: p.name }, [
-								el( 'input', { type: 'checkbox', id, checked: x.post_types.includes( p.name ), onchange: ( e ) => {
-									const picked = e.target.checked ? x.post_types.concat( p.name ) : x.post_types.filter( ( t ) => t !== p.name );
-									x.post_types = exportTypes().map( ( t ) => t.name ).filter( ( t ) => picked.includes( t ) ); // In the order shown.
-									if ( ! x.post_types.length ) {
-										x.post_types = [ p.name ];
-										e.target.checked = true;
-										return;
-									}
-									render();
-								} } ),
-								el( 'span', { text: p.label } ),
-							] );
-						} ) ),
-						x.post_types.length > 1 ? el( 'span', { class: 'migrateplus-help', text: 'One file, imported in one go: media first, so featured images and ACF images reuse the files it brings, then the rest in the order shown.' } ) : null,
-					] ),
-					isMedia ? null : el( 'fieldset', { class: 'migrateplus-opt' }, [
-						el( 'legend', { class: 'migrateplus-opt-label', text: 'Status' } ),
-						el( 'div', { class: 'migrateplus-chips' }, EXPORT_STATUSES.map( ( [ v, l ] ) => {
-							const id = 'migrateplus-export-status-' + v;
-							return el( 'label', { class: 'migrateplus-check-chip', for: id }, [
-								el( 'input', { type: 'checkbox', id, checked: x.statuses.includes( v ), onchange: ( e ) => {
-									x.statuses = e.target.checked ? x.statuses.concat( v ) : x.statuses.filter( ( s ) => s !== v );
-									if ( ! x.statuses.length ) {
-										x.statuses = [ v ];
-										e.target.checked = true;
-										return;
-									}
-									recount();
-								} } ),
-								el( 'span', { text: l } ),
-							] );
-						} ) ),
-					] ),
-					el( 'fieldset', { class: 'migrateplus-opt' }, [
-						el( 'legend', { class: 'migrateplus-opt-label', text: isMedia ? 'Uploaded between' : 'Published between' } ),
-						el( 'div', { class: 'migrateplus-date-range' }, [
-							el( 'input', { type: 'date', 'aria-label': 'From', value: x.after, onchange: ( e ) => set( 'after', e.target.value ) } ),
-							el( 'span', { class: 'migrateplus-muted', text: 'and' } ),
-							el( 'input', { type: 'date', 'aria-label': 'To', value: x.before, onchange: ( e ) => set( 'before', e.target.value ) } ),
-						] ),
-						el( 'span', { class: 'migrateplus-help', text: 'Leave empty to export everything.' } ),
-					] ),
-				] ),
-				el( 'section', {}, [
-					el( 'h2', { text: 'Include' } ),
-					el( 'div', { class: 'migrateplus-toggles is-flush' }, [
-						toggle( 'include_terms', 'Categories, tags and terms', 'Hierarchy is kept as "Parent > Child".' ),
-						isMedia ? null : toggle( 'include_image', 'Featured images', 'Exported as URLs; the importing site downloads them.' ),
-						toggle( 'include_meta', 'Custom fields', 'Public post meta. Private keys starting with "_" and keys listed in Settings are left out.' ),
-						D.acf && D.acf.active
-							? toggle( 'include_acf', 'ACF fields', acfCount ? acfCount + ' field' + ( acfCount === 1 ? '' : 's' ) + ' on this content type. Images become URLs, related posts become references.' : 'No ACF fields on this content type.', ! acfCount )
-							: toggle( 'include_acf', 'ACF fields', 'Advanced Custom Fields is not active on this site.', true ),
-						D.woo && D.woo.active && x.post_types.includes( 'product' )
-							? toggle( 'include_woo', 'WooCommerce product data', 'Prices, stock, attributes, downloads and variations. Images become URLs; related products link up by ID or SKU.' )
-							: null,
-						toggle( 'include_comments', 'Comments', 'Approved comments and replies, with their public comment fields. Pending, spam and trashed comments are left out.' ),
-						D.menus ? toggle( 'include_menus', 'Navigation menus', 'Every menu with its items and theme locations. Items point at posts and terms, so export the content they link to in this file too.' ) : null,
-						D.zlib ? toggle( 'gzip', 'Compress the file (.json.gz)', 'Much smaller, for a site whose upload limit is lower than the export. Migrate Plus imports it as it is.' ) : null,
-					] ),
-				] ),
-			] ),
-			el( 'footer', { class: 'migrateplus-panel-foot' }, [ countEl, submit ] ),
-		] );
-		root.appendChild( form );
-
-		if ( state.lastExport ) {
-			const le = state.lastExport;
-			root.appendChild( el( 'section', { class: 'migrateplus-summary' }, [
-				el( 'span', { class: 'migrateplus-source-icon migrateplus-icon-json', 'aria-hidden': 'true' } ),
-				el( 'div', { class: 'migrateplus-summary-text' }, [
-					el( 'strong', { text: le.filename } ),
-					el( 'span', { text: le.done.toLocaleString() + ' items, ' + le.size + '. The download link works for 24 hours.' } ),
-				] ),
-				el( 'a', { class: 'button button-primary', href: le.url, text: 'Download' } ),
-			] ) );
-		}
-		recount();
+		return createElement( Fragment, null,
+			createElement( 'form', { className: 'migrateplus-panel migrateplus-export', onSubmit: ( e ) => {
+				e.preventDefault();
+				runExport();
+			} },
+				createElement( 'div', { className: 'migrateplus-export-grid' },
+					createElement( 'section', null,
+						createElement( 'h2', null, 'What to export' ),
+						createElement( 'fieldset', { className: 'migrateplus-opt' },
+							createElement( 'legend', { className: 'migrateplus-opt-label' }, 'Content types' ),
+							createElement( 'div', { className: 'migrateplus-chips' }, exportTypes().map( ( p ) => {
+								const id = 'migrateplus-export-type-' + p.name;
+								return createElement( 'label', { key: p.name, className: 'migrateplus-check-chip', htmlFor: id, title: p.name },
+									createElement( 'input', { type: 'checkbox', id, checked: x.post_types.includes( p.name ), onChange: ( e ) => {
+										const picked = e.target.checked ? x.post_types.concat( p.name ) : x.post_types.filter( ( t ) => t !== p.name );
+										if ( ! picked.length ) {
+											render(); // The last one stays ticked.
+											return;
+										}
+										x.post_types = exportTypes().map( ( t ) => t.name ).filter( ( t ) => picked.includes( t ) ); // In the order shown.
+										recount();
+									} } ),
+									createElement( 'span', null, p.label ) );
+							} ) ),
+							x.post_types.length > 1 ? createElement( 'span', { className: 'migrateplus-help' }, 'One file, imported in one go: media first, so featured images and ACF images reuse the files it brings, then the rest in the order shown.' ) : null
+						),
+						isMedia ? null : createElement( 'fieldset', { className: 'migrateplus-opt' },
+							createElement( 'legend', { className: 'migrateplus-opt-label' }, 'Status' ),
+							createElement( 'div', { className: 'migrateplus-chips' }, EXPORT_STATUSES.map( ( [ v, l ] ) => {
+								const id = 'migrateplus-export-status-' + v;
+								return createElement( 'label', { key: v, className: 'migrateplus-check-chip', htmlFor: id },
+									createElement( 'input', { type: 'checkbox', id, checked: x.statuses.includes( v ), onChange: ( e ) => {
+										const picked = e.target.checked ? x.statuses.concat( v ) : x.statuses.filter( ( st ) => st !== v );
+										if ( ! picked.length ) {
+											render(); // The last one stays ticked.
+											return;
+										}
+										x.statuses = picked;
+										recount();
+									} } ),
+									createElement( 'span', null, l ) );
+							} ) )
+						),
+						createElement( 'fieldset', { className: 'migrateplus-opt' },
+							createElement( 'legend', { className: 'migrateplus-opt-label' }, isMedia ? 'Uploaded between' : 'Published between' ),
+							createElement( 'div', { className: 'migrateplus-date-range' },
+								createElement( 'input', { type: 'date', 'aria-label': 'From', value: x.after, onChange: ( e ) => setArg( 'after', e.target.value ) } ),
+								createElement( 'span', { className: 'migrateplus-muted' }, 'and' ),
+								createElement( 'input', { type: 'date', 'aria-label': 'To', value: x.before, onChange: ( e ) => setArg( 'before', e.target.value ) } ) ),
+							createElement( 'span', { className: 'migrateplus-help' }, 'Leave empty to export everything.' )
+						)
+					),
+					createElement( 'section', null,
+						createElement( 'h2', null, 'Include' ),
+						createElement( 'div', { className: 'migrateplus-toggles is-flush' },
+							toggle( 'include_terms', 'Categories, tags and terms', 'Hierarchy is kept as "Parent > Child".' ),
+							isMedia ? null : toggle( 'include_image', 'Featured images', 'Exported as URLs; the importing site downloads them.' ),
+							toggle( 'include_meta', 'Custom fields', 'Public post meta. Private keys starting with "_" and keys listed in Settings are left out.' ),
+							D.acf && D.acf.active
+								? toggle( 'include_acf', 'ACF fields', acfCount ? acfCount + ' field' + ( acfCount === 1 ? '' : 's' ) + ' on this content type. Images become URLs, related posts become references.' : 'No ACF fields on this content type.', ! acfCount )
+								: toggle( 'include_acf', 'ACF fields', 'Advanced Custom Fields is not active on this site.', true ),
+							D.woo && D.woo.active && x.post_types.includes( 'product' )
+								? toggle( 'include_woo', 'WooCommerce product data', 'Prices, stock, attributes, downloads and variations. Images become URLs; related products link up by ID or SKU.' )
+								: null,
+							toggle( 'include_comments', 'Comments', 'Approved comments and replies, with their public comment fields. Pending, spam and trashed comments are left out.' ),
+							D.menus ? toggle( 'include_menus', 'Navigation menus', 'Every menu with its items and theme locations. Items point at posts and terms, so export the content they link to in this file too.' ) : null,
+							D.zlib ? toggle( 'gzip', 'Compress the file (.json.gz)', 'Much smaller, for a site whose upload limit is lower than the export. Migrate Plus imports it as it is.' ) : null )
+					)
+				),
+				createElement( 'footer', { className: 'migrateplus-panel-foot' },
+					createElement( 'span', { className: 'migrateplus-export-count' + ( state.exportCount.warn ? ' is-warn' : '' ), 'aria-live': 'polite' }, state.exportCount.text ),
+					createElement( 'button', { type: 'submit', className: 'button button-primary migrateplus-btn-lg', disabled: state.exportCount.empty }, 'Export' ) )
+			),
+			le ? createElement( 'section', { className: 'migrateplus-summary' },
+				createElement( 'span', { className: 'migrateplus-source-icon migrateplus-icon-json', 'aria-hidden': 'true' } ),
+				createElement( 'div', { className: 'migrateplus-summary-text' },
+					createElement( 'strong', null, le.filename ),
+					createElement( 'span', null, le.done.toLocaleString() + ' items, ' + le.size + '. The download link works for 24 hours.' ) ),
+				createElement( 'a', { className: 'button button-primary', href: safeUrl( le.url ) }, 'Download' )
+			) : null
+		);
 	}
 
 	/** The post types the Export screen offers (the server leaves out ACF's settings, orders and the like). */
@@ -2646,7 +2426,7 @@
 			actions: [],
 			dismissible: false,
 		} );
-		const fail = ( err ) => modal.update( {
+		const showFailure = ( err ) => modal.update( {
 			title: 'Export stopped',
 			message: '',
 			tone: 'error',
@@ -2655,9 +2435,9 @@
 			dismissible: true,
 			actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
 		} );
-		const step = ( id ) => api( 'export_run', { export: id } ).then( ( d ) => {
+		const nextBatch = ( id ) => api( 'export_run', { export: id } ).then( ( d ) => {
 			if ( d.error ) {
-				fail( { message: d.error } );
+				showFailure( { message: d.error } );
 				return;
 			}
 			if ( d.complete ) {
@@ -2682,204 +2462,167 @@
 					onDismiss: null,
 					actions: [
 						{ label: 'Download ' + ( /\.json\.gz$/.test( d.filename ) ? '.json.gz' : 'JSON' ), primary: true, href: d.url },
-						{ label: 'Close', onClick: () => {
-							modal.close();
-							render();
-						} },
+						{ label: 'Close', onClick: () => modal.close() },
 					],
 				} );
-				render();
 				return;
 			}
 			modal.update( {
 				percent: d.total ? ( d.done / d.total ) * 100 : null,
 				detail: d.done.toLocaleString() + ' of ' + d.total.toLocaleString() + ' items' + ( d.section ? ', now ' + d.section.toLowerCase() : '' ),
 			} );
-			return step( id );
+			return nextBatch( id );
 		} );
 		api( 'export_start', { args: x } ).then( ( d ) => {
 			modal.update( { percent: 0, detail: '0 of ' + d.total.toLocaleString() + ' items' } );
-			return step( d.id );
-		} ).catch( fail );
+			return nextBatch( d.id );
+		} ).catch( showFailure );
 	}
 
 	// Find & Replace
 
-	function renderReplace() {
-		const r = state.replace = state.replace || {
-			search: '',
-			replace: '',
-			tables: ( D.tables || [] ).map( ( t ) => t.name ),
-			case_insensitive: 0,
-			whole_urls: 1,
-			guids: 0,
-			dry_run: 1,
-			result: null,
-		};
-		const submit = el( 'button', { type: 'submit', class: 'button button-primary migrateplus-btn-lg', text: r.dry_run ? 'Run dry run' : 'Replace' } );
-		const tableCount = el( 'span', { class: 'migrateplus-help' } );
-		const errorSlot = el( 'div', { 'aria-live': 'assertive' } );
-		const sync = () => {
-			tableCount.textContent = r.tables.length + ' of ' + ( D.tables || [] ).length + ' tables selected';
-			submit.textContent = r.dry_run ? 'Run dry run' : 'Replace';
-			// Drop a validation message once what it complained about is fixed.
-			if ( errorSlot.firstChild && r.search && r.tables.length ) {
-				errorSlot.innerHTML = '';
+	function Replace() {
+		const r = state.replace;
+		const all = D.tables || [];
+		// Drop a validation message once what it complained about is fixed.
+		const changed = () => {
+			if ( r.search && r.tables.length ) {
+				r.problem = '';
 			}
+			render();
 		};
-		const toggle = ( k, label, help ) => {
-			const id = 'migrateplus-replace-' + k;
-			return el( 'div', { class: 'migrateplus-toggle' }, [
-				el( 'input', { type: 'checkbox', role: 'switch', id, class: 'migrateplus-switch', checked: !! r[ k ], onchange: ( e ) => {
-					r[ k ] = e.target.checked ? 1 : 0;
-					sync();
-				} } ),
-				el( 'label', { for: id }, [ el( 'span', { text: label } ), help ? el( 'span', { class: 'migrateplus-help', text: help } ) : null ] ),
-			] );
-		};
-		const text = ( k, label, placeholder ) => el( 'div', { class: 'migrateplus-opt' }, [
-			el( 'label', { class: 'migrateplus-opt-label', for: 'migrateplus-replace-' + k, text: label } ),
-			el( 'input', { type: 'text', id: 'migrateplus-replace-' + k, class: 'migrateplus-code-input', value: r[ k ], placeholder, autocomplete: 'off', spellcheck: 'false', oninput: ( e ) => {
+		const toggle = ( k, label, help ) => createElement( Toggle, { id: 'migrateplus-replace-' + k, label, help, checked: !! r[ k ], onChange: ( e ) => {
+			r[ k ] = e.target.checked ? 1 : 0;
+			changed();
+		} } );
+		const textInput = ( k, label, placeholder ) => createElement( 'div', { className: 'migrateplus-opt' },
+			createElement( 'label', { className: 'migrateplus-opt-label', htmlFor: 'migrateplus-replace-' + k }, label ),
+			createElement( 'input', { type: 'text', id: 'migrateplus-replace-' + k, className: 'migrateplus-code-input', value: r[ k ], placeholder, autoComplete: 'off', spellCheck: false, onChange: ( e ) => {
 				r[ k ] = e.target.value;
-				sync();
-			} } ),
-		] );
-		const boxes = ( D.tables || [] ).map( ( t ) => {
-			const id = 'migrateplus-table-' + t.name;
-			return el( 'label', { class: 'migrateplus-table-option', for: id }, [
-				el( 'input', { type: 'checkbox', id, value: t.name, checked: r.tables.includes( t.name ), onchange: ( e ) => {
-					r.tables = e.target.checked ? r.tables.concat( t.name ) : r.tables.filter( ( n ) => n !== t.name );
-					sync();
-				} } ),
-				el( 'code', { text: t.name } ),
-				el( 'span', { class: 'migrateplus-help', text: '~' + t.rows.toLocaleString() + ' rows, ' + formatBytes( t.size ) } ),
-			] );
-		} );
+				changed();
+			} } ) );
 		const selectAll = ( on ) => {
-			r.tables = on ? ( D.tables || [] ).map( ( t ) => t.name ) : [];
-			boxes.forEach( ( b ) => {
-				b.firstChild.checked = on;
-			} );
-			sync();
+			r.tables = on ? all.map( ( t ) => t.name ) : [];
+			changed();
 		};
 
-		root.appendChild( el( 'form', { class: 'migrateplus-panel migrateplus-export migrateplus-replace', onsubmit: ( e ) => {
-			e.preventDefault();
-			const problem = ! r.search ? 'Enter the text to search for.' : ( ! r.tables.length ? 'No database tables are selected. Please select at least one.' : '' );
-			errorSlot.innerHTML = '';
-			if ( problem ) {
-				errorSlot.appendChild( notice( 'error', problem ) );
-				return;
-			}
-			runReplace();
-		} }, [
-			errorSlot,
-			el( 'div', { class: 'migrateplus-export-grid' }, [
-				el( 'section', {}, [
-					el( 'h2', { text: 'Find and replace' } ),
-					text( 'search', 'Search for', 'http://old-site.test' ),
-					text( 'replace', 'Replace with', 'https://new-site.com' ),
-					el( 'div', { class: 'migrateplus-toggles is-flush' }, [
-						toggle( 'dry_run', 'Dry run', 'Count and preview the changes without saving anything.' ),
-						toggle( 'whole_urls', 'Whole URLs only', 'When you search for a web address or domain, only that exact site matches: http://old.test is not changed inside http://old.test.example.com or http://old.testing.com, and old.test is not changed inside sub.old.test.' ),
-						toggle( 'case_insensitive', 'Ignore case', 'Match "Example" and "example" alike.' ),
-						toggle( 'guids', 'Replace GUIDs', 'Post GUIDs are permanent IDs that feed readers rely on. Leave this off unless you know you need it.' ),
-					] ),
-					el( 'p', { class: 'migrateplus-help', text: 'MigratePlus\'s own history and tracking data are left alone, so later imports still recognise content they brought in.' } ),
-				] ),
-				el( 'section', {}, [
-					el( 'h2', { text: 'Tables' } ),
-					el( 'div', { class: 'migrateplus-table-tools' }, [
-						tableCount,
-						el( 'button', { type: 'button', class: 'button-link', text: 'All', onclick: () => selectAll( true ) } ),
-						el( 'button', { type: 'button', class: 'button-link', text: 'None', onclick: () => selectAll( false ) } ),
-					] ),
-					el( 'div', { class: 'migrateplus-table-list' }, boxes ),
-				] ),
-			] ),
-			el( 'footer', { class: 'migrateplus-panel-foot' }, [
-				el( 'span', { class: 'migrateplus-help', text: 'Real runs keep the original values so they can be rolled back. A database backup is still the safest net.' } ),
-				submit,
-			] ),
-		] ) );
-		sync();
-
-		if ( r.result ) {
-			drawReplaceResult( r.result );
-		}
-		drawReplaceRuns();
+		return createElement( Fragment, null,
+			createElement( 'form', { className: 'migrateplus-panel migrateplus-export migrateplus-replace', onSubmit: ( e ) => {
+				e.preventDefault();
+				r.problem = ! r.search ? 'Enter the text to search for.' : ( ! r.tables.length ? 'No database tables are selected. Please select at least one.' : '' );
+				render();
+				if ( ! r.problem ) {
+					runReplace();
+				}
+			} },
+				createElement( 'div', { 'aria-live': 'assertive' }, r.problem ? createElement( Notice, { type: 'error', message: r.problem } ) : null ),
+				createElement( 'div', { className: 'migrateplus-export-grid' },
+					createElement( 'section', null,
+						createElement( 'h2', null, 'Find and replace' ),
+						textInput( 'search', 'Search for', 'http://old-site.test' ),
+						textInput( 'replace', 'Replace with', 'https://new-site.com' ),
+						createElement( 'div', { className: 'migrateplus-toggles is-flush' },
+							toggle( 'dry_run', 'Dry run', 'Count and preview the changes without saving anything.' ),
+							toggle( 'whole_urls', 'Whole URLs only', 'When you search for a web address or domain, only that exact site matches: http://old.test is not changed inside http://old.test.example.com or http://old.testing.com, and old.test is not changed inside sub.old.test.' ),
+							toggle( 'case_insensitive', 'Ignore case', 'Match "Example" and "example" alike.' ),
+							toggle( 'guids', 'Replace GUIDs', 'Post GUIDs are permanent IDs that feed readers rely on. Leave this off unless you know you need it.' ) ),
+						createElement( 'p', { className: 'migrateplus-help' }, 'Migrate Plus\'s own history and tracking data are left alone, so later imports still recognise content they brought in.' )
+					),
+					createElement( 'section', null,
+						createElement( 'h2', null, 'Tables' ),
+						createElement( 'div', { className: 'migrateplus-table-tools' },
+							createElement( 'span', { className: 'migrateplus-help' }, r.tables.length + ' of ' + all.length + ' tables selected' ),
+							createElement( 'button', { type: 'button', className: 'button-link', onClick: () => selectAll( true ) }, 'All' ),
+							createElement( 'button', { type: 'button', className: 'button-link', onClick: () => selectAll( false ) }, 'None' ) ),
+						createElement( 'div', { className: 'migrateplus-table-list' }, all.map( ( t ) => {
+							const id = 'migrateplus-table-' + t.name;
+							return createElement( 'label', { key: t.name, className: 'migrateplus-table-option', htmlFor: id },
+								createElement( 'input', { type: 'checkbox', id, value: t.name, checked: r.tables.includes( t.name ), onChange: ( e ) => {
+									r.tables = e.target.checked ? r.tables.concat( t.name ) : r.tables.filter( ( n ) => n !== t.name );
+									changed();
+								} } ),
+								createElement( 'code', null, t.name ),
+								createElement( 'span', { className: 'migrateplus-help' }, '~' + t.rows.toLocaleString() + ' rows, ' + formatBytes( t.size ) ) );
+						} ) )
+					)
+				),
+				createElement( 'footer', { className: 'migrateplus-panel-foot' },
+					createElement( 'span', { className: 'migrateplus-help' }, 'Real runs keep the original values so they can be rolled back. A database backup is still the safest net.' ),
+					createElement( 'button', { type: 'submit', className: 'button button-primary migrateplus-btn-lg' }, r.dry_run ? 'Run dry run' : 'Replace' ) )
+			),
+			r.result ? createElement( ReplaceResult, { d: r.result } ) : null,
+			createElement( ReplaceRuns )
+		);
 	}
 
+	function loadReplaceRuns() {
+		state.replaceRuns = null;
+		state.replaceRunsError = '';
+		render();
+		api( 'replace_history', {} ).then( ( d ) => {
+			state.replaceRuns = d.runs;
+			render();
+		} ).catch( ( err ) => {
+			state.replaceRunsError = err.message;
+			render();
+		} );
+	}
+
+	const REPLACE_STATUS_LABELS = { running: 'Running', complete: 'Complete', stopped: 'Stopped', failed: 'Failed', rolling_back: 'Rolling back', rollback_failed: 'Rollback incomplete', rolled_back: 'Rolled back' };
+
 	/** Real runs, with rollback. Dry runs change nothing, so they are not listed. */
-	function drawReplaceRuns() {
-		const wrap = el( 'section', { class: 'migrateplus-panel migrateplus-history-panel migrateplus-replace-runs' } );
-		root.appendChild( wrap );
-		if ( ! state.replaceRuns ) {
-			wrap.appendChild( el( 'p', { class: 'migrateplus-muted migrateplus-loading', text: 'Loading past replacements…' } ) );
-			api( 'replace_history', {} ).then( ( d ) => {
-				state.replaceRuns = d.runs;
-				wrap.remove();
-				drawReplaceRuns();
-			} ).catch( ( err ) => {
-				wrap.innerHTML = '';
-				wrap.appendChild( notice( 'error', err.message ) );
-			} );
-			return;
+	function ReplaceRuns() {
+		const className = 'migrateplus-panel migrateplus-history-panel migrateplus-replace-runs';
+		if ( state.replaceRunsError ) {
+			return createElement( 'section', { className }, createElement( Notice, { type: 'error', message: state.replaceRunsError } ) );
 		}
 		const runs = state.replaceRuns;
-		wrap.appendChild( el( 'header', { class: 'migrateplus-history-head' }, [
-			el( 'h2', { class: 'migrateplus-history-title', text: 'Past replacements' } ),
-			el( 'span', { class: 'migrateplus-muted', text: runs.length ? runs.length + ' run' + ( runs.length === 1 ? '' : 's' ) : '' } ),
-		] ) );
-		if ( ! runs.length ) {
-			wrap.appendChild( el( 'p', { class: 'migrateplus-muted migrateplus-loading', text: 'Replacements you run for real show up here, and can be rolled back.' } ) );
-			return;
+		if ( ! runs ) {
+			return createElement( 'section', { className }, createElement( 'p', { className: 'migrateplus-muted migrateplus-loading' }, 'Loading past replacements…' ) );
 		}
-		const labels = { running: 'Running', complete: 'Complete', stopped: 'Stopped', failed: 'Failed', rolling_back: 'Rolling back', rollback_failed: 'Rollback incomplete', rolled_back: 'Rolled back' };
-		const body = el( 'tbody' );
-		runs.forEach( ( run ) => {
-			const actions = el( 'div', { class: 'migrateplus-row-actions' } );
-			if ( run.can_resume ) {
-				actions.appendChild( el( 'button', { type: 'button', class: 'button button-small button-primary', text: 'Resume', onclick: () => runReplace( run ) } ) );
-			}
-			if ( run.can_undo ) {
-				actions.appendChild( el( 'button', { type: 'button', class: 'button button-small migrateplus-danger', text: { rolling_back: 'Finish rollback', rollback_failed: 'Retry rollback' }[ run.status ] || 'Roll back', onclick: () => rollbackReplace( run ) } ) );
-			} else if ( run.undo_note ) {
-				// Say why Roll back is gone rather than drop it silently.
-				actions.appendChild( el( 'span', { class: 'migrateplus-help migrateplus-undo-note', text: run.undo_note } ) );
-			}
-			actions.appendChild( el( 'button', { type: 'button', class: 'migrateplus-link-danger', text: 'Delete', title: 'Remove from this list. The changes stay, but can no longer be rolled back.', onclick: () => ask( {
-				title: 'Delete this run?',
-				message: run.status === 'rolled_back' ? 'Remove this run from the list?' : 'Remove this run from the list? Its changes stay in the database, but can no longer be rolled back.',
-				label: 'Delete',
-				danger: true,
-				onConfirm: () => api( 'replace_forget', { run: run.id } ).then( () => {
-					modal.close();
-					state.replaceRuns = state.replaceRuns.filter( ( x ) => x.id !== run.id );
-					render();
-				} ).catch( ( err ) => modalError( 'Could not delete', err ) ),
-			} ) } ) );
-			let result = run.changes.toLocaleString() + ' replacement' + ( run.changes === 1 ? '' : 's' ) + ' in ' + run.rows.toLocaleString() + ' row' + ( run.rows === 1 ? '' : 's' );
-			if ( run.status === 'rolled_back' ) {
-				result = run.restored.toLocaleString() + ' value' + ( run.restored === 1 ? '' : 's' ) + ' restored' + ( run.kept ? ', ' + run.kept.toLocaleString() + ' kept because they were edited since' : '' );
-			}
-			body.appendChild( el( 'tr', {}, [
-				el( 'td', {}, [
-					el( 'code', { class: 'migrateplus-replace-pair', text: run.search + ' → ' + run.replace } ),
-					el( 'span', { class: 'migrateplus-help' }, [
-						run.user ? run.user + ', ' : '',
-						el( 'time', { datetime: new Date( run.created * 1000 ).toISOString(), title: formatDate( run.created ), text: relativeTime( run.created ) } ),
-					] ),
-				] ),
-				el( 'td', {}, el( 'span', { class: 'migrateplus-badge migrateplus-badge-' + run.status, text: labels[ run.status ] || run.status } ) ),
-				el( 'td', { class: 'migrateplus-h-result' }, el( 'span', { class: 'migrateplus-help', text: result } ) ),
-				el( 'td', {}, actions ),
-			] ) );
+		return createElement( 'section', { className },
+			createElement( 'header', { className: 'migrateplus-history-head' },
+				createElement( 'h2', { className: 'migrateplus-history-title' }, 'Past replacements' ),
+				createElement( 'span', { className: 'migrateplus-muted' }, runs.length ? runs.length + ' run' + ( runs.length === 1 ? '' : 's' ) : '' ) ),
+			runs.length ? createElement( 'div', { className: 'migrateplus-table-scroll' }, createElement( 'table', { className: 'migrateplus-history' },
+				createElement( 'thead', null, createElement( 'tr', null, [ 'Replacement', 'Status', 'Result', '' ].map( ( th, i ) => createElement( 'th', { key: i, scope: 'col' }, th ) ) ) ),
+				createElement( 'tbody', null, runs.map( ( run ) => createElement( ReplaceRunRow, { key: run.id, run } ) ) )
+			) ) : createElement( 'p', { className: 'migrateplus-muted migrateplus-loading' }, 'Replacements you run for real show up here, and can be rolled back.' )
+		);
+	}
+
+	function ReplaceRunRow( { run } ) {
+		let result = run.changes.toLocaleString() + ' replacement' + ( run.changes === 1 ? '' : 's' ) + ' in ' + run.rows.toLocaleString() + ' row' + ( run.rows === 1 ? '' : 's' );
+		if ( run.status === 'rolled_back' ) {
+			result = run.restored.toLocaleString() + ' value' + ( run.restored === 1 ? '' : 's' ) + ' restored' + ( run.kept ? ', ' + run.kept.toLocaleString() + ' kept because they were edited since' : '' );
+		}
+		const forget = () => ask( {
+			title: 'Delete this run?',
+			message: run.status === 'rolled_back' ? 'Remove this run from the list?' : 'Remove this run from the list? Its changes stay in the database, but can no longer be rolled back.',
+			label: 'Delete',
+			danger: true,
+			onConfirm: () => api( 'replace_forget', { run: run.id } ).then( () => {
+				state.replaceRuns = state.replaceRuns.filter( ( x ) => x.id !== run.id );
+				modal.close();
+			} ).catch( ( err ) => modalError( 'Could not delete', err ) ),
 		} );
-		wrap.appendChild( el( 'div', { class: 'migrateplus-table-scroll' }, el( 'table', { class: 'migrateplus-history' }, [
-			el( 'thead', {}, el( 'tr', {}, [ 'Replacement', 'Status', 'Result', '' ].map( ( h ) => el( 'th', { scope: 'col', text: h } ) ) ) ),
-			body,
-		] ) ) );
+		return createElement( 'tr', null,
+			createElement( 'td', null,
+				createElement( 'code', { className: 'migrateplus-replace-pair' }, run.search + ' → ' + run.replace ),
+				createElement( 'span', { className: 'migrateplus-help' },
+					run.user ? run.user + ', ' : '',
+					createElement( 'time', { dateTime: new Date( run.created * 1000 ).toISOString(), title: formatDate( run.created ) }, relativeTime( run.created ) ) ) ),
+			createElement( 'td', null, createElement( 'span', { className: 'migrateplus-badge migrateplus-badge-' + run.status }, REPLACE_STATUS_LABELS[ run.status ] || run.status ) ),
+			createElement( 'td', { className: 'migrateplus-h-result' }, createElement( 'span', { className: 'migrateplus-help' }, result ) ),
+			createElement( 'td', null, createElement( 'div', { className: 'migrateplus-row-actions' },
+				run.can_resume ? createElement( 'button', { type: 'button', className: 'button button-small button-primary', onClick: () => runReplace( run ) }, 'Resume' ) : null,
+				run.can_undo
+					? createElement( 'button', { type: 'button', className: 'button button-small migrateplus-danger', onClick: () => rollbackReplace( run ) }, { rolling_back: 'Finish rollback', rollback_failed: 'Retry rollback' }[ run.status ] || 'Roll back' )
+					// Say why Roll back is gone rather than drop it silently.
+					: ( run.undo_note ? createElement( 'span', { className: 'migrateplus-help migrateplus-undo-note' }, run.undo_note ) : null ),
+				createElement( 'button', { type: 'button', className: 'migrateplus-link-danger', title: 'Remove from this list. The changes stay, but can no longer be rolled back.', onClick: forget }, 'Delete' )
+			) )
+		);
 	}
 
 	function rollbackReplace( run, confirmed ) {
@@ -2902,17 +2645,13 @@
 			actions: [],
 			dismissible: false,
 		} );
-		const done = () => {
-			state.replaceRuns = null;
-			render();
-		};
-		const step = () => api( 'replace_rollback', { run: run.id } ).then( ( d ) => {
+		const nextBatch = () => api( 'replace_rollback', { run: run.id } ).then( ( d ) => {
 			if ( d.status !== 'rolled_back' ) {
 				modal.update( {
 					percent: d.size ? ( d.undo_offset / d.size ) * 100 : null,
 					detail: d.restored.toLocaleString() + ' values restored',
 				} );
-				return step();
+				return nextBatch();
 			}
 			modal.update( {
 				title: 'Rolled back',
@@ -2924,9 +2663,9 @@
 				onDismiss: null,
 				actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
 			} );
-			done();
+			loadReplaceRuns();
 		} );
-		step().catch( ( err ) => {
+		nextBatch().catch( ( err ) => {
 			modal.update( {
 				title: 'Rollback stopped',
 				message: 'Run it again to continue where it stopped.',
@@ -2935,7 +2674,7 @@
 				dismissible: true,
 				actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
 			} );
-			done();
+			loadReplaceRuns();
 		} );
 	}
 
@@ -2966,7 +2705,7 @@
 			actions: [],
 			dismissible: false,
 		} );
-		const fail = ( err ) => modal.update( {
+		const showFailure = ( err ) => modal.update( {
 			title: 'Find and replace stopped',
 			message: '',
 			tone: 'error',
@@ -2974,19 +2713,16 @@
 			dismissible: true,
 			actions: [ { label: 'Close', primary: true, onClick: () => modal.close() } ],
 		} );
-		const step = ( id ) => api( 'replace_run', { run: id } ).then( ( d ) => {
+		const nextBatch = ( id ) => api( 'replace_run', { run: id } ).then( ( d ) => {
 			if ( ! d.complete ) {
 				modal.update( {
 					percent: d.total ? Math.min( 99, ( d.done / d.total ) * 100 ) : null,
 					detail: d.table + ': ' + d.done.toLocaleString() + ' of about ' + d.total.toLocaleString() + ' rows',
 				} );
-				return step( id );
+				return nextBatch( id );
 			}
 			const sum = d.tables.reduce( ( a, t ) => ( { rows: a.rows + t.rows, changes: a.changes + t.changes } ), { rows: 0, changes: 0 } );
 			r.result = Object.assign( d, { args } );
-			if ( ! d.dry_run ) {
-				state.replaceRuns = null; // Refresh the list of past runs.
-			}
 			modal.update( {
 				title: d.error ? 'Find and replace stopped' : ( d.dry_run ? 'Dry run finished' : 'Replace finished' ),
 				message: d.error ? d.error + ' What was replaced so far can be rolled back.' : ( d.dry_run ? 'Nothing was saved. Check the changes below, then turn off Dry run to replace for real.' : 'The database has been updated. You can roll it back from Past replacements.' ),
@@ -2997,167 +2733,207 @@
 				onDismiss: null,
 				actions: [ { label: 'See details', primary: true, onClick: () => {
 					modal.close();
-					render();
-					const res = root.querySelector( '.migrateplus-replace-results' );
+					const res = mount.querySelector( '.migrateplus-replace-results' );
 					if ( res ) {
 						res.scrollIntoView( { behavior: 'smooth' } );
 					}
 				} } ],
 			} );
-			render();
+			if ( ! d.dry_run ) {
+				loadReplaceRuns(); // Refresh the list of past runs.
+			}
 		} );
-		( resumeRun ? step( resumeRun.id ) : api( 'replace_start', { args } ).then( ( d ) => step( d.id ) ) ).catch( fail );
+		( resumeRun ? nextBatch( resumeRun.id ) : api( 'replace_start', { args } ).then( ( d ) => nextBatch( d.id ) ) ).catch( showFailure );
 	}
 
-	function drawReplaceResult( d ) {
+	function ReplaceResult( { d } ) {
 		const a = d.args;
 		const changed = d.tables.filter( ( t ) => t.changes );
 		const skipped = d.tables.filter( ( t ) => t.skipped );
 		const unsafe = d.tables.filter( ( t ) => t.unsafe );
-		const body = el( 'tbody' );
-		changed.forEach( ( t ) => {
-			const detail = el( 'tr', { class: 'migrateplus-export-log-row', hidden: true }, el( 'td', { colspan: 4, class: 'migrateplus-export-log' },
-				el( 'ol', { class: 'migrateplus-log migrateplus-replace-samples' }, t.samples.map( ( s ) => el( 'li', {}, [
-					el( 'span', { class: 'migrateplus-help', text: s.column + ' (row ' + s.row + ')' } ),
-					el( 'del', { text: ( s.cut[ 0 ] ? '…' : '' ) + s.before + ( s.cut[ 1 ] ? '…' : '' ) } ),
-					el( 'ins', { text: ( s.cut[ 0 ] ? '…' : '' ) + s.after + ( s.cut[ 1 ] ? '…' : '' ) } ),
-				] ) ) ) ) );
-			const btn = el( 'button', { type: 'button', class: 'button button-small', 'aria-expanded': 'false', text: 'Show changes', onclick: () => {
-				detail.hidden = ! detail.hidden;
-				btn.setAttribute( 'aria-expanded', detail.hidden ? 'false' : 'true' );
-				btn.textContent = detail.hidden ? 'Show changes' : 'Hide changes';
-			} } );
-			body.appendChild( el( 'tr', {}, [
-				el( 'td', {}, el( 'code', { text: t.name } ) ),
-				el( 'td', { text: t.rows.toLocaleString() } ),
-				el( 'td', { text: t.changes.toLocaleString() } ),
-				el( 'td', {}, el( 'div', { class: 'migrateplus-row-actions' }, btn ) ),
-			] ) );
-			body.appendChild( detail );
-		} );
-		if ( ! changed.length ) {
-			body.appendChild( el( 'tr', {}, el( 'td', { colspan: 4, class: 'migrateplus-muted migrateplus-no-match', text: 'No matches for "' + a.search + '" in the selected tables.' } ) ) );
-		}
-		root.appendChild( el( 'section', { class: 'migrateplus-panel migrateplus-history-panel migrateplus-replace-results' }, [
-			el( 'header', { class: 'migrateplus-history-head' }, [
-				el( 'h2', { class: 'migrateplus-history-title', text: d.dry_run ? 'Dry run results' : 'Results' } ),
-				el( 'span', { class: 'migrateplus-muted', text: '"' + a.search + '" → "' + a.replace + '"' } ),
-			] ),
-			el( 'div', { class: 'migrateplus-table-scroll' }, el( 'table', { class: 'migrateplus-history' }, [
-				el( 'thead', {}, el( 'tr', {}, [ 'Table', d.dry_run ? 'Rows to change' : 'Rows changed', 'Replacements', '' ].map( ( h ) => el( 'th', { scope: 'col', text: h } ) ) ) ),
-				body,
-			] ) ),
-			skipped.length ? el( 'p', { class: 'migrateplus-help migrateplus-loading', text: 'Skipped: ' + skipped.map( ( t ) => t.name + ' (' + t.skipped + ')' ).join( '; ' ) } ) : null,
-			unsafe.length ? el( 'p', { class: 'migrateplus-help migrateplus-loading', text: 'Values left as they are because they contain objects that can’t be safely edited: ' + unsafe.map( ( t ) => t.name + ' (' + t.unsafe + ')' ).join( '; ' ) } ) : null,
-		] ) );
+		return createElement( 'section', { className: 'migrateplus-panel migrateplus-history-panel migrateplus-replace-results' },
+			createElement( 'header', { className: 'migrateplus-history-head' },
+				createElement( 'h2', { className: 'migrateplus-history-title' }, d.dry_run ? 'Dry run results' : 'Results' ),
+				createElement( 'span', { className: 'migrateplus-muted' }, '"' + a.search + '" → "' + a.replace + '"' ) ),
+			createElement( 'div', { className: 'migrateplus-table-scroll' }, createElement( 'table', { className: 'migrateplus-history' },
+				createElement( 'thead', null, createElement( 'tr', null, [ 'Table', d.dry_run ? 'Rows to change' : 'Rows changed', 'Replacements', '' ].map( ( th, i ) => createElement( 'th', { key: i, scope: 'col' }, th ) ) ) ),
+				createElement( 'tbody', null, changed.length
+					? changed.map( ( t ) => createElement( ReplaceTableRows, { key: t.name, t } ) )
+					: createElement( 'tr', null, createElement( 'td', { colSpan: 4, className: 'migrateplus-muted migrateplus-no-match' }, 'No matches for "' + a.search + '" in the selected tables.' ) ) )
+			) ),
+			skipped.length ? createElement( 'p', { className: 'migrateplus-help migrateplus-loading' }, 'Skipped: ' + skipped.map( ( t ) => t.name + ' (' + t.skipped + ')' ).join( '; ' ) ) : null,
+			unsafe.length ? createElement( 'p', { className: 'migrateplus-help migrateplus-loading' }, 'Values left as they are because they contain objects that can’t be safely edited: ' + unsafe.map( ( t ) => t.name + ' (' + t.unsafe + ')' ).join( '; ' ) ) : null
+		);
+	}
+
+	/** A table's counts, plus a hidden row with sample changes. */
+	function ReplaceTableRows( { t } ) {
+		const [ open, setOpen ] = useImmediateState( false );
+		return createElement( Fragment, null,
+			createElement( 'tr', null,
+				createElement( 'td', null, createElement( 'code', null, t.name ) ),
+				createElement( 'td', null, t.rows.toLocaleString() ),
+				createElement( 'td', null, t.changes.toLocaleString() ),
+				createElement( 'td', null, createElement( 'div', { className: 'migrateplus-row-actions' },
+					createElement( 'button', { type: 'button', className: 'button button-small', 'aria-expanded': open ? 'true' : 'false', onClick: () => setOpen( ! open ) }, open ? 'Hide changes' : 'Show changes' ) ) )
+			),
+			createElement( 'tr', { className: 'migrateplus-export-log-row', hidden: ! open }, createElement( 'td', { colSpan: 4, className: 'migrateplus-export-log' },
+				createElement( 'ol', { className: 'migrateplus-log migrateplus-replace-samples' }, t.samples.map( ( s, i ) => createElement( 'li', { key: i },
+					createElement( 'span', { className: 'migrateplus-help' }, s.column + ' (row ' + s.row + ')' ),
+					createElement( 'del', null, ( s.cut[ 0 ] ? '…' : '' ) + s.before + ( s.cut[ 1 ] ? '…' : '' ) ),
+					createElement( 'ins', null, ( s.cut[ 0 ] ? '…' : '' ) + s.after + ( s.cut[ 1 ] ? '…' : '' ) ) ) ) )
+			) )
+		);
 	}
 
 	// History
 
-	function renderHistory() {
-		root.innerHTML = '';
-		root.classList.add( 'migrateplus-app' );
-		const wrap = el( 'section', { class: 'migrateplus-panel migrateplus-history-panel', 'aria-busy': 'true' }, el( 'p', { class: 'migrateplus-muted migrateplus-loading', text: 'Loading history…' } ) );
-		root.appendChild( wrap );
+	function loadHistory() {
+		state.historyJobs = null;
+		state.historyError = '';
+		state.historyExports = null;
+		state.exportsError = '';
+		render();
 		api( 'jobs', {} ).then( ( data ) => {
 			state.historyJobs = data.jobs;
-			wrap.removeAttribute( 'aria-busy' );
-			drawHistory( wrap );
+			render();
 		} ).catch( ( err ) => {
-			wrap.innerHTML = '';
-			wrap.appendChild( notice( 'error', err.message ) );
+			state.historyError = err.message;
+			render();
 		} );
-
-		const exportsWrap = el( 'section', { class: 'migrateplus-panel migrateplus-history-panel migrateplus-exports-panel', 'aria-busy': 'true' }, el( 'p', { class: 'migrateplus-muted migrateplus-loading', text: 'Loading exports…' } ) );
-		root.appendChild( exportsWrap );
 		api( 'exports', {} ).then( ( data ) => {
-			exportsWrap.removeAttribute( 'aria-busy' );
-			drawExports( exportsWrap, data.exports );
+			state.historyExports = data.exports;
+			render();
 		} ).catch( ( err ) => {
-			exportsWrap.innerHTML = '';
-			exportsWrap.appendChild( notice( 'error', err.message ) );
+			state.exportsError = err.message;
+			render();
 		} );
+	}
+
+	function History() {
+		return createElement( Fragment, null, createElement( ImportsPanel ), createElement( ExportsPanel ) );
+	}
+
+	function shownJobs() {
+		const q = state.historyQuery.trim().toLowerCase();
+		return ( state.historyJobs || [] ).filter( ( job ) => ! q || [ job.settings.file_name, job.label, job.options.post_type, STATUS_LABELS[ job.status ], job.settings.site_url, job.settings.url, job.settings.file_url ]
+			.some( ( v ) => v && String( v ).toLowerCase().includes( q ) ) );
+	}
+
+	function ImportsPanel() {
+		const className = 'migrateplus-panel migrateplus-history-panel';
+		const jobs = state.historyJobs;
+		if ( ! jobs ) {
+			return createElement( 'section', { className, 'aria-busy': 'true' }, state.historyError
+				? createElement( Notice, { type: 'error', message: state.historyError } )
+				: createElement( 'p', { className: 'migrateplus-muted migrateplus-loading' }, 'Loading history…' ) );
+		}
+		if ( ! jobs.length ) {
+			return createElement( 'section', { className }, createElement( 'div', { className: 'migrateplus-empty' },
+				createElement( 'h2', null, 'No imports yet' ),
+				createElement( 'p', { className: 'migrateplus-muted' }, 'Every import you run shows up here, so you can resume it, run it again or roll it back.' ),
+				createElement( 'a', { className: 'button button-primary', href: D.importUrl }, 'Start an import' ) ) );
+		}
+		const shown = shownJobs();
+		const pick = bulkSelection( 'job', 'import', 'Imported content is not deleted, but deleted entries can no longer be rolled back.', shown.map( ( job ) => ( { id: job.id, name: job.settings.file_name || job.label } ) ), ( d ) => {
+			const gone = new Set( d.deleted.map( ( e ) => e.id ) );
+			state.historyJobs = state.historyJobs.filter( ( j ) => ! gone.has( j.id ) );
+		} );
+		return createElement( 'section', { className },
+			createElement( 'header', { className: 'migrateplus-history-head' },
+				createElement( 'input', { type: 'search', id: 'migrateplus-history-search', className: 'migrateplus-search', placeholder: 'Search by source, site or status', 'aria-label': 'Search history', value: state.historyQuery, onChange: ( e ) => {
+					state.historyQuery = e.target.value;
+					// Rows hidden by the search leave the selection, so nothing out of sight is deleted.
+					const ids = new Set( shownJobs().map( ( job ) => job.id ) );
+					state.picked.job.forEach( ( id ) => ids.has( id ) || state.picked.job.delete( id ) );
+					render();
+				} } ),
+				pick.button,
+				createElement( 'span', { className: 'migrateplus-muted', 'aria-live': 'polite' }, shown.length === jobs.length ? jobs.length + ' import' + ( jobs.length === 1 ? '' : 's' ) : shown.length + ' of ' + jobs.length ),
+				createElement( 'a', { className: 'button button-primary migrateplus-push', href: D.importUrl }, 'Import' )
+			),
+			createElement( 'div', { className: 'migrateplus-table-scroll' }, createElement( 'table', { className: 'migrateplus-history' },
+				createElement( 'thead', null, createElement( 'tr', null, pick.head, [ 'Import', 'Status', 'Result', '' ].map( ( th, i ) => createElement( 'th', { key: i, scope: 'col' }, th ) ) ) ),
+				createElement( 'tbody', null, shown.length
+					? shown.map( ( job ) => createElement( HistoryRow, { key: job.id, job, check: pick.cell( job.id, job.settings.file_name || job.label ) } ) )
+					: createElement( 'tr', null, createElement( 'td', { colSpan: 5, className: 'migrateplus-muted migrateplus-no-match' }, 'No imports match "' + state.historyQuery + '".' ) ) )
+			) )
+		);
 	}
 
 	const EXPORT_STATUS_LABELS = { running: 'Running', complete: 'Complete', stopped: 'Stopped' };
 
-	function drawExports( wrap, exports ) {
-		wrap.innerHTML = '';
-		wrap.appendChild( el( 'header', { class: 'migrateplus-history-head' }, [
-			el( 'h2', { class: 'migrateplus-history-title', text: 'Exports' } ),
-			el( 'span', { class: 'migrateplus-muted', text: exports.length ? exports.length + ' export' + ( exports.length === 1 ? '' : 's' ) : '' } ),
-			el( 'a', { class: 'button migrateplus-push', href: D.exportUrl, text: 'Export' } ),
-		] ) );
-		if ( ! exports.length ) {
-			wrap.appendChild( el( 'p', { class: 'migrateplus-muted migrateplus-loading', text: 'Exports you run show up here with a log of what went into the file.' } ) );
-			return;
+	function ExportsPanel() {
+		const className = 'migrateplus-panel migrateplus-history-panel migrateplus-exports-panel';
+		const exports = state.historyExports;
+		if ( ! exports ) {
+			return createElement( 'section', { className, 'aria-busy': 'true' }, state.exportsError
+				? createElement( Notice, { type: 'error', message: state.exportsError } )
+				: createElement( 'p', { className: 'migrateplus-muted migrateplus-loading' }, 'Loading exports…' ) );
 		}
-		const body = el( 'tbody' );
-		const pick = bulkSelection( 'export', 'export', 'Their files are deleted too, if they are still kept.', ( d ) => {
+		const pick = exports.length ? bulkSelection( 'export', 'export', 'Their files are deleted too, if they are still kept.', exports.map( ( x ) => ( { id: x.id, name: x.label } ) ), ( d ) => {
 			const gone = new Set( d.deleted.map( ( e ) => e.id ) );
-			drawExports( wrap, exports.filter( ( e ) => ! gone.has( e.id ) ) );
-		} );
-		wrap.querySelector( '.migrateplus-history-head' ).insertBefore( pick.button, wrap.querySelector( '.migrateplus-push' ) );
-		exports.forEach( ( x ) => exportRows( x, body, () => drawExports( wrap, exports.filter( ( e ) => e.id !== x.id ) ), pick ) );
-		wrap.appendChild( el( 'div', { class: 'migrateplus-table-scroll' }, el( 'table', { class: 'migrateplus-history' }, [
-			el( 'thead', {}, el( 'tr', {}, [ pick.head() ].concat( [ 'Export', 'Status', 'Result', '' ].map( ( h ) => el( 'th', { scope: 'col', text: h } ) ) ) ) ),
-			body,
-		] ) ) );
-		pick.sync();
+			state.historyExports = state.historyExports.filter( ( e ) => ! gone.has( e.id ) );
+		} ) : null;
+		return createElement( 'section', { className },
+			createElement( 'header', { className: 'migrateplus-history-head' },
+				createElement( 'h2', { className: 'migrateplus-history-title' }, 'Exports' ),
+				createElement( 'span', { className: 'migrateplus-muted' }, exports.length ? exports.length + ' export' + ( exports.length === 1 ? '' : 's' ) : '' ),
+				pick ? pick.button : null,
+				createElement( 'a', { className: 'button migrateplus-push', href: D.exportUrl }, 'Export' )
+			),
+			exports.length ? createElement( 'div', { className: 'migrateplus-table-scroll' }, createElement( 'table', { className: 'migrateplus-history' },
+				createElement( 'thead', null, createElement( 'tr', null, pick.head, [ 'Export', 'Status', 'Result', '' ].map( ( th, i ) => createElement( 'th', { key: i, scope: 'col' }, th ) ) ) ),
+				createElement( 'tbody', null, exports.map( ( x ) => createElement( ExportRows, { key: x.id, x, check: pick.cell( x.id, x.label ) } ) ) )
+			) ) : createElement( 'p', { className: 'migrateplus-muted migrateplus-loading' }, 'Exports you run show up here with a log of what went into the file.' )
+		);
 	}
 
 	/**
 	 * Row checkboxes, a select-all and a "Delete selected" button for one History table.
 	 * kind goes to the server with each id; warning is added to the confirmation.
-	 * Call reset() before redrawing the rows and sync() after.
+	 * rows are the { id, name } on screen; only those count as selected.
 	 */
-	function bulkSelection( kind, noun, warning, onDone ) {
-		const selected = new Set();
-		let boxes = new Map(); // id => checkbox, for the rows on screen.
-		const names = new Map();
-		const button = el( 'button', { type: 'button', class: 'button migrateplus-danger', disabled: true, text: 'Delete selected', onclick: () => confirmBulkDelete( kind, noun, warning, [ ...selected ], names, onDone ) } );
-		const all = el( 'input', { type: 'checkbox', 'aria-label': 'Select all', onchange: ( e ) => {
-			boxes.forEach( ( box, id ) => {
-				box.checked = e.target.checked;
-				if ( box.checked ) {
-					selected.add( id );
-				} else {
-					selected.delete( id );
-				}
-			} );
-			sync();
-		} } );
-		// Rows hidden by the search are dropped from the selection, so nothing out of sight is deleted.
-		function sync() {
-			selected.forEach( ( id ) => ! boxes.has( id ) && selected.delete( id ) );
-			const n = selected.size;
-			button.disabled = ! n;
-			button.textContent = n ? 'Delete ' + n + ' ' + ( n === 1 ? 'entry' : 'entries' ) : 'Delete selected';
-			all.checked = boxes.size > 0 && n === boxes.size;
-			all.indeterminate = n > 0 && n < boxes.size;
-			all.disabled = ! boxes.size;
-		}
-		return {
-			button,
-			sync,
-			reset: () => {
-				boxes = new Map();
-			},
-			head: () => el( 'td', { class: 'migrateplus-check-column' }, all ),
-			cell: ( id, name ) => {
-				names.set( id, name );
-				const box = el( 'input', { type: 'checkbox', checked: selected.has( id ), 'aria-label': 'Select ' + name, onchange: ( e ) => {
-					if ( e.target.checked ) {
-						selected.add( id );
-					} else {
-						selected.delete( id );
-					}
-					sync();
-				} } );
-				boxes.set( id, box );
-				return el( 'th', { scope: 'row', class: 'migrateplus-check-column' }, box );
-			},
+	function bulkSelection( kind, noun, warning, rows, onDone ) {
+		const picked = state.picked[ kind ];
+		const ids = rows.filter( ( row ) => picked.has( row.id ) ).map( ( row ) => row.id );
+		const n = ids.length;
+		const names = new Map( rows.map( ( row ) => [ row.id, row.name ] ) );
+		const done = ( d ) => {
+			picked.clear();
+			onDone( d );
 		};
+		return {
+			button: createElement( 'button', { type: 'button', className: 'button migrateplus-danger', disabled: ! n, onClick: () => confirmBulkDelete( kind, noun, warning, ids, names, done ) },
+				n ? 'Delete ' + n + ' ' + ( n === 1 ? 'entry' : 'entries' ) : 'Delete selected' ),
+			head: createElement( 'td', { className: 'migrateplus-check-column' }, createElement( SelectAll, {
+				checked: rows.length > 0 && n === rows.length,
+				indeterminate: n > 0 && n < rows.length,
+				disabled: ! rows.length,
+				onChange: ( e ) => {
+					rows.forEach( ( row ) => ( e.target.checked ? picked.add( row.id ) : picked.delete( row.id ) ) );
+					render();
+				},
+			} ) ),
+			cell: ( id, name ) => createElement( 'th', { scope: 'row', className: 'migrateplus-check-column' },
+				createElement( 'input', { type: 'checkbox', checked: picked.has( id ), 'aria-label': 'Select ' + name, onChange: ( e ) => {
+					if ( e.target.checked ) {
+						picked.add( id );
+					} else {
+						picked.delete( id );
+					}
+					render();
+				} } ) ),
+		};
+	}
+
+	/** React has no indeterminate prop; it is set on the node after each render. */
+	function SelectAll( { checked, indeterminate, disabled, onChange } ) {
+		const box = useRef( null );
+		useLayoutEffect( () => {
+			box.current.indeterminate = indeterminate;
+		} );
+		return createElement( 'input', { ref: box, type: 'checkbox', 'aria-label': 'Select all', checked, disabled, onChange } );
 	}
 
 	/** Ask once, delete the chosen History entries in one request, and say what was deleted and what was skipped. */
@@ -3198,66 +2974,56 @@
 	}
 
 	/** A history row for one export, plus a hidden row that holds its log. */
-	function exportRows( x, body, onForget, pick ) {
-		const logRow = el( 'tr', { class: 'migrateplus-export-log-row', hidden: true }, el( 'td', { colspan: 5, class: 'migrateplus-export-log' } ) );
-		const actions = el( 'div', { class: 'migrateplus-row-actions' } );
-		if ( x.url ) {
-			actions.appendChild( el( 'a', { class: 'button button-small button-primary', href: x.url, text: 'Download' } ) );
-		}
-		const viewBtn = el( 'button', { type: 'button', class: 'button button-small migrateplus-view', 'aria-expanded': 'false', text: 'View log', onclick: () => {
-			const open = logRow.hidden;
-			logRow.hidden = ! open;
-			viewBtn.setAttribute( 'aria-expanded', open ? 'true' : 'false' );
-			viewBtn.textContent = open ? 'Hide log' : 'View log';
-			if ( open && ! logRow.dataset.loaded ) {
-				const cell = logRow.firstChild;
-				cell.textContent = 'Loading…';
-				api( 'export_log', { export: x.id } ).then( ( d ) => {
-					logRow.dataset.loaded = '1';
-					cell.innerHTML = '';
-					cell.appendChild( el( 'ol', { class: 'migrateplus-log' }, d.log.map( ( e ) => el( 'li', { class: 'migrateplus-log-' + e.l }, [
-						el( 'time', { datetime: new Date( e.t * 1000 ).toISOString(), text: new Date( e.t * 1000 ).toLocaleTimeString() } ),
-						el( 'span', { text: e.m } ),
-					] ) ) ) );
-				} ).catch( ( err ) => {
-					cell.textContent = err.message;
-				} );
+	function ExportRows( { x, check } ) {
+		const [ open, setOpen ] = useImmediateState( false );
+		const [ log, setLog ] = useImmediateState( null ); // null until opened, then 'Loading…', the log, or why it failed.
+		const view = () => {
+			setOpen( ! open );
+			if ( ! open && null === log ) {
+				setLog( 'Loading…' );
+				api( 'export_log', { export: x.id } ).then( ( d ) => setLog( d.log ) ).catch( ( err ) => setLog( err.message ) );
 			}
-		} } );
-		actions.appendChild( viewBtn );
-		actions.appendChild( el( 'button', { type: 'button', class: 'migrateplus-link-danger', text: 'Delete', title: 'Remove from history, with its file if it is still kept.', onclick: () => ask( {
+		};
+		const forget = () => ask( {
 			title: 'Delete this export?',
 			message: 'Remove this export from history?',
 			label: 'Delete',
 			danger: true,
 			onConfirm: () => api( 'export_forget', { export: x.id } ).then( () => {
+				state.historyExports = state.historyExports.filter( ( e ) => e.id !== x.id );
+				state.picked.export.clear();
 				modal.close();
-				onForget();
 			} ).catch( ( err ) => modalError( 'Could not delete', err ) ),
-		} ) } ) );
+		} );
 
 		const who = [ x.user, x.via === 'cli' ? 'WP-CLI' : '' ].filter( Boolean ).join( ' via ' );
 		let result = x.done.toLocaleString() + ' of ' + x.total.toLocaleString() + ' items';
 		if ( x.status === 'complete' ) {
 			result = x.done.toLocaleString() + ' item' + ( x.done === 1 ? '' : 's' ) + ( x.size ? ', ' + x.size : '' ) + ( x.url ? '' : '. File no longer kept' );
 		}
-		body.appendChild( el( 'tr', {}, [
-			pick.cell( x.id, x.label ),
-			el( 'td', { class: 'migrateplus-h-source' }, [
-				el( 'span', { class: 'migrateplus-source-icon is-sm migrateplus-icon-json', 'aria-hidden': 'true' } ),
-				el( 'div', {}, [
-					el( 'strong', { text: x.label } ),
-					el( 'span', { class: 'migrateplus-help' }, [
-						who ? who + ', ' : '',
-						el( 'time', { datetime: new Date( x.created * 1000 ).toISOString(), title: formatDate( x.created ), text: relativeTime( x.created ) } ),
-					] ),
-				] ),
-			] ),
-			el( 'td', {}, el( 'span', { class: 'migrateplus-badge migrateplus-badge-' + x.status, text: EXPORT_STATUS_LABELS[ x.status ] || x.status } ) ),
-			el( 'td', { class: 'migrateplus-h-result' }, el( 'span', { class: 'migrateplus-help', text: result } ) ),
-			el( 'td', {}, actions ),
-		] ) );
-		body.appendChild( logRow );
+		return createElement( Fragment, null,
+			createElement( 'tr', null,
+				check,
+				createElement( 'td', { className: 'migrateplus-h-source' },
+					createElement( 'span', { className: 'migrateplus-source-icon is-sm migrateplus-icon-json', 'aria-hidden': 'true' } ),
+					createElement( 'div', null,
+						createElement( 'strong', null, x.label ),
+						createElement( 'span', { className: 'migrateplus-help' },
+							who ? who + ', ' : '',
+							createElement( 'time', { dateTime: new Date( x.created * 1000 ).toISOString(), title: formatDate( x.created ) }, relativeTime( x.created ) ) ) ) ),
+				createElement( 'td', null, createElement( 'span', { className: 'migrateplus-badge migrateplus-badge-' + x.status }, EXPORT_STATUS_LABELS[ x.status ] || x.status ) ),
+				createElement( 'td', { className: 'migrateplus-h-result' }, createElement( 'span', { className: 'migrateplus-help' }, result ) ),
+				createElement( 'td', null, createElement( 'div', { className: 'migrateplus-row-actions' },
+					x.url ? createElement( 'a', { className: 'button button-small button-primary', href: safeUrl( x.url ) }, 'Download' ) : null,
+					createElement( 'button', { type: 'button', className: 'button button-small migrateplus-view', 'aria-expanded': open ? 'true' : 'false', onClick: view }, open ? 'Hide log' : 'View log' ),
+					createElement( 'button', { type: 'button', className: 'migrateplus-link-danger', title: 'Remove from history, with its file if it is still kept.', onClick: forget }, 'Delete' ) ) )
+			),
+			createElement( 'tr', { className: 'migrateplus-export-log-row', hidden: ! open }, createElement( 'td', { colSpan: 5, className: 'migrateplus-export-log' }, Array.isArray( log )
+				? createElement( 'ol', { className: 'migrateplus-log' }, log.map( ( e, i ) => createElement( 'li', { key: i, className: 'migrateplus-log-' + e.l },
+					createElement( 'time', { dateTime: new Date( e.t * 1000 ).toISOString() }, new Date( e.t * 1000 ).toLocaleTimeString() ),
+					createElement( 'span', null, e.m ) ) ) )
+				: log ) )
+		);
 	}
 
 	function restartJob( job ) {
@@ -3282,108 +3048,47 @@
 		} );
 	}
 
-	function drawHistory( wrap ) {
-		wrap.innerHTML = '';
-		const jobs = state.historyJobs || [];
-		if ( ! jobs.length ) {
-			wrap.appendChild( el( 'div', { class: 'migrateplus-empty' }, [
-				el( 'h2', { text: 'No imports yet' } ),
-				el( 'p', { class: 'migrateplus-muted', text: 'Every import you run shows up here, so you can resume it, run it again or roll it back.' } ),
-				el( 'a', { class: 'button button-primary', href: D.importUrl, text: 'Start an import' } ),
-			] ) );
-			return;
-		}
-
-		const body = el( 'tbody' );
-		const count = el( 'span', { class: 'migrateplus-muted', 'aria-live': 'polite' } );
-		const pick = bulkSelection( 'job', 'import', 'Imported content is not deleted, but deleted entries can no longer be rolled back.', ( d ) => {
-			const gone = new Set( d.deleted.map( ( e ) => e.id ) );
-			state.historyJobs = ( state.historyJobs || [] ).filter( ( j ) => ! gone.has( j.id ) );
-			drawHistory( wrap );
-		} );
-		const fill = () => {
-			body.innerHTML = '';
-			pick.reset();
-			const q = state.historyQuery.trim().toLowerCase();
-			const shown = jobs.filter( ( job ) => ! q || [ job.settings.file_name, job.label, job.options.post_type, STATUS_LABELS[ job.status ], job.settings.site_url, job.settings.url, job.settings.file_url ]
-				.some( ( v ) => v && String( v ).toLowerCase().includes( q ) ) );
-			shown.forEach( ( job ) => body.appendChild( historyRow( job, pick ) ) );
-			if ( ! shown.length ) {
-				body.appendChild( el( 'tr', {}, el( 'td', { colspan: 5, class: 'migrateplus-muted migrateplus-no-match', text: 'No imports match "' + state.historyQuery + '".' } ) ) );
-			}
-			count.textContent = shown.length === jobs.length ? jobs.length + ' import' + ( jobs.length === 1 ? '' : 's' ) : shown.length + ' of ' + jobs.length;
-			pick.sync();
-		};
-
-		wrap.appendChild( el( 'header', { class: 'migrateplus-history-head' }, [
-			el( 'input', { type: 'search', id: 'migrateplus-history-search', class: 'migrateplus-search', placeholder: 'Search by source, site or status', 'aria-label': 'Search history', value: state.historyQuery, oninput: ( e ) => {
-				state.historyQuery = e.target.value;
-				fill();
-			} } ),
-			pick.button,
-			count,
-			el( 'a', { class: 'button button-primary migrateplus-push', href: D.importUrl, text: 'Import' } ),
-		] ) );
-		wrap.appendChild( el( 'div', { class: 'migrateplus-table-scroll' }, el( 'table', { class: 'migrateplus-history' }, [
-			el( 'thead', {}, el( 'tr', {}, [ pick.head() ].concat( [ 'Import', 'Status', 'Result', '' ].map( ( h ) => el( 'th', { scope: 'col', text: h } ) ) ) ) ),
-			body,
-		] ) ) );
-		fill();
-	}
-
-	function historyRow( job, pick ) {
+	function HistoryRow( { job, check } ) {
 		const s = job.stats;
 		const dry = Number( job.options.dry_run ) === 1;
 		const where = job.settings.site_url || job.settings.url || job.settings.file_url || '';
-		const actions = el( 'div', { class: 'migrateplus-row-actions' } );
-		const btn = ( label, fn, cls ) => actions.appendChild( el( 'button', { type: 'button', class: 'button button-small ' + ( cls || '' ), text: label, onclick: fn } ) );
-
-		if ( [ 'running', 'ready', 'failed' ].includes( job.status ) ) {
-			btn( 'Resume', () => openJob( job.id, true ), 'button-primary' );
-		}
-		btn( 'View log', () => openJob( job.id, false ), 'migrateplus-view' );
-		if ( [ 'complete', 'rolled_back', 'failed' ].includes( job.status ) ) {
-			btn( 'Run again', () => restartJob( job ), 'migrateplus-run-again' );
-		}
-		if ( ! dry && ! [ 'rolled_back', 'running' ].includes( job.status ) && importedCount( job ) > 0 ) {
-			btn( 'Roll back', () => rollback( job.id ), 'migrateplus-rollback' );
-		}
-		actions.appendChild( el( 'button', { type: 'button', class: 'migrateplus-link-danger', text: 'Delete', title: 'Remove from history. Imported content is kept.', onclick: () => ask( {
+		const actionButton = ( label, fn, cls ) => createElement( 'button', { type: 'button', className: 'button button-small ' + ( cls || '' ), onClick: fn }, label );
+		const forget = () => ask( {
 			title: 'Delete this import?',
 			message: 'Remove this import from history? Imported content is not deleted, but it can no longer be rolled back.',
 			label: 'Delete',
 			danger: true,
 			onConfirm: () => api( 'delete', { job: job.id } ).then( () => {
-				modal.close();
 				state.historyJobs = ( state.historyJobs || [] ).filter( ( j ) => j.id !== job.id );
-				drawHistory( root.querySelector( '.migrateplus-history-panel' ) );
+				state.picked.job.clear();
+				modal.close();
 			} ).catch( ( err ) => modalError( 'Could not delete', err ) ),
-		} ) } ) );
-
+		} );
 		const parts = OUTCOMES.filter( ( [ k ] ) => Number( s[ k ] ) > 0 ).map( ( [ k, label, dryLabel ] ) => Number( s[ k ] ).toLocaleString() + ' ' + ( dry ? dryLabel : label ).toLowerCase() );
-		return el( 'tr', {}, [
-			pick.cell( job.id, job.settings.file_name || job.label ),
-			el( 'td', { class: 'migrateplus-h-source' }, [
-				el( 'span', { class: 'migrateplus-source-icon is-sm migrateplus-icon-' + job.source, 'aria-hidden': 'true' } ),
-				el( 'div', {}, [
-					el( 'strong', { text: job.settings.file_name || job.label } ),
-					el( 'span', { class: 'migrateplus-help' }, [
+
+		return createElement( 'tr', null,
+			check,
+			createElement( 'td', { className: 'migrateplus-h-source' },
+				createElement( 'span', { className: 'migrateplus-source-icon is-sm migrateplus-icon-' + job.source, 'aria-hidden': 'true' } ),
+				createElement( 'div', null,
+					createElement( 'strong', null, job.settings.file_name || job.label ),
+					createElement( 'span', { className: 'migrateplus-help' },
 						where ? hostOf( where ) + ' to ' : 'To ',
 						( isMultiType( job ) ? job.settings.migrateplus_post_types.split( ',' ).join( ', ' ) : job.options.post_type ) + ', ',
-						el( 'time', { datetime: new Date( job.created * 1000 ).toISOString(), title: formatDate( job.created ), text: relativeTime( job.created ) } ),
-					] ),
-				] ),
-			] ),
-			el( 'td', {}, [
-				el( 'span', { class: 'migrateplus-badge migrateplus-badge-' + job.status, text: STATUS_LABELS[ job.status ] || job.status } ),
-				dry ? el( 'span', { class: 'migrateplus-badge migrateplus-badge-dry', text: 'Dry run' } ) : null,
-			] ),
-			el( 'td', { class: 'migrateplus-h-result' }, [
-				outcomeBar( s, job.total, { size: 'sm', label: 'Result' } ),
-				el( 'span', { class: 'migrateplus-help', text: parts.length ? parts.join( ', ' ) : 'Nothing processed yet' } ),
-			] ),
-			el( 'td', {}, actions ),
-		] );
+						createElement( 'time', { dateTime: new Date( job.created * 1000 ).toISOString(), title: formatDate( job.created ) }, relativeTime( job.created ) ) ) ) ),
+			createElement( 'td', null,
+				createElement( 'span', { className: 'migrateplus-badge migrateplus-badge-' + job.status }, STATUS_LABELS[ job.status ] || job.status ),
+				dry ? createElement( 'span', { className: 'migrateplus-badge migrateplus-badge-dry' }, 'Dry run' ) : null ),
+			createElement( 'td', { className: 'migrateplus-h-result' },
+				createElement( OutcomeBar, { stats: s, total: job.total, size: 'sm', label: 'Result' } ),
+				createElement( 'span', { className: 'migrateplus-help' }, parts.length ? parts.join( ', ' ) : 'Nothing processed yet' ) ),
+			createElement( 'td', null, createElement( 'div', { className: 'migrateplus-row-actions' },
+				[ 'running', 'ready', 'failed' ].includes( job.status ) ? actionButton( 'Resume', () => openJob( job.id, true ), 'button-primary' ) : null,
+				actionButton( 'View log', () => openJob( job.id, false ), 'migrateplus-view' ),
+				[ 'complete', 'rolled_back', 'failed' ].includes( job.status ) ? actionButton( 'Run again', () => restartJob( job ), 'migrateplus-run-again' ) : null,
+				! dry && ! [ 'rolled_back', 'running' ].includes( job.status ) && importedCount( job ) > 0 ? actionButton( 'Roll back', () => rollback( job.id ), 'migrateplus-rollback' ) : null,
+				createElement( 'button', { type: 'button', className: 'migrateplus-link-danger', title: 'Remove from history. Imported content is kept.', onClick: forget }, 'Delete' ) ) )
+		);
 	}
 
 	function openJob( id, resume ) {
@@ -3405,7 +3110,7 @@
 			state.paused = ! resume;
 			if ( resume && ! [ 'complete', 'rolled_back' ].includes( data.job.status ) ) {
 				state.modalHidden = false;
-				modal.open( runModalOptions() );
+				modal.open( { kind: 'run' } );
 			}
 			render();
 			if ( resume ) {
@@ -3423,8 +3128,15 @@
 		}
 	} );
 
+	mount.classList.add( 'migrateplus-app' );
 	render();
-	if ( D.openJob && state.tab === 'new' ) {
+	if ( 'history' === state.tab ) {
+		loadHistory();
+	} else if ( 'export' === state.tab ) {
+		recount();
+	} else if ( 'replace' === state.tab ) {
+		loadReplaceRuns();
+	} else if ( D.openJob ) {
 		openJob( D.openJob, D.resume );
 	}
 }() );
