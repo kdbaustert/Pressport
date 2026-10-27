@@ -1537,25 +1537,43 @@
 		return it.media && 'update' === v ? 'details' : v;
 	}
 
-	/** Each listed record and the status its choice gives it, in a scroll box under the cards. */
-	function DuplicateRoll( { items } ) {
-		if ( ! items.length ) {
+	/**
+	 * Every record in the import under the card it counts toward, as the choices stand, in a scroll
+	 * box under the cards. A group whose list was cut short says how many more it holds.
+	 */
+	function ImportRoll( { d, counts } ) {
+		const rows = { created: [], update: [], skip: [], copy: [], details: [], replace: [] };
+		( d.new_items || [] ).forEach( ( it ) => rows.created.push( { index: it.index, title: it.title, detail: it.type } ) );
+		( d.items || [] ).forEach( ( it ) => rows[ outcomeOf( it ) ].push( {
+			index: it.index,
+			title: it.title,
+			/* translators: 1: post type, 2: post ID on this site, 3: how it matched, e.g. imported before */
+			detail: sprintf( __( '%1$s #%2$s, %3$s', 'migrateplus' ), it.type, it.post_id, matchedBy( it ) ),
+		} ) );
+		const groups = [
+			[ 'created', 'created', __( 'New', 'migrateplus' ) ],
+			[ 'update', 'updated', __( 'Will update', 'migrateplus' ) ],
+			[ 'skip', 'skipped', __( 'Skipped', 'migrateplus' ) ],
+			[ 'copy', 'copied', __( 'Imported as copies', 'migrateplus' ) ],
+			[ 'details', 'updated', __( 'Update details', 'migrateplus' ) ],
+			[ 'replace', 'replaced', __( 'Replace file', 'migrateplus' ) ],
+		].filter( ( [ key ] ) => counts[ key ] );
+		if ( ! groups.length ) {
 			return null;
 		}
-		const labels = {
-			update: __( 'Will update', 'migrateplus' ),
-			skip: __( 'Skipped', 'migrateplus' ),
-			copy: __( 'Imported as copy', 'migrateplus' ),
-			details: __( 'Update details', 'migrateplus' ),
-			replace: __( 'Replace file', 'migrateplus' ),
-		};
-		const css = { update: 'updated', skip: 'skipped', copy: 'copied', details: 'updated', replace: 'replaced' };
-		return createElement( 'ul', { className: 'migrateplus-dups-roll', 'aria-label': __( 'Each record already on this site and what happens to it', 'migrateplus' ) },
-			items.map( ( it ) => {
-				const o = outcomeOf( it );
-				return createElement( 'li', { key: it.index },
-					createElement( 'span', { className: 'migrateplus-dups-roll-title' }, it.title || __( '(untitled)', 'migrateplus' ) ),
-					createElement( 'span', { className: 'migrateplus-dups-roll-status is-' + css[ o ] }, labels[ o ] ) );
+		return createElement( 'div', { className: 'migrateplus-dups-roll', role: 'region', tabIndex: 0, 'aria-label': __( 'Each record in the import and what happens to it', 'migrateplus' ) },
+			groups.map( ( [ key, tone, label ] ) => {
+				const more = counts[ key ] - rows[ key ].length;
+				return createElement( 'section', { key },
+					createElement( 'h3', { className: 'migrateplus-dups-roll-head is-' + tone },
+						createElement( 'span', null, label ),
+						createElement( 'span', { className: 'migrateplus-dups-roll-count' }, counts[ key ].toLocaleString() ) ),
+					createElement( 'ul', null,
+						rows[ key ].map( ( row ) => createElement( 'li', { key: row.index },
+							createElement( 'span', { className: 'migrateplus-dups-roll-title' }, row.title || __( '(untitled)', 'migrateplus' ) ),
+							createElement( 'span', { className: 'migrateplus-help' }, row.detail ) ) ),
+						/* translators: %s: records in this group that are not listed */
+						more > 0 ? createElement( 'li', { className: 'migrateplus-dups-roll-more' }, sprintf( _n( 'and %s more not listed', 'and %s more not listed', more, 'migrateplus' ), more.toLocaleString() ) ) : null ) );
 			} ) );
 	}
 
@@ -1637,7 +1655,7 @@
 					createElement( 'li', { key: i, className: 'is-' + key + ( value ? '' : ' is-zero' ) },
 						createElement( 'strong', null, value.toLocaleString() ),
 						createElement( 'span', null, label ) ) ) ),
-				createElement( DuplicateRoll, { items } ),
+				createElement( ImportRoll, { d, counts: c } ),
 				createElement( 'p', { className: 'migrateplus-dups-plan', 'aria-live': 'polite' }, duplicatePlan( c ) ),
 				createElement( 'p', { className: 'migrateplus-muted' }, __( 'An update also writes the custom fields, terms and images. WordPress keeps a revision of each post or page it updates, so the old version can be restored from the editor. A replaced file cannot be rolled back.', 'migrateplus' ) )
 			),

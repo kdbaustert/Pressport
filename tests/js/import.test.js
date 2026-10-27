@@ -360,7 +360,7 @@ const dupItems = () => [
     media: { current: 'https://example.test/cover-150.jpg', current_full: 'https://example.test/cover.jpg', imported: 'https://old.test/cover.jpg', is_image: true },
   },
 ]
-const dups = over => ({ count: 4, total: 6, before: 2, existing: 2, examples: [], items: dupItems(), items_truncated: false, ...over })
+const dups = over => ({ count: 4, total: 6, before: 2, existing: 2, examples: [], items: dupItems(), items_truncated: false, new_items: [{ index: 2, title: 'Beloved', type: 'Post' }, { index: 5, title: 'Ulysses', type: 'Post' }], new_items_truncated: false, ...over })
 
 async function duplicatesScreen(routes) {
   const env = await mappingStep({ duplicates: dups(), run: done(false), ...routes })
@@ -471,16 +471,31 @@ describe('Duplicates', () => {
     assert.equal(env.$('.migrateplus-actionbar-status').textContent, plan(env))
   })
 
-  it('lists each record with its status under the cards and follows the choices', async () => {
+  it('lists every record under the card it counts toward and follows the choices', async () => {
     const env = await duplicatesScreen()
-    const roll = () => env.$$('.migrateplus-dups-roll li').map(li => [...li.children].map(n => n.textContent).join(' — '))
-    assert.deepEqual(roll(), ['Dune — Skipped', 'Emma — Skipped', 'Kindred — Skipped', 'cover.jpg — Skipped'])
+    const roll = () => env.$$('.migrateplus-dups-roll section').map(group => [
+      [...group.querySelector('h3').children].map(n => n.textContent).join(': '),
+      ...[...group.querySelectorAll('li')].map(li => [...li.children].map(n => n.textContent).join(' | ') || li.textContent),
+    ])
+    assert.equal(env.$('.migrateplus-dups-roll').getAttribute('aria-label'), 'Each record in the import and what happens to it')
+    assert.deepEqual(roll(), [
+      ['New: 2', 'Beloved | Post', 'Ulysses | Post'],
+      ['Skipped: 4', 'Dune | Post #41, imported before', 'Emma | Post #42, same slug', 'Kindred | Post #43, imported before', 'cover.jpg | Media #50, same file'],
+    ])
 
     env.choose(choice(env, 0), 'update')
     env.choose(choice(env, 1), 'copy')
     env.choose(choice(env, 4), 'update')
-    assert.deepEqual(roll(), ['Dune — Will update', 'Emma — Imported as copy', 'Kindred — Skipped', 'cover.jpg — Update details'])
-    assert.equal(env.$$('.migrateplus-dups-roll li .migrateplus-dups-roll-status.is-updated').length, 2)
+    assert.deepEqual(roll().map(group => group[0]), ['New: 2', 'Will update: 1', 'Skipped: 1', 'Imported as copies: 1', 'Update details: 1'])
+    assert.deepEqual(roll()[3], ['Imported as copies: 1', 'Emma | Post #42, same slug'])
+    assert.deepEqual(roll()[4], ['Update details: 1', 'cover.jpg | Media #50, same file'])
+  })
+
+  it('says how many records a group holds past the list', async () => {
+    const env = await duplicatesScreen({ duplicates: dups({ total: 1504, new_items_truncated: true }) })
+    const created = env.$('.migrateplus-dups-roll section')
+    assert.equal(created.querySelector('.migrateplus-dups-roll-count').textContent, (1500).toLocaleString())
+    assert.equal(created.querySelector('.migrateplus-dups-roll-more').textContent, 'and ' + (1498).toLocaleString() + ' more not listed')
   })
 
   it('applies the bulk buttons to the rows the filter and search show, and no others', async () => {

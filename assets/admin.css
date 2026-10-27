@@ -343,15 +343,21 @@
 .migrateplus-legend li.is-copied { border-top-color: var(--pp-tide); }
 .migrateplus-legend li.is-replaced { border-top-color: var(--pp-hull); }
 /* Each record and its status in a scroll box, like a database table picker. */
-.migrateplus-dups-roll { margin: 0 0 12px; padding: 0; max-height: 180px; overflow-y: auto; list-style: none; background: var(--pp-paper); border: 1px solid var(--pp-line); border-radius: var(--pp-r-sm); }
-.migrateplus-dups-roll li { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin: 0; padding: 6px 12px; font-size: 12px; }
-.migrateplus-dups-roll li + li { border-top: 1px solid var(--pp-line-2); }
-.migrateplus-dups-roll-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.migrateplus-dups-roll-status { flex: none; color: var(--pp-muted); }
-.migrateplus-dups-roll-status::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--pp-out-skipped); }
-.migrateplus-dups-roll-status.is-updated::before { background: var(--pp-out-updated); }
-.migrateplus-dups-roll-status.is-copied::before { background: var(--pp-tide); }
-.migrateplus-dups-roll-status.is-replaced::before { background: var(--pp-hull); }
+.migrateplus-dups-roll { margin: 0 0 12px; max-height: 320px; overflow-y: auto; border: 1px solid var(--pp-line); border-radius: var(--pp-r-lg); }
+.migrateplus-dups-roll-head { position: sticky; top: 0; display: flex; align-items: center; gap: 8px; margin: 0; padding: 6px 12px; background: var(--pp-paper); border-bottom: 1px solid var(--pp-line-2); font-size: 12px; font-weight: 600; }
+.migrateplus-dups-roll section + section .migrateplus-dups-roll-head { border-top: 1px solid var(--pp-line-2); }
+.migrateplus-dups-roll-head::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--pp-out-skipped); }
+.migrateplus-dups-roll-head.is-created::before { background: var(--pp-out-created); }
+.migrateplus-dups-roll-head.is-updated::before { background: var(--pp-out-updated); }
+.migrateplus-dups-roll-head.is-copied::before { background: var(--pp-tide); }
+.migrateplus-dups-roll-head.is-replaced::before { background: var(--pp-hull); }
+.migrateplus-dups-roll-count { margin-left: auto; color: var(--pp-muted); font-weight: 400; }
+.migrateplus-dups-roll ul { margin: 0; padding: 4px 0; list-style: none; }
+.migrateplus-dups-roll li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 8px; margin: 0; padding: 5px 12px; }
+.migrateplus-dups-roll li:hover { background: #fafbfc; }
+.migrateplus-dups-roll li .migrateplus-help { margin: 0; }
+.migrateplus-dups-roll-title { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.migrateplus-dups-roll-more { color: var(--pp-muted); font-size: 12px; }
 .migrateplus-dups-plan { font-weight: 600; }
 .migrateplus-dups-tools, .migrateplus-dups-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 12px; }
 .migrateplus-dups-tools input[type="search"] { min-width: 220px; }

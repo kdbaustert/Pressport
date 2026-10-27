@@ -950,6 +950,42 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 		$this->assertTrue( $out['items_truncated'] );
 	}
 
+	public function test_duplicates_list_the_records_that_will_be_new_up_to_the_cap() {
+		$this->login( 'administrator' );
+		$id = $this->import_books( 4 );
+		foreach ( array( 'Ulysses', 'Beloved' ) as $title ) {
+			wp_delete_post( get_posts( array( 'title' => $title ) )[0]->ID, true );
+		}
+
+		$out = $this->ajax( 'duplicates', array( 'job' => $id ) )['data'];
+		$this->assertSame(
+			array(
+				array(
+					'index' => 2,
+					'title' => 'Ulysses',
+					'type'  => 'Post',
+				),
+				array(
+					'index' => 3,
+					'title' => 'Beloved',
+					'type'  => 'Post',
+				),
+			),
+			$out['new_items']
+		);
+		$this->assertFalse( $out['new_items_truncated'] );
+
+		add_filter(
+			'migrateplus_duplicates_list_cap',
+			static function () {
+				return 1;
+			}
+		);
+		$out = $this->ajax( 'duplicates', array( 'job' => $id ) )['data'];
+		$this->assertSame( array( 2 ), array_column( $out['new_items'], 'index' ) );
+		$this->assertTrue( $out['new_items_truncated'] );
+	}
+
 	public function test_rollback() {
 		$this->login( 'administrator' );
 		$id    = $this->import_books( 3 );

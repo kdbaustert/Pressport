@@ -348,9 +348,10 @@ class MigratePlus_Runner {
 	 *                        images: [{ post_id, title, kind, label, current, current_full, imported, is_image, changes }],
 	 *                        items: [{ index, title, existing_title, post_id, type, kind, label, changed, changes,
 	 *                        view_url, edit_url, media: null|{ current, current_full, imported, is_image } }],
-	 *                        items_truncated: bool }
-	 *                        items lists every duplicate (up to the migrateplus_duplicates_list_cap filter, 1000),
-	 *                        in the file's order, for the screen that chooses what to do with each.
+	 *                        items_truncated: bool, new_items: [{ index, title, type }], new_items_truncated: bool }
+	 *                        items lists every duplicate and new_items every other record (each up to the
+	 *                        migrateplus_duplicates_list_cap filter, 1000), in the file's order, for the screen
+	 *                        that chooses what to do with each.
 	 */
 	public static function find_duplicates( MigratePlus_Job $job, $examples = 5 ) {
 		$source = $job->source();
@@ -360,7 +361,7 @@ class MigratePlus_Runner {
 		if ( function_exists( 'set_time_limit' ) && ! ( defined( 'WP_CLI' ) && WP_CLI ) ) {
 			@set_time_limit( 300 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 		}
-		$out                    = array(
+		$out                        = array(
 			'total'    => 0,
 			'count'    => 0,
 			'before'   => 0,
@@ -370,9 +371,11 @@ class MigratePlus_Runner {
 			'images'   => array(), // Media duplicates, shown side by side.
 			'items'    => array(),
 		);
-		$cap                    = max( 0, (int) apply_filters( 'migrateplus_duplicates_list_cap', 1000 ) );
-		$out['items_truncated'] = false;
-		$cursor                 = null;
+		$cap                        = max( 0, (int) apply_filters( 'migrateplus_duplicates_list_cap', 1000 ) );
+		$out['items_truncated']     = false;
+		$out['new_items']           = array(); // Records with no match here: these are imported as new.
+		$out['new_items_truncated'] = false;
+		$cursor                     = null;
 		do {
 			$batch = $source->fetch( $cursor, 200 );
 			if ( is_wp_error( $batch ) ) {
@@ -384,6 +387,16 @@ class MigratePlus_Runner {
 				$match = MigratePlus_Importer::find_duplicate( $record, $job, $index );
 				++$out['total'];
 				if ( ! $match ) {
+					if ( count( $out['new_items'] ) < $cap ) {
+						$type               = get_post_type_object( MigratePlus_Importer::type_for( $record, $job ) );
+						$out['new_items'][] = array(
+							'index' => $index,
+							'title' => self::record_title( $record, (array) $job->data['mapping'], $index ),
+							'type'  => $type ? $type->labels->singular_name : '',
+						);
+					} else {
+						$out['new_items_truncated'] = true;
+					}
 					continue;
 				}
 				++$out['count'];
