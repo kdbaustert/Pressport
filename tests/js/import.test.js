@@ -756,3 +756,54 @@ describe('Opening an import from History', () => {
     assert.equal(env.window.location.search, '?page=migrateplus&job=books')
   })
 })
+
+// Loads the page again at env's address, with its session storage, as a refresh of the tab does.
+async function reload(env, routes) {
+  const draft = job({ fields: feedPreview.fields, records: feedPreview.records })
+  const next = boot({
+    url: env.window.location.href,
+    data: { openJob: 'books' },
+    routes: { job: { job: draft }, duplicates: dups(), ...routes },
+    setup: w => Object.keys(env.window.sessionStorage).forEach(key => w.sessionStorage.setItem(key, env.window.sessionStorage.getItem(key))),
+  })
+  await next.flush()
+  return next
+}
+
+describe('Refreshing an import', () => {
+  it('keeps the mapping edits the server has not been sent yet', async () => {
+    const env = await mappingStep()
+    env.choose(env.$('.migrateplus-map-table select'), '')
+    const next = await reload(env)
+    assert.ok(next.$('.migrateplus-map-table'))
+    assert.equal(next.$('.migrateplus-map-table select').value, '')
+  })
+
+  it('comes back to the duplicates screen with the choices made there', async () => {
+    const env = await duplicatesScreen()
+    env.choose(choice(env, 0), 'update')
+    env.choose(choice(env, 1), 'copy')
+    assert.equal(env.window.location.search, '?page=migrateplus&job=books&step=duplicates')
+
+    const next = await reload(env)
+    assert.equal(next.sent('duplicates').length, 1)
+    assert.equal(next.modal.isOpen(), false)
+    assert.deepEqual(choices(next), ['update', 'copy', 'skip', 'skip'])
+    assert.equal(next.sent('save').length, 0)
+    assert.equal(next.window.location.search, '?page=migrateplus&job=books&step=duplicates')
+  })
+
+  it('opens the mapping step after Back to mapping, keeping the choices for the next check', async () => {
+    const env = await duplicatesScreen()
+    env.choose(choice(env, 0), 'update')
+    env.click(dupButton(env, 'Back to mapping'))
+    assert.equal(env.window.location.search, '?page=migrateplus&job=books')
+
+    const next = await reload(env)
+    assert.ok(next.$('.migrateplus-map-table'))
+    assert.equal(next.sent('duplicates').length, 0)
+    next.click(next.byText('button', 'Start import'))
+    await next.flush()
+    assert.deepEqual(choices(next), ['update', 'skip', 'skip', 'skip'])
+  })
+})

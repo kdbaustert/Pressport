@@ -830,6 +830,11 @@
 		if ( 'new' === state.tab && 'map' === state.step ) {
 			suggestExtras();
 		}
+		// Not before the job loads: until then the address holds the job and step a refresh came back to.
+		if ( 'new' === state.tab && state.job ) {
+			syncJobUrl();
+			rememberScreen();
+		}
 		if ( concurrent ) {
 			flushSync( () => reactRoot.render( createElement( App ) ) );
 		} else {
@@ -3123,13 +3128,15 @@
 	}
 
 	/**
-	 * Keep the open job's id in the address, and no more: a refresh then comes back to this
-	 * job's screen, while &resume=1 never survives a load, so a reload after Pause can't resume.
+	 * Keep the open job's id in the address, with &step=duplicates while that screen is open, and no
+	 * more: a refresh then comes back to this job's screen, while &resume=1 never survives a load, so
+	 * a reload after Pause can't resume.
 	 */
 	function syncJobUrl() {
 		const url = new URL( window.location.href );
 		const id = state.job ? String( state.job.id ) : '';
-		if ( ( url.searchParams.get( 'job' ) || '' ) === id && ! url.searchParams.has( 'resume' ) ) {
+		const step = id && 'duplicates' === state.step ? state.step : '';
+		if ( ( url.searchParams.get( 'job' ) || '' ) === id && ( url.searchParams.get( 'step' ) || '' ) === step && ! url.searchParams.has( 'resume' ) ) {
 			return;
 		}
 		if ( id ) {
@@ -3137,8 +3144,68 @@
 		} else {
 			url.searchParams.delete( 'job' );
 		}
+		if ( step ) {
+			url.searchParams.set( 'step', step );
+		} else {
+			url.searchParams.delete( 'step' );
+		}
 		url.searchParams.delete( 'resume' );
 		window.history.replaceState( window.history.state, '', url.toString() );
+	}
+
+	// Session storage key prefix, by job id, for what rememberScreen() keeps.
+	const SCREEN_KEY = 'migrateplus-screen-';
+
+	/**
+	 * Keep the open job's mapping, options and duplicate choices in this tab's session storage while
+	 * it is on the mapping step or duplicates screen: the server only gets them when the import starts.
+	 */
+	function rememberScreen() {
+		if ( 'map' !== state.step && 'duplicates' !== state.step ) {
+			return;
+		}
+		const dups = state.dups && state.dups.job === state.job.id ? state.dups : null;
+		try {
+			window.sessionStorage.setItem( SCREEN_KEY + state.job.id, JSON.stringify( {
+				mapping: state.mapping,
+				options: state.options,
+				suggested: state.suggested,
+				dups: dups && { from: dups.from, back: dups.back, choices: Array.from( dups.choices ), rest: dups.rest },
+			} ) );
+		} catch ( e ) {} // Storage blocked or full: a refresh falls back to the job as the server has it.
+	}
+
+	/**
+	 * What rememberScreen() kept for job before a refresh, or null. A draft takes it on any step. A dry
+	 * run only on the duplicates screen, where Run the real import leaves it; past that it ran with
+	 * what the server has. reopen says the refresh was on the duplicates screen.
+	 */
+	function recallScreen( job, resume ) {
+		const onDuplicates = 'duplicates' === new URL( window.location.href ).searchParams.get( 'step' );
+		if ( resume || ! ( 'draft' === job.status || ( onDuplicates && Number( job.options.dry_run ) ) ) ) {
+			return null;
+		}
+		let saved = null;
+		try {
+			saved = JSON.parse( window.sessionStorage.getItem( SCREEN_KEY + job.id ) );
+		} catch ( e ) {}
+		return saved && Object.assign( saved, { reopen: onDuplicates && !! saved.dups } );
+	}
+
+	/** Back on the duplicates screen after a refresh: a fresh check lists the duplicates, and the choices are the ones kept. */
+	function reopenDuplicates( dups ) {
+		state.step = dups.back;
+		render();
+		modal.open( { kind: 'confirm', title: __( 'Checking for duplicates', 'migrateplus' ), message: __( 'Looking for items in this import that are already on this site…', 'migrateplus' ), percent: null, actions: [] } );
+		checkDuplicates().then( ( d ) => {
+			if ( d.count ) {
+				openDuplicates( d, dups.from );
+			} else if ( 'confirm' === dups.from ) {
+				confirmImport( d );
+			} else {
+				modal.close();
+			}
+		} ).catch( duplicateCheckFailed );
 	}
 
 	/** Posts the job created over all its runs (stats only cover the last; jobs saved before created_total fall back to them). */
@@ -4443,16 +4510,24 @@
 			// A draft export has no mapping step: as when it was dropped, the duplicate check and the confirmation come next.
 			const draft = 'draft' === data.job.status;
 			const draftExport = draft && isExport( data.job );
+			const saved = recallScreen( data.job, resume );
 			resume = resume && ! draft;
 			state.job = data.job;
-			state.mapping = normalizeMapping( data.job.mapping );
-			state.options = Object.assign( {}, D.defaults, data.job.options );
+			state.mapping = normalizeMapping( saved ? saved.mapping : data.job.mapping );
+			state.options = Object.assign( {}, D.defaults, data.job.options, saved ? saved.options : {} );
 			// PHP sends positions 0, 1, 2… as a list: kept as an object, so a row's override is sent by its position.
 			state.options.authors = Object.assign( {}, state.options.authors );
 			state.fields = ( data.job.fields || [] ).map( String );
 			state.records = data.job.records || [];
 			// A job that ran was mapped on purpose: suggestions would add back what was left out. A draft gets them as a fresh file does.
 			state.suggested = draft ? {} : { [ state.options.post_type ]: true };
+			if ( saved ) {
+				state.suggested = saved.suggested;
+			}
+			if ( saved && saved.dups ) {
+				// As Back to mapping keeps them, for the next check.
+				state.dups = Object.assign( {}, saved.dups, { job: data.job.id, choices: new Map( saved.dups.choices ) } );
+			}
 			if ( draftExport ) {
 				state.step = 'source';
 			} else {
@@ -4462,6 +4537,10 @@
 			state.error = '';
 			state.paused = ! resume;
 			syncJobUrl();
+			if ( saved && saved.reopen ) {
+				reopenDuplicates( saved.dups );
+				return;
+			}
 			if ( draftExport ) {
 				render();
 				modal.open( { kind: 'confirm', title: __( 'Checking for duplicates', 'migrateplus' ), message: __( 'Looking for items in this file that are already on this site…', 'migrateplus' ), percent: null, actions: [] } );
