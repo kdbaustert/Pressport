@@ -351,7 +351,7 @@
 .migrateplus-dups-roll-head.is-updated::before { background: var(--pp-out-updated); }
 .migrateplus-dups-roll-head.is-copied::before { background: var(--pp-tide); }
 .migrateplus-dups-roll-head.is-replaced::before { background: var(--pp-hull); }
-.migrateplus-dups-roll-count { margin-left: auto; color: var(--pp-muted); font-weight: 400; }
+.migrateplus-dups-roll-column { margin-left: auto; color: var(--pp-muted); font-weight: 400; }
 .migrateplus-dups-roll ul { margin: 0; padding: 4px 0; list-style: none; }
 .migrateplus-dups-roll li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 8px; margin: 0; padding: 5px 12px; }
 .migrateplus-dups-roll li:hover { background: #fafbfc; }

@@ -1567,7 +1567,7 @@
 				return createElement( 'section', { key },
 					createElement( 'h3', { className: 'migrateplus-dups-roll-head is-' + tone },
 						createElement( 'span', null, label ),
-						createElement( 'span', { className: 'migrateplus-dups-roll-count' }, counts[ key ].toLocaleString() ) ),
+						createElement( 'span', { className: 'migrateplus-dups-roll-column' }, __( 'Type', 'migrateplus' ) ) ),
 					createElement( 'ul', null,
 						rows[ key ].map( ( row ) => createElement( 'li', { key: row.index },
 							createElement( 'span', { className: 'migrateplus-dups-roll-title' }, row.title || __( '(untitled)', 'migrateplus' ) ),
