@@ -1340,7 +1340,7 @@
 		const afterNote = afterKeys.length ? ' ' + sprintf( 1 === afterKeys.length && 'site_settings' === afterKeys[ 0 ] ? __( 'Then %s are applied.', 'migrateplus' ) : __( 'Then %s follow, linked to the imported content.', 'migrateplus' ), after ) : '';
 		/* translators: %s: the site the file was exported from */
 		const fromNote = from ? sprintf( __( 'Exported from %s.', 'migrateplus' ), from ) + ' ' : '';
-		// An export of menus, terms or settings alone: nothing to map, no records.
+		// An export of menus, terms or settings alone: no records.
 		const sidesOnly = ! needsAuthor( job );
 		let intro = fromNote + ( isMultiType( job )
 			/* translators: %s: the content types in the file, e.g. "Media, Pages and Posts" */
@@ -1355,13 +1355,6 @@
 				/* translators: %s: the parts of the file whose import is off, e.g. "5 terms" */
 				( off.length ? ' ' + sprintf( _n( 'The import of %s is off in Settings, so that part would not be imported.', 'The import of %s is off in Settings, so those parts would not be imported.', off.length, 'migrateplus' ), joinAnd( off ) ) : '' );
 		}
-		// Menus, terms or settings alone have nothing to map.
-		const review = sidesOnly ? [] : [ { label: __( 'Review mapping', 'migrateplus' ), onClick: () => {
-			modal.close();
-			state.direct = false;
-			state.step = 'map';
-			render();
-		} } ];
 		const cancel = { label: __( 'Cancel', 'migrateplus' ), onClick: () => modal.close() };
 		const base = {
 			kind: 'confirm',
@@ -1373,7 +1366,7 @@
 		};
 		const actions = () => ( d && d.count
 			? [ { label: __( 'Choose what to do with them', 'migrateplus' ), primary: true, onClick: () => openDuplicates( d, 'confirm' ) } ]
-			: [ { label: __( 'Import', 'migrateplus' ), primary: true, onClick: () => start( false, true ) } ] ).concat( review, [ cancel ] );
+			: [ { label: __( 'Import', 'migrateplus' ), primary: true, onClick: () => start( false, true ) } ] ).concat( [ cancel ] );
 		if ( d && d.count ) {
 			modal.open( Object.assign( base, {
 				message: intro + ' ' + duplicateMessage( d ),
@@ -2141,7 +2134,7 @@
 					render();
 				} }, isDropSource() ? __( 'Choose another file', 'migrateplus' ) : __( 'Change source', 'migrateplus' ) )
 			),
-			isExport( job ) ? null : createElement( SavedMappings ),
+			createElement( SavedMappings ),
 			// No records when a job's cached copy is gone: an empty table would only say "First 0 records".
 			state.records.length ? createElement( 'details', { className: 'migrateplus-panel migrateplus-preview-panel', open: true },
 				createElement( 'summary', null,
@@ -2511,7 +2504,6 @@
 				createElement( 'h2', null, __( 'Import options', 'migrateplus' ) ),
 				D.settingsUrl ? createElement( 'p', { className: 'migrateplus-muted' }, defaultsNote[ 0 ], createElement( 'a', { href: D.settingsUrl }, __( 'Settings', 'migrateplus' ) ), defaultsNote[ 1 ] || '' ) : null ),
 			needsAuthor( state.job ) ? createElement( MainAuthorPicker, { id: 'migrateplus-opt-author', onPick: render } ) : null,
-			needsAuthor( state.job ) && isExport( state.job ) ? createElement( AuthorsPerSourceAuthor ) : null,
 			needsAuthor( state.job ) ? createElement( AuthorsPerRecord ) : null,
 			optionRow( 'migrateplus-opt-row-1', __( 'Import as', 'migrateplus' ), createElement( 'select', { id: 'migrateplus-opt-row-1', value: o.post_type, onChange: setOption( 'post_type' ) },
 				D.postTypes.map( ( p ) => createElement( 'option', { key: p.name, value: p.name }, p.label + ' (' + p.name + ')' ) ) ), __( 'Used for every record, unless "Post type" is mapped and names a type this site has.', 'migrateplus' ) ),
@@ -2633,87 +2625,6 @@
 			delete state.options.authors[ index ];
 		}
 		render();
-	}
-
-	/**
-	 * "Choose an author for each author on the old site": the authors the file names, most
-	 * posts first, each with a picker whose choice goes into state.options.author_map by the
-	 * author's login on the old site (their name, when the file has no logins).
-	 */
-	function AuthorsPerSourceAuthor() {
-		const [ open, setOpen ] = useImmediateState( false );
-		const [ found, setFound ] = useImmediateState( null ); // { authors, truncated }, null until loaded.
-		const [ problem, setProblem ] = useImmediateState( '' );
-		const toggle = () => {
-			if ( ! open && ! found ) {
-				api( 'source_authors', { job: state.job.id, mapping: mappingToSave() } )
-					.then( ( d ) => {
-						// The pickers must list a matched account even when the site's first 200 users leave it out.
-						( d.authors || [] ).forEach( ( a ) => a.match && seenAuthors.set( String( a.match.id ), a.match ) );
-						setProblem( '' );
-						setFound( d );
-					} )
-					.catch( ( err ) => setProblem( err.message ) );
-			}
-			setOpen( ! open );
-		};
-		const map = state.options.author_map || {};
-		const authors = found ? found.authors || [] : [];
-		const own = Object.keys( map ).filter( ( k ) => Number( map[ k ] ) > 0 ).length;
-		// Dev, staging and production carry the same accounts, so matches by login can be taken in one click.
-		const matchable = authors.filter( ( a ) => a.match && Number( map[ a.key ] || 0 ) !== a.match.id );
-		const useMatches = () => {
-			state.options.author_map = Object.assign( {}, state.options.author_map );
-			authors.forEach( ( a ) => {
-				if ( a.match ) {
-					seenAuthors.set( String( a.match.id ), a.match );
-					state.options.author_map[ a.key ] = a.match.id;
-				}
-			} );
-			render();
-		};
-		return createElement( 'div', { className: 'migrateplus-opt migrateplus-authors-each' },
-			createElement( 'button', { type: 'button', className: 'button-link migrateplus-authors-toggle', 'aria-expanded': open ? 'true' : 'false', 'aria-controls': 'migrateplus-authors-source', onClick: toggle },
-				__( 'Choose an author for each author on the old site', 'migrateplus' ) ),
-			/* translators: %s: number of the old site's authors given an author here */
-			own ? createElement( 'span', { className: 'migrateplus-help migrateplus-authors-count' }, sprintf( _n( '%s old author has an author here.', '%s old authors have an author here.', own, 'migrateplus' ), own.toLocaleString() ) ) : null,
-			createElement( 'div', { id: 'migrateplus-authors-source', hidden: ! open },
-				authors.some( ( a ) => a.match ) ? createElement( 'div', { className: 'migrateplus-authors-tools' },
-					createElement( 'button', { type: 'button', className: 'button', disabled: ! matchable.length, onClick: useMatches },
-						__( 'Use the accounts with the same login', 'migrateplus' ) ),
-					/* translators: %s: how many of the old site's authors have an account here with the same login */
-					createElement( 'span', { className: 'migrateplus-help' }, sprintf( _n( '%s of them has an account here with the same login.', '%s of them have an account here with the same login.', authors.filter( ( a ) => a.match ).length, 'migrateplus' ), authors.filter( ( a ) => a.match ).length.toLocaleString() ) ) ) : null,
-				problem ? createElement( 'div', { className: 'notice notice-error inline' }, createElement( 'p', null, problem ) ) : null,
-				found || problem ? null : createElement( 'p', { className: 'migrateplus-muted' }, __( 'Loading…', 'migrateplus' ) ),
-				found && ! authors.length ? createElement( 'p', { className: 'migrateplus-muted' }, __( 'The file names no authors.', 'migrateplus' ) ) : null,
-				authors.length ? createElement( 'table', { className: 'migrateplus-map-table migrateplus-authors-table' },
-					createElement( 'caption', { className: 'screen-reader-text' }, __( 'Author for each author on the old site', 'migrateplus' ) ),
-					createElement( 'thead', null, createElement( 'tr', null,
-						createElement( 'th', { scope: 'col' }, __( 'On the old site', 'migrateplus' ) ),
-						createElement( 'th', { scope: 'col' }, __( 'Posts and pages', 'migrateplus' ) ),
-						createElement( 'th', { scope: 'col' }, __( 'Author here', 'migrateplus' ) ) ) ),
-					createElement( 'tbody', null, authors.map( ( a, i ) => createElement( 'tr', { key: a.key },
-						createElement( 'td', { className: 'migrateplus-authors-title' }, a.name && a.login ? sprintf( __( '%1$s (%2$s)', 'migrateplus' ), a.name, a.login ) : ( a.name || a.login ) ),
-						createElement( 'td', null, Number( a.count ).toLocaleString() ),
-						createElement( 'td', null, createElement( AuthorPicker, {
-							id: 'migrateplus-source-author-' + i,
-							/* translators: %s: an author's name on the old site */
-							label: sprintf( __( 'Author here for %s', 'migrateplus' ), a.name || a.login ),
-							hideLabel: true,
-							emptyLabel: __( 'Same as above', 'migrateplus' ),
-							value: map[ a.key ],
-							onChange: ( user ) => {
-								state.options.author_map = Object.assign( {}, state.options.author_map );
-								if ( user ) {
-									state.options.author_map[ a.key ] = user;
-								} else {
-									delete state.options.author_map[ a.key ];
-								}
-								render();
-							},
-						} ) ) ) ) ) ) : null,
-				found && found.truncated ? createElement( 'p', { className: 'migrateplus-help' }, __( 'Only the first 5,000 records were read.', 'migrateplus' ) ) : null )
-		);
 	}
 
 	// Records per page in the author for each post or page.
@@ -4511,7 +4422,9 @@
 		}
 		api( 'job', { job: id } ).then( ( data ) => {
 			// A draft was never started: it goes to the mapping step, and its options have not been through the duplicate check.
+			// A draft export has no mapping step: as when it was dropped, the duplicate check and the confirmation come next.
 			const draft = 'draft' === data.job.status;
+			const draftExport = draft && isExport( data.job );
 			resume = resume && ! draft;
 			state.job = data.job;
 			state.mapping = normalizeMapping( data.job.mapping );
@@ -4522,11 +4435,21 @@
 			state.records = data.job.records || [];
 			// A job that ran was mapped on purpose: suggestions would add back what was left out. A draft gets them as a fresh file does.
 			state.suggested = draft ? {} : { [ state.options.post_type ]: true };
-			state.step = draft ? 'map' : 'run';
-			state.direct = false;
+			if ( draftExport ) {
+				state.step = 'source';
+			} else {
+				state.step = draft ? 'map' : 'run';
+			}
+			state.direct = draftExport;
 			state.error = '';
 			state.paused = ! resume;
 			syncJobUrl();
+			if ( draftExport ) {
+				render();
+				modal.open( { kind: 'confirm', title: __( 'Checking for duplicates', 'migrateplus' ), message: __( 'Looking for items in this file that are already on this site…', 'migrateplus' ), percent: null, actions: [] } );
+				checkDuplicates().then( confirmImport ).catch( duplicateCheckFailed );
+				return;
+			}
 			if ( resume && ! [ 'complete', 'rolled_back' ].includes( data.job.status ) ) {
 				modal.open( { kind: 'run' } );
 			}

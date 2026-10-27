@@ -87,7 +87,7 @@ describe('Import', () => {
     await env.flush()
     assert.equal(env.modal.title(), 'Import 15 items?')
     assert.match(env.modal.message(), /^Exported from old-books\.test\./)
-    assert.deepEqual(env.modal.labels(), ['Review mapping', 'Cancel', 'Import'])
+    assert.deepEqual(env.modal.labels(), ['Cancel', 'Import'])
 
     env.click(env.modal.primary())
     await env.flush()
@@ -97,7 +97,7 @@ describe('Import', () => {
     assert.equal(env.$('.migrateplus-run h2').textContent, 'Import complete')
   })
 
-  it('offers Review mapping and a dry run for a file of several post types', async () => {
+  it('imports a file of several post types with the ACF fields of every type', async () => {
     const multiPreview = {
       job: job({
         total: 15,
@@ -116,12 +116,9 @@ describe('Import', () => {
     upload(env, 'site.json')
     await env.flush()
     assert.match(env.modal.message(), /Media, Pages and Posts are imported in that order/)
-    assert.deepEqual(env.modal.labels(), ['Review mapping', 'Cancel', 'Import'])
+    assert.deepEqual(env.modal.labels(), ['Cancel', 'Import'])
 
-    env.click(env.byText('.migrateplus-modal button', 'Review mapping'))
-    await env.flush()
-    assert.equal(env.modal.isOpen(), false)
-    env.click(env.byText('button', 'Dry run'))
+    env.click(env.modal.primary())
     await env.flush()
     const req = json(env.sent('save')[0], 'mapping')
     assert.deepEqual(req.fields, { post_title: 'title', post_type: 'post_type' })
@@ -619,7 +616,7 @@ describe('Duplicates', () => {
     upload(env)
     await env.flush()
     assert.equal(env.modal.message(), 'Exported from old-books.test. Everything is imported as Post, with the field mapping saved in the file. 4 of them are already on this site. Next, choose which to update, skip or import as copies.')
-    assert.deepEqual(env.modal.labels(), ['Review mapping', 'Cancel', 'Choose what to do with them'])
+    assert.deepEqual(env.modal.labels(), ['Cancel', 'Choose what to do with them'])
     env.click(env.modal.primary())
     assert.equal(env.modal.isOpen(), false)
     assert.deepEqual(rowTitles(env), ['Dune', 'Emma', 'Kindred', 'cover.jpg'])

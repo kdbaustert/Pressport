@@ -52,8 +52,6 @@ Activate **Migrate Plus** on the site you're copying from and the one you're cop
 3. Confirm. If some items are already on the site, you're asked whether to skip them, import them anyway or review the changes.
 4. If something looks wrong, open **Migrate Plus → History** and click **Roll back**.
 
-To check the mapping or dry-run first, choose **Review mapping** instead of confirming.
-
 ### Pull from the old site
 
 Instead of moving a file by hand, the Import page can fetch the export itself. Under **Or pull from another site**, enter the old site's address and connect with one of:
@@ -89,7 +87,7 @@ Save the mapping under a name to reuse it. A later file with the same top-level 
 
 - **Post type.** A Migrate Plus export imports into the type it came from when this site has it. A multi-type file imports Media first, then the other types, then menus, as one job with one rollback.
 - **Status.** *Default status* only fills in missing or unknown statuses. *Status for every item* overrides all of them, which is handy for importing everything as drafts on staging. Future-dated posts set to Published are scheduled.
-- **Authors.** User accounts differ between sites, so authors aren't taken from the file. Each post goes to the author picked for it (on **Review mapping** or the duplicates screen), else the *Author for all posts and pages* from **Review mapping** (`--author` on the command line), else whoever runs the import. The old site's author login and name are kept with the post as a note.
+- **Authors.** User accounts differ between sites, so authors aren't taken from the file. Each post goes to the author picked for it (on the mapping step or the duplicates screen), else the *Author for all posts and pages* from the mapping step (`--author` on the command line), else whoever runs the import. A Migrate Plus export skips the mapping step, so its posts go to whoever runs the import unless the duplicates screen picks someone else. The old site's author login and name are kept with the post as a note.
 - **Comments.** Only approved comments are exported. They're imported threaded, linked to local users by email, and never added twice.
 - **Menus** are rebuilt after the posts. Items point at the imported post or term (or one with the same slug), links to the old site are rewritten, and theme locations are assigned only if the active theme has them. A menu with the same slug is filled rather than copied.
 - **Duplicates.** Before starting, Migrate Plus looks for items imported before or with the same slug (SKU for products, file name for media) and asks what to do. Changed posts can be reviewed one by one; duplicate images are shown side by side. A dry run skips duplicates so its counts match a real run.

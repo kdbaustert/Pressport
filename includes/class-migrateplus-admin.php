@@ -19,7 +19,7 @@ class MigratePlus_Admin {
 		add_action( 'admin_enqueue_scripts', array( __CLASS__, 'assets' ) );
 		add_filter( 'plugin_action_links_' . plugin_basename( MIGRATEPLUS_FILE ), array( __CLASS__, 'action_links' ) );
 
-		foreach ( array( 'preview', 'users', 'records', 'source_authors', 'duplicates', 'media_preview', 'save', 'run', 'rollback', 'delete', 'history_delete', 'jobs', 'job', 'restart', 'export_count', 'export_posts', 'export_start', 'export_run', 'export_download', 'exports', 'export_log', 'export_forget', 'pull_check', 'pull_start', 'pull_run', 'pull_fetch', 'replace_start', 'replace_run', 'replace_history', 'replace_rollback', 'replace_forget', 'mapping_save', 'mapping_rename', 'mapping_delete' ) as $action ) {
+		foreach ( array( 'preview', 'users', 'records', 'duplicates', 'media_preview', 'save', 'run', 'rollback', 'delete', 'history_delete', 'jobs', 'job', 'restart', 'export_count', 'export_posts', 'export_start', 'export_run', 'export_download', 'exports', 'export_log', 'export_forget', 'pull_check', 'pull_start', 'pull_run', 'pull_fetch', 'replace_start', 'replace_run', 'replace_history', 'replace_rollback', 'replace_forget', 'mapping_save', 'mapping_rename', 'mapping_delete' ) as $action ) {
 			add_action( 'wp_ajax_migrateplus_' . $action, array( __CLASS__, 'ajax_' . $action ) );
 		}
 	}
@@ -490,24 +490,6 @@ class MigratePlus_Admin {
 			self::fail( $page );
 		}
 		wp_send_json_success( $page );
-	}
-
-	/**
-	 * The authors a job's records name from the old site, for picking an author per old
-	 * author: param mapping (JSON, as ajax_records()).
-	 */
-	public static function ajax_source_authors() {
-		self::guard();
-		$job = self::request_job();
-		// phpcs:disable WordPress.Security.NonceVerification, WordPress.Security.ValidatedSanitizedInput -- verified in guard(); the mapping is cleaned below.
-		$mapping = isset( $_POST['mapping'] ) ? json_decode( wp_unslash( $_POST['mapping'] ), true ) : null;
-		// phpcs:enable
-		$mapping = is_array( $mapping ) ? MigratePlus_Mappings::clean_mapping( $mapping ) : (array) $job->data['mapping'];
-		$found   = MigratePlus_Runner::list_source_authors( $job, $mapping );
-		if ( is_wp_error( $found ) ) {
-			self::fail( $found );
-		}
-		wp_send_json_success( $found );
 	}
 
 	/**

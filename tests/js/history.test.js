@@ -185,6 +185,23 @@ describe('History', () => {
     assert.ok(run.byText('button', 'Roll back this import'))
   })
 
+  it('takes a draft export reopened from History to the confirmation, not the mapping step', async () => {
+    const draft = job({ total: 15, settings: { file_name: 'site.json', migrateplus_site: 'https://old.test', migrateplus_post_type: 'post' }, mapping: { fields: { post_title: 'title' } } })
+    const finished = job({ status: 'complete', stats: { processed: 15, created: 15 }, created_total: 15 })
+    const env = boot({
+      data: { openJob: 'site' },
+      routes: { job: { job: draft }, duplicates: { count: 0, total: 15 }, save: { job: job({ status: 'running' }) }, run: { done: true, job: finished } },
+    })
+    await env.flush()
+    assert.equal(env.modal.title(), 'Import 15 items?')
+    assert.deepEqual(env.modal.labels(), ['Cancel', 'Import'])
+    assert.equal(env.byText('button', 'Dry run'), undefined)
+
+    env.click(env.modal.primary())
+    await env.flush()
+    assert.deepEqual(env.requests.map(r => r.action), ['job', 'duplicates', 'save', 'run'])
+  })
+
   it('shows a file name with markup in it as text', async () => {
     const hostile = '<img src=x onerror=alert(1)>'
     const env = await history({ jobs: { jobs: [job({ settings: { file_name: hostile } })] } })
