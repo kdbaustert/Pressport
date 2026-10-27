@@ -99,6 +99,7 @@ class MigratePlus_Job {
 		// cursor_skip: records of the batch at "cursor" already imported, by a batch that was cut short.
 		// side_failure: { stage, pos } where a side section's batch last threw, so a second throw there moves on.
 		// caches_cleared: the cached copies of the file were deleted (see delete_caches()).
+		// acf_locations: field group key => its location rules as the file has them, while posts they name are not here.
 		$this->data += array(
 			'created_total'  => 0,
 			'comments_total' => 0,
@@ -110,6 +111,7 @@ class MigratePlus_Job {
 			'cursor_skip'    => 0,
 			'side_failure'   => array(),
 			'caches_cleared' => 0,
+			'acf_locations'  => array(),
 		);
 	}
 

@@ -133,8 +133,13 @@ class MigratePlus_Orders {
 			'paged'   => $page,
 			'return'  => 'objects',
 		);
-		if ( ! empty( $args['after'] ) || ! empty( $args['before'] ) ) {
-			$q['date_created'] = ( ! empty( $args['after'] ) ? $args['after'] : '1970-01-01' ) . '...' . ( ! empty( $args['before'] ) ? $args['before'] : gmdate( 'Y-m-d' ) );
+		// Like the posts' range: whole days, and a blank end means no end.
+		if ( ! empty( $args['after'] ) && ! empty( $args['before'] ) ) {
+			$q['date_created'] = $args['after'] . '...' . $args['before'];
+		} elseif ( ! empty( $args['after'] ) ) {
+			$q['date_created'] = '>=' . $args['after'];
+		} elseif ( ! empty( $args['before'] ) ) {
+			$q['date_created'] = '<=' . $args['before'];
 		}
 		return $q;
 	}
@@ -513,6 +518,19 @@ class MigratePlus_Orders {
 		}
 		$uid      = MigratePlus_Importer::uid( $job, 'order:' . $read( 'id' ) );
 		$existing = self::find_order( $uid );
+		// Left half built by a request that died: built again from the file, whatever the duplicate mode, rather
+		// than skipped as imported before (the batch resumes from the order it was on).
+		$half = $existing ? wc_get_order( $existing ) : false;
+		if ( $half && $half->get_meta( MigratePlus_Importer::INCOMPLETE_META ) ) {
+			$existing = 0;
+			if ( ! $dry ) {
+				$own = (string) $half->get_meta( '_migrateplus_job_id' ) === (string) $job->data['id'];
+				self::remove( $half );
+				if ( $own ) {
+					--$job->data['created_total'];
+				}
+			}
+		}
 		if ( $existing && 'skip' === $opts['duplicate'] ) {
 			/* translators: 1: order number on the old site, 2: order id here */
 			return self::result( 'skipped', $existing, sprintf( __( 'Already imported: order #%1$s (#%2$d).', 'migrateplus' ), $number, $existing ) );
@@ -551,6 +569,7 @@ class MigratePlus_Orders {
 				// step below fails.
 				$order->update_meta_data( '_migrateplus_job_id', $job->data['id'] );
 				$order->update_meta_data( '_migrateplus_source_uid', $uid );
+				$order->update_meta_data( MigratePlus_Importer::INCOMPLETE_META, 1 );
 				$order->save_meta_data();
 				++$job->data['created_total'];
 			}
@@ -621,6 +640,7 @@ class MigratePlus_Orders {
 		if ( isset( $dates['date_completed'] ) ) {
 			$order->set_date_completed( $dates['date_completed'] ); // set_status( 'completed' ) stamps it with now.
 		}
+		$order->delete_meta_data( MigratePlus_Importer::INCOMPLETE_META );
 		$order->save();
 
 		/* translators: 1: Created/Updated, 2: order number on the old site, 3: order id here */
@@ -707,7 +727,8 @@ class MigratePlus_Orders {
 					'name'         => isset( $line['name'] ) ? MigratePlus_Util::stringify( $line['name'] ) : '',
 					'product_id'   => $product_id,
 					'variation_id' => $variation,
-					'quantity'     => isset( $line['quantity'] ) ? (int) $line['quantity'] : 1,
+					// Whole numbers unless the shop's woocommerce_stock_amount filter allows fractions.
+					'quantity'     => isset( $line['quantity'] ) && is_scalar( $line['quantity'] ) ? wc_stock_amount( $line['quantity'] ) : 1,
 					'tax_class'    => isset( $line['tax_class'] ) ? MigratePlus_Util::stringify( $line['tax_class'] ) : '',
 					'subtotal'     => isset( $line['subtotal'] ) ? MigratePlus_Util::stringify( $line['subtotal'] ) : '0',
 					'total'        => isset( $line['total'] ) ? MigratePlus_Util::stringify( $line['total'] ) : '0',
@@ -1024,15 +1045,25 @@ class MigratePlus_Orders {
 			return false;
 		}
 		self::quiet( true );
+		$ok = self::remove( $order );
+		self::quiet( false );
+		return $ok;
+	}
+
+	/**
+	 * Delete an order and its refunds while WooCommerce is already quiet().
+	 *
+	 * @param WC_Order $order Order.
+	 * @return bool
+	 */
+	protected static function remove( WC_Order $order ) {
 		foreach ( $order->get_refunds() as $refund ) {
 			$refund->delete( true );
 		}
 		// The import never added this order to its products' total_sales (see mark_counted()), so deleting it
 		// must not take it off them either.
 		$order->get_data_store()->set_recorded_sales( $order, false );
-		$ok = (bool) $order->delete( true );
-		self::quiet( false );
-		return $ok;
+		return (bool) $order->delete( true );
 	}
 
 	/**

@@ -153,7 +153,8 @@ class MigratePlus_Util {
 
 	/**
 	 * Normalize a value into a list of trimmed, non-empty strings.
-	 * Strings are split on "|", ";" or "," (first separator found wins).
+	 * Strings are split on "|", ";" or "," (first separator found wins). The ";"
+	 * ending an HTML entity, as in "Salt &amp; Pepper", is not a separator.
 	 *
 	 * @param mixed $value Value.
 	 * @return string[]
@@ -163,14 +164,13 @@ class MigratePlus_Util {
 			$items = $value;
 		} elseif ( is_string( $value ) || is_numeric( $value ) ) {
 			$value = (string) $value;
-			$sep   = null;
-			foreach ( array( '|', ';', ',' ) as $candidate ) {
-				if ( false !== strpos( $value, $candidate ) ) {
-					$sep = $candidate;
+			$items = array( $value );
+			foreach ( array( '/\|/', '/&#?\w+;(*SKIP)(*FAIL)|;/', '/,/' ) as $separator ) {
+				if ( preg_match( $separator, $value ) ) {
+					$items = preg_split( $separator, $value );
 					break;
 				}
 			}
-			$items = $sep ? explode( $sep, $value ) : array( $value );
 		} else {
 			return array();
 		}

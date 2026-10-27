@@ -25,11 +25,13 @@ function migrateplus_uninstall_site() {
 	delete_option( 'migrateplus_renamed' );
 	delete_option( 'migrateplus_redirects' );
 	delete_transient( 'migrateplus_storage_probe' );
-	$wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE 'migrateplus\\_job\\_%' OR option_name LIKE 'migrateplus\\_export\\_%' OR option_name LIKE 'migrateplus\\_exportlog\\_%' OR option_name LIKE 'migrateplus\\_replace\\_%' OR option_name LIKE 'migrateplus\\_replacelog\\_%' OR option_name LIKE 'migrateplus\\_lock\\_%'" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+	$wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE 'migrateplus\\_job\\_%' OR option_name LIKE 'migrateplus\\_export\\_%' OR option_name LIKE 'migrateplus\\_exportlog\\_%' OR option_name LIKE 'migrateplus\\_replace\\_%' OR option_name LIKE 'migrateplus\\_replacelog\\_%' OR option_name LIKE 'migrateplus\\_lock\\_%' OR option_name LIKE 'migrateplus\\_replacelock\\_%'" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+	// A pull key generated in the last ten minutes, waiting for the settings screen to show it once.
+	$wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '\\_transient\\_migrateplus\\_new\\_pull\\_key\\_%' OR option_name LIKE '\\_transient\\_timeout\\_migrateplus\\_new\\_pull\\_key\\_%'" ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 	wp_clear_scheduled_hook( 'migrateplus_cleanup' );
 
 	if ( ! empty( $settings['remove_meta_on_uninstall'] ) ) {
-		foreach ( array( '_migrateplus_job_id', '_migrateplus_source_uid', '_migrateplus_source_id', '_migrateplus_source_url', '_migrateplus_download_source', '_migrateplus_parent_uid', '_migrateplus_acf_pending', '_migrateplus_pending_ref', '_migrateplus_incomplete', '_migrateplus_source_author', '_migrateplus_source_author_name' ) as $key ) {
+		foreach ( array( '_migrateplus_job_id', '_migrateplus_source_uid', '_migrateplus_source_id', '_migrateplus_source_url', '_migrateplus_download_source', '_migrateplus_parent_uid', '_migrateplus_acf_pending', '_migrateplus_pending_ref', '_migrateplus_incomplete', '_migrateplus_source_author', '_migrateplus_source_author_name', '_migrateplus_source_order_number', '_migrateplus_block_source' ) as $key ) {
 			delete_post_meta_by_key( $key );
 		}
 		foreach ( array( '_migrateplus_job_id', '_migrateplus_source_comment_uid' ) as $key ) {

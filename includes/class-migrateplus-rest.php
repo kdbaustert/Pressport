@@ -68,10 +68,8 @@ class MigratePlus_Rest {
 	 */
 	public static function permission( WP_REST_Request $request ) {
 		if ( ! is_user_logged_in() ) {
-			$key    = (string) $request->get_header( 'X-MigratePlus-Key' );
-			$stored = (string) MigratePlus_Settings::get( 'pull_key' );
-			$user   = (int) MigratePlus_Settings::get( 'pull_key_user' );
-			if ( '' !== $key && '' !== $stored && $user && hash_equals( $stored, $key ) && get_userdata( $user ) ) {
+			$user = (int) MigratePlus_Settings::get( 'pull_key_user' );
+			if ( $user && MigratePlus_Settings::pull_key_matches( $request->get_header( 'X-MigratePlus-Key' ) ) && get_userdata( $user ) ) {
 				wp_set_current_user( $user );
 			}
 		}

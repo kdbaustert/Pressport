@@ -117,8 +117,28 @@ class Test_Blocks extends WP_UnitTestCase {
 		$job     = MigratePlus_Job::create( 'json', array( 'migrateplus_site' => 'http://old.test' ) );
 		$pending = array();
 		$content = MigratePlus_Blocks::relink_content( '<!-- wp:block {"ref":99} /--><!-- wp:paragraph --><p>x</p><!-- /wp:paragraph -->', $job, $pending );
-		$this->assertSame( '<!-- wp:block {"ref":99} /--><!-- wp:paragraph --><p>x</p><!-- /wp:paragraph -->', $content );
+		// Not the old number: #99 here may be another pattern, which the page would then show.
+		$this->assertSame( '<!-- wp:block {"ref":-1} /--><!-- wp:paragraph --><p>x</p><!-- /wp:paragraph -->', $content );
 		$this->assertSame( array( '99' ), $pending );
+		$job->delete();
+	}
+
+	public function test_query_and_navigation_ids_not_here_name_no_post() {
+		$job     = MigratePlus_Job::create( 'json', array( 'migrateplus_site' => 'http://old.test' ) );
+		$page    = self::factory()->post->create( array( 'post_type' => 'page' ) );
+		$pending = array();
+		update_post_meta( $page, '_migrateplus_source_uid', MigratePlus_Importer::uid( $job, '40' ) );
+
+		$content = MigratePlus_Blocks::relink_content(
+			'<!-- wp:query {"query":{"exclude":[40,41],"parents":[42]}} --><!-- /wp:query --><!-- wp:navigation {"ref":"43"} /-->',
+			$job,
+			$pending
+		);
+		$this->assertSame(
+			'<!-- wp:query {"query":{"exclude":[' . $page . ',-1],"parents":[-1]}} --><!-- /wp:query --><!-- wp:navigation {"ref":"-1"} /-->',
+			$content
+		);
+		$this->assertSame( array( '41', '42', '43' ), $pending );
 		$job->delete();
 	}
 
@@ -181,7 +201,7 @@ class Test_Blocks extends WP_UnitTestCase {
 		$other = self::factory()->post->create( array( 'post_type' => 'wp_block' ) );
 		update_post_meta( $other, '_migrateplus_source_uid', MigratePlus_Importer::uid( $theirs, '99' ) );
 		MigratePlus_Blocks::link_pending( $other, '99', $theirs );
-		$this->assertSame( '<!-- wp:block {"ref":99} /-->', get_post( $page )->post_content );
+		$this->assertSame( '<!-- wp:block {"ref":-1} /-->', get_post( $page )->post_content );
 
 		$pattern = self::factory()->post->create( array( 'post_type' => 'wp_block' ) );
 		update_post_meta( $pattern, '_migrateplus_source_uid', MigratePlus_Importer::uid( $mine, '99' ) );

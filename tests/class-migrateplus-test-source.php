@@ -10,6 +10,13 @@ class MigratePlus_Test_Source extends MigratePlus_Source_Base {
 
 	const BOOKS = array( 'Dune', 'Emma', 'Ulysses', 'Beloved', 'Middlemarch', 'Rebecca', 'Kindred' );
 
+	/**
+	 * When set, fetch() throws, the way a feed that went away mid-import would.
+	 *
+	 * @var bool
+	 */
+	public static $down = false;
+
 	public static function id() {
 		return 'books';
 	}
@@ -40,6 +47,9 @@ class MigratePlus_Test_Source extends MigratePlus_Source_Base {
 	}
 
 	public function fetch( $cursor, $limit ) {
+		if ( self::$down ) {
+			throw new RuntimeException( 'The feed is down.' );
+		}
 		$total   = min( count( self::BOOKS ), (int) $this->get( 'count', 0 ) );
 		$offset  = (int) $cursor;
 		$records = array();

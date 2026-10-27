@@ -682,13 +682,55 @@ class MigratePlus_Exporter {
 	}
 
 	/**
-	 * Export the next batch.
+	 * Export the next batch, unless another request is exporting one of this export now.
 	 *
 	 * @param array $state State (updated in place).
 	 * @param int   $limit Posts per batch.
 	 * @return array State.
 	 */
 	public static function run_batch( array &$state, $limit = 50 ) {
+		global $wpdb;
+		if ( $state['complete'] ) {
+			return $state;
+		}
+		// Two requests on one export (a retry after a timeout) would each append the same posts to the file.
+		$name  = 'migrateplus_lock_export_' . $state['id'];
+		$token = ( time() + MigratePlus_Runner::LOCK_TTL ) . ':' . wp_generate_password( 8, false );
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery -- the options API has no atomic insert.
+		$taken = $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')", $name, $token ) );
+		if ( ! $taken ) {
+			$held = (string) $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", $name ) );
+			if ( '' !== $held && (int) $held < time() ) {
+				// Left by a request that died while it held the lock.
+				$taken = $wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s AND option_value = %s", $token, $name, $held ) );
+			}
+		}
+		// phpcs:enable
+		if ( ! $taken ) {
+			return $state;
+		}
+		// The request that held the lock may have moved the export on since this one loaded it.
+		wp_cache_delete( self::STATE_PREFIX . $state['id'], 'options' );
+		$fresh = self::load_state( $state['id'] );
+		if ( $fresh ) {
+			$state = $fresh;
+		}
+		try {
+			self::next_batch( $state, $limit );
+		} finally {
+			$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s", $name, $token ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		}
+		return $state;
+	}
+
+	/**
+	 * Export the next batch.
+	 *
+	 * @param array $state State (updated in place).
+	 * @param int   $limit Posts per batch.
+	 * @return array State.
+	 */
+	protected static function next_batch( array &$state, $limit ) {
 		global $wpdb;
 		if ( $state['complete'] ) {
 			return $state;

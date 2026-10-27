@@ -195,6 +195,71 @@ class Test_ACF_Sections extends WP_UnitTestCase {
 		$job->delete();
 	}
 
+	public function test_a_group_shown_on_a_page_points_at_the_imported_page() {
+		$old = self::factory()->post->create(
+			array(
+				'post_type'  => 'page',
+				'post_title' => 'About',
+			)
+		);
+		acf_import_field_group(
+			array(
+				'key'      => 'group_mp_about',
+				'title'    => 'About details',
+				'fields'   => array(),
+				'location' => array(
+					array(
+						array(
+							'param'    => 'page',
+							'operator' => '==',
+							'value'    => (string) $old,
+						),
+					),
+					array(
+						array(
+							'param'    => 'page_parent',
+							'operator' => '==',
+							'value'    => '999999',
+						),
+						array(
+							'param'    => 'post_type',
+							'operator' => '==',
+							'value'    => 'page',
+						),
+					),
+				),
+			)
+		);
+		$doc = $this->export_doc(
+			array(
+				'post_types'              => array( 'page' ),
+				'include_acf_definitions' => 1,
+			)
+		);
+		acf_delete_field_group( acf_get_field_group( 'group_mp_about' )['ID'] );
+		wp_delete_post( $old, true );
+		$doc['migrateplus']['site'] = 'http://old.test';
+		$file                       = $this->json_file( $doc );
+		$job                        = $this->import_file( $file );
+		wp_delete_file( $file );
+
+		$page = get_posts(
+			array(
+				'post_type' => 'page',
+				'title'     => 'About',
+			)
+		)[0];
+		$this->assertNotSame( $old, $page->ID );
+		$location = acf_get_field_group( 'group_mp_about' )['location'];
+		$this->assertSame( (string) $page->ID, $location[0][0]['value'] );
+		// Not on the old site's post 999999, which here may be any post.
+		$this->assertSame( '-1', $location[1][0]['value'] );
+		$this->assertSame( 'page', $location[1][1]['value'] );
+		$this->assertStringContainsString( 'ACF field group "About details" is shown on posts that are not on this site (old ids 999999)', implode( "\n", array_column( $job->data['log'], 'm' ) ) );
+		$this->assertSame( array(), $job->data['acf_locations'] );
+		$job->delete();
+	}
+
 	public function test_options_page_values_round_trip_and_roll_back() {
 		if ( ! function_exists( 'acf_add_options_page' ) ) {
 			$this->markTestSkipped( 'Options pages need ACF PRO.' );

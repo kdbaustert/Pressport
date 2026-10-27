@@ -30,6 +30,14 @@ class MigratePlus_ACF_Definitions {
 	const KINDS = array( 'acf-post-type', 'acf-taxonomy', 'acf-ui-options-page', 'acf-field-group' );
 
 	/**
+	 * Location rule params whose value is a post id. The file has the old site's
+	 * ids, which may name other posts here.
+	 *
+	 * @var string[]
+	 */
+	const POST_PARAMS = array( 'post', 'page', 'page_parent' );
+
+	/**
 	 * Whether ACF is active with what this needs.
 	 *
 	 * @return bool
@@ -205,6 +213,15 @@ class MigratePlus_ACF_Definitions {
 				'data' => self::prepare( $kind, $existing ),
 			);
 		}
+		if ( 'acf-field-group' === $kind && isset( $data['location'] ) && is_array( $data['location'] ) ) {
+			$missing          = array();
+			$source           = $data['location'];
+			$data['location'] = self::relink_location( $source, $job, $missing );
+			if ( $missing ) {
+				// Posts come after definitions: relink_locations() points at them once they are here.
+				$job->data['acf_locations'][ $key ] = $source;
+			}
+		}
 		$saved = self::save( $kind, $data );
 		if ( ! $saved || empty( $saved['ID'] ) ) {
 			/* translators: 1: kind, 2: title */
@@ -216,6 +233,60 @@ class MigratePlus_ACF_Definitions {
 		}
 		/* translators: 1: Created/Updated, 2: kind, 3: title */
 		return self::result( $existing ? 'updated' : 'created', (int) $saved['ID'], sprintf( __( '%1$s ACF %2$s "%3$s".', 'migrateplus' ), $existing ? __( 'Updated', 'migrateplus' ) : __( 'Created', 'migrateplus' ), $label, $title ) );
+	}
+
+	/**
+	 * Point the location rules of field groups this job imported at the posts
+	 * they name, now the job's records are here. Rules whose post never came stay
+	 * pointed at nothing, and are warned about.
+	 *
+	 * @param MigratePlus_Job $job Job (acf_locations is cleared in place).
+	 */
+	public static function relink_locations( MigratePlus_Job $job ) {
+		if ( empty( $job->data['acf_locations'] ) || ! self::active() ) {
+			return;
+		}
+		foreach ( (array) $job->data['acf_locations'] as $key => $source ) {
+			$group = self::existing( 'acf-field-group', (string) $key );
+			if ( ! $group ) {
+				continue;
+			}
+			$missing           = array();
+			$group['location'] = self::relink_location( (array) $source, $job, $missing );
+			acf_update_field_group( $group );
+			if ( $missing ) {
+				/* translators: 1: field group title, 2: post ids on the old site */
+				$job->log( 'warning', sprintf( __( 'ACF field group "%1$s" is shown on posts that are not on this site (old ids %2$s), so those location rules match nothing.', 'migrateplus' ), $group['title'], implode( ', ', $missing ) ) );
+			}
+		}
+		$job->data['acf_locations'] = array();
+	}
+
+	/**
+	 * Location rules with the old site's post ids swapped for the ones here. An id
+	 * whose post is not here becomes Blocks::NOWHERE, not left as it is: it may be
+	 * another post here, which the group would then be shown on.
+	 *
+	 * @param array           $location Groups of rules, each { param, operator, value }.
+	 * @param MigratePlus_Job $job      Job.
+	 * @param string[]        $missing  Old ids not found, added to.
+	 * @return array
+	 */
+	protected static function relink_location( array $location, MigratePlus_Job $job, array &$missing ) {
+		foreach ( $location as $g => $rules ) {
+			foreach ( (array) $rules as $r => $rule ) {
+				if ( ! is_array( $rule ) || ! isset( $rule['param'], $rule['value'] ) || ! in_array( $rule['param'], self::POST_PARAMS, true ) || ! is_numeric( $rule['value'] ) || (int) $rule['value'] <= 0 ) {
+					continue;
+				}
+				$old = (string) (int) $rule['value'];
+				$new = MigratePlus_Importer::find_by_uid( MigratePlus_Importer::uid( $job, $old ), array_keys( get_post_types() ), $job->data['id'] );
+				if ( ! $new ) {
+					$missing[] = $old;
+				}
+				$location[ $g ][ $r ]['value'] = (string) ( $new ? $new : MigratePlus_Blocks::NOWHERE );
+			}
+		}
+		return $location;
 	}
 
 	/**

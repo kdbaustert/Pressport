@@ -104,6 +104,21 @@ class Test_Replace extends WP_UnitTestCase {
 		$this->assertSame( 2, $count );
 	}
 
+	public function test_json_escaped_quotes_and_accents_are_found_and_written_escaped() {
+		$count = 0;
+		$json  = '{"ascii":"Café \"Old\"","utf8":"Café \"Old\""}';
+		$out   = MigratePlus_Replace::replace_value( $json, MigratePlus_Replace::matcher( 'Café "Old"', 'Thé "New"', false ), $count );
+		$this->assertSame( '{"ascii":"Thé \"New\"","utf8":"Thé \"New\""}', $out );
+		$this->assertSame( 2, $count );
+		$this->assertSame(
+			array(
+				'ascii' => 'Thé "New"',
+				'utf8'  => 'Thé "New"',
+			),
+			json_decode( $out, true )
+		);
+	}
+
 	public function test_matches_in_keys_unloaded_objects_and_enums_count_as_unsafe() {
 		$match  = MigratePlus_Replace::matcher( 'http://old.test', 'https://x', false );
 		$count  = 0;

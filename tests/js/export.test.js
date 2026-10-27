@@ -63,6 +63,20 @@ describe('Export', () => {
     assert.equal(env.$('form.migrateplus-export [type=submit]').disabled, false)
   })
 
+  it('keeps Counting… when an older count lands while the next one waits out its delay', async () => {
+    const first = later()
+    const env = boot({
+      data: { view: 'export' },
+      routes: { export_count: (fields, calls) => (calls ? { count: 52, counts: { post: 40, page: 12 } } : first.promise) },
+    })
+    env.clock.tick(250)
+    await env.flush()
+    env.check(env.$('#migrateplus-export-status-draft'))
+    first.resolve({ count: 0, counts: { post: 0 }, menus: 0 })
+    await env.flush()
+    assert.equal(env.$('.migrateplus-export-count').textContent, 'Counting…')
+  })
+
   it('offers only the types the server says can be exported', () => {
     const env = exportScreen({
       postTypes: [
@@ -175,6 +189,23 @@ describe('Export', () => {
         export_run: { complete: true, done: 1, total: 1, size: '1 KB', filename: 'picks.json', url: 'https://example.test/dl/exp1' },
       },
     })
+
+  it('keeps Searching… when an older search lands while the next one waits out its delay', async () => {
+    const first = later()
+    const env = boot({
+      data: { view: 'export' },
+      routes: { export_posts: (fields, calls) => (calls ? { posts: [needle] } : first.promise), export_count: { count: 1, counts: { page: 1 } } },
+    })
+    env.check(env.$('#migrateplus-export-feature-picks'))
+    env.type(env.$('#migrateplus-export-pick-search'), 'hay')
+    env.clock.tick(300)
+    await env.flush()
+    env.type(env.$('#migrateplus-export-pick-search'), 'needle')
+    first.resolve({ posts: [{ ...needle, id: 8, title: 'Hay' }] })
+    await env.flush()
+    assert.equal(env.$('.migrateplus-pick-results .migrateplus-pick-title'), null)
+    assert.ok(env.byText('p', 'Searching…'))
+  })
 
   it('hand-picks posts by search and sends their ids', async () => {
     const env = withPicks()

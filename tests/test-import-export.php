@@ -895,11 +895,31 @@ class Test_Import_Export extends WP_UnitTestCase {
 			),
 		);
 		$this->assertSame( array( $editor, $editor, $editor, $editor ), array_map( array( 'MigratePlus_Importer', 'author_for' ), array_fill( 0, 4, $opts ), array( 0, 1, 2, null ) ) );
-		$this->assertSame( $me, MigratePlus_Importer::author_for( array( 'author' => $subscriber ), 0 ) );
-		$this->assertSame( $me, MigratePlus_Importer::author_for( array( 'author' => 0 ), null ) );
-		// WP-CLI without --user: no one, so WordPress picks the author.
-		wp_set_current_user( 0 );
-		$this->assertSame( 0, MigratePlus_Importer::author_for( array( 'author' => 0 ), 0 ) );
+		// No one picked: a new post gets whoever runs the import from WordPress, an update keeps its author.
+		$this->assertSame( 0, MigratePlus_Importer::author_for( array( 'author' => $subscriber ), 0 ) );
+		$this->assertSame( 0, MigratePlus_Importer::author_for( array( 'author' => 0 ), null ) );
+	}
+
+	public function test_an_update_with_no_author_picked_keeps_the_posts_author() {
+		$first  = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		$second = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		$file   = $this->export_file( array( $this->item( 1 ) ) );
+		wp_set_current_user( $first );
+		$this->import_file( $file, array( 'author' => 0 ) )->delete();
+		$post = $this->imported( 1, 'post' )[0];
+		$this->assertSame( $first, (int) get_post_field( 'post_author', $post ) );
+
+		wp_set_current_user( $second );
+		$this->import_file(
+			$file,
+			array(
+				'author'    => 0,
+				'duplicate' => 'update',
+			)
+		)->delete();
+		wp_delete_file( $file );
+
+		$this->assertSame( $first, (int) get_post_field( 'post_author', $post ) );
 	}
 
 	public function test_clean_options_keeps_only_valid_single_record_authors() {
@@ -2507,6 +2527,35 @@ class Test_Import_Export extends WP_UnitTestCase {
 		$job->delete();
 	}
 
+	public function test_an_update_cannot_publish_for_someone_not_allowed_to() {
+		$contributor = self::factory()->user->create( array( 'role' => 'contributor' ) );
+		wp_set_current_user( $contributor );
+		$records = array(
+			array(
+				'id'     => 1,
+				'title'  => 'Mine',
+				'status' => 'draft',
+			),
+		);
+		$mapping = array(
+			'source_id'   => 'id',
+			'post_title'  => 'title',
+			'post_status' => 'status',
+		);
+		$file    = $this->mapped_file( 'http://caps.test', $mapping, $records );
+		$this->import_file( $file )->delete();
+		wp_delete_file( $file );
+		$records[0]['status'] = 'publish';
+		$file                 = $this->mapped_file( 'http://caps.test', $mapping, $records );
+
+		$job = $this->import_file( $file, array( 'duplicate' => 'update' ) );
+		wp_delete_file( $file );
+
+		$this->assertSame( 'pending', get_post_status( $this->imported( 1, 'post' )[0] ) );
+		$this->assertSame( 1, $job->data['stats']['updated'] );
+		$job->delete();
+	}
+
 	public function test_imported_reviews_count_towards_the_products_rating() {
 		if ( ! class_exists( 'WooCommerce' ) ) {
 			$this->markTestSkipped( 'WooCommerce is not installed.' );
@@ -2881,6 +2930,13 @@ class Test_Import_Export extends WP_UnitTestCase {
 		$this->assertSame( '0', $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->term_taxonomy} WHERE taxonomy = 'mp_gone'" ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		$this->assertFalse( taxonomy_exists( 'mp_gone' ) );
 		$job->delete();
+	}
+
+	public function test_an_escaped_ampersand_does_not_split_a_term_list() {
+		$this->assertSame( array( 'Salt &amp; Pepper', 'Herbs' ), MigratePlus_Util::to_list( 'Salt &amp; Pepper, Herbs' ) );
+		$this->assertSame( array( 'R&#38;D' ), MigratePlus_Util::to_list( 'R&#38;D' ) );
+		$this->assertSame( array( 'News', 'Tips' ), MigratePlus_Util::to_list( 'News; Tips' ) );
+		$this->assertSame( array( 'A &amp; B', 'C' ), MigratePlus_Util::to_list( 'A &amp; B;C' ) );
 	}
 
 	/**

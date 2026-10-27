@@ -737,6 +737,31 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 		}
 	}
 
+	public function test_users_search_keeps_logins_and_emails_from_editors() {
+		$this->give_editors_access();
+		$this->login( 'editor' );
+		$writer   = self::factory()->user->create(
+			array(
+				'role'          => 'author',
+				'user_login'    => 'wanda',
+				'user_email'    => 'wanda@here.test',
+				'user_nicename' => 'wanda-w',
+				'display_name'  => 'Wanda Writer',
+			)
+		);
+		$expected = array(
+			array(
+				'id'    => $writer,
+				'name'  => 'Wanda Writer',
+				'login' => 'wanda-w',
+			),
+		);
+		foreach ( array( 'wanda-w', 'Writer' ) as $q ) {
+			$this->assertSame( $expected, $this->ajax( 'users', array( 'q' => $q ) )['data']['authors'] );
+		}
+		$this->assertSame( array(), $this->ajax( 'users', array( 'q' => 'here.test' ) )['data']['authors'] );
+	}
+
 	public function test_saved_mappings_leave_the_author_out() {
 		$this->login( 'administrator' );
 		$out = $this->ajax(
@@ -1764,6 +1789,63 @@ class Test_Admin_Ajax extends WP_Ajax_UnitTestCase {
 		$headers = $calls[0]['args']['headers'];
 		$this->assertSame( 'k3y-from-the-old-site', $headers['X-MigratePlus-Key'] );
 		$this->assertArrayNotHasKey( 'Authorization', $headers );
+	}
+
+	public function test_pull_check_names_where_the_old_site_redirects_instead_of_following() {
+		$this->login( 'administrator' );
+		$calls = $this->mock_old_site(
+			array(
+				'response' => array( 'code' => 301 ),
+				'headers'  => array( 'location' => 'https://www.old.test/?rest_route=/migrateplus/v1/site' ),
+				'body'     => '',
+			)
+		);
+
+		$this->assertRefused(
+			$this->ajax( 'pull_check', $this->pull_creds() ),
+			'The old site redirects to https://www.old.test. Enter that address instead.'
+		);
+		$this->assertCount( 1, $calls );
+		$this->assertSame( 0, $calls[0]['args']['redirection'] );
+	}
+
+	public function test_pull_sends_an_application_password_only_over_https() {
+		$this->login( 'administrator' );
+		$calls = $this->mock_old_site( $this->old_site_says( array( 'types' => array() ) ) );
+
+		$this->assertRefused(
+			$this->ajax( 'pull_check', array_merge( $this->pull_creds(), array( 'url' => 'http://old.test' ) ) ),
+			'An application password is only sent over https. For an old site on plain http, use its pull key.'
+		);
+		$this->assertCount( 0, $calls );
+
+		$out = $this->ajax(
+			'pull_check',
+			array(
+				'url' => 'http://old.test',
+				'key' => 'k3y-from-the-old-site',
+			)
+		);
+		$this->assertTrue( $out['success'], wp_json_encode( $out ) );
+	}
+
+	public function test_only_administrators_pull_from_local_hosts() {
+		$this->give_editors_access();
+		$allowed = new ArrayObject();
+		$this->mock_old_site(
+			function () use ( $allowed ) {
+				$allowed[] = MigratePlus_Util::$in_request;
+				return $this->old_site_says( array( 'types' => array() ) );
+			}
+		);
+
+		$this->login( 'administrator' );
+		$this->ajax( 'pull_check', $this->pull_creds() );
+		$this->login( 'editor' );
+		$this->ajax( 'pull_check', $this->pull_creds() );
+
+		$this->assertSame( array( true, false ), $allowed->getArrayCopy() );
+		$this->assertFalse( MigratePlus_Util::$in_request );
 	}
 
 	public function test_pull_check_spots_a_site_without_the_plugin() {

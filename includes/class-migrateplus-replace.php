@@ -684,23 +684,47 @@ class MigratePlus_Replace {
 			// Nor may the match run on into more host or path characters (old.test.example.com, /blog → /blogging).
 			$after = preg_match( '~[a-z0-9_-]$~i', $search ) ? '(?![a-z0-9_-]|\.[a-z0-9])' : '';
 		}
-		// JSON escapes slashes ("https:\/\/old.test" in Elementor's data and other JSON in meta): that form is
-		// found too, and replaced by the replacement escaped the same way.
-		$escaped = false !== strpos( $search, '/' ) && false === strpos( $search, '\\/' ) ? str_replace( '/', '\\/', $search ) : '';
+		// JSON escapes slashes, quotes and backslashes, and non-ASCII unless written with JSON_UNESCAPED_UNICODE
+		// ("https:\/\/old.test", "caf\u00e9" in Elementor's data and other JSON in meta). Those forms are found too,
+		// and replaced by the replacement escaped the same way.
+		$json = array();
+		if ( false === strpos( $search, '\\/' ) ) {
+			foreach ( array( 0, JSON_UNESCAPED_UNICODE ) as $flags ) {
+				$form = self::json_escape( $search, $flags );
+				if ( '' !== $form && $form !== $search && ! in_array( $form, array_column( $json, 0 ), true ) ) {
+					$json[] = array( $form, self::json_escape( $replace, $flags ) );
+				}
+			}
+		}
 		$pattern = null;
-		if ( '' !== $escaped ) {
-			$pattern = '~' . $before . '(?:(?P<plain>' . preg_quote( $search, '~' ) . ')|(?P<json>' . preg_quote( $escaped, '~' ) . '))' . $after . '~' . ( $case_insensitive ? 'i' : '' );
+		if ( $json ) {
+			$forms = array( preg_quote( $search, '~' ) );
+			foreach ( $json as $i => $form ) {
+				$forms[] = '(?P<json' . $i . '>' . preg_quote( $form[0], '~' ) . ')';
+			}
+			$pattern = '~' . $before . '(?:' . implode( '|', $forms ) . ')' . $after . '~' . ( $case_insensitive ? 'i' : '' );
 		} elseif ( $whole ) {
 			$pattern = '~' . $before . preg_quote( $search, '~' ) . $after . '~' . ( $case_insensitive ? 'i' : '' );
 		}
 		return array(
-			'search'          => $search,
-			'replace'         => $replace,
-			'ci'              => (bool) $case_insensitive,
-			'pattern'         => $pattern,
-			'escaped'         => $escaped,
-			'escaped_replace' => '' !== $escaped ? str_replace( '/', '\\/', $replace ) : '',
+			'search'  => $search,
+			'replace' => $replace,
+			'ci'      => (bool) $case_insensitive,
+			'pattern' => $pattern,
+			'json'    => $json,
 		);
+	}
+
+	/**
+	 * Text as it reads inside a JSON string.
+	 *
+	 * @param string $text  Text.
+	 * @param int    $flags JSON_* flags it was written with.
+	 * @return string Empty when it is not valid UTF-8.
+	 */
+	protected static function json_escape( $text, $flags ) {
+		$json = wp_json_encode( (string) $text, $flags );
+		return is_string( $json ) ? substr( $json, 1, -1 ) : '';
 	}
 
 	/**
@@ -715,11 +739,16 @@ class MigratePlus_Replace {
 		$n = 0;
 		if ( $match['pattern'] ) {
 			$replace = $match['replace'];
-			$json    = isset( $match['escaped_replace'] ) ? $match['escaped_replace'] : '';
+			$json    = $match['json'];
 			$out     = preg_replace_callback(
 				$match['pattern'],
 				static function ( $m ) use ( $replace, $json ) {
-					return isset( $m['json'] ) && '' !== $m['json'] ? $json : $replace;
+					foreach ( $json as $i => $form ) {
+						if ( isset( $m[ 'json' . $i ] ) && '' !== $m[ 'json' . $i ] ) {
+							return $form[1];
+						}
+					}
+					return $replace;
 				},
 				$text,
 				-1,
@@ -797,7 +826,7 @@ class MigratePlus_Replace {
 	 * @return bool
 	 */
 	protected static function contains( $text, array $match ) {
-		foreach ( array_filter( array( $match['search'], isset( $match['escaped'] ) ? $match['escaped'] : '' ), 'strlen' ) as $needle ) {
+		foreach ( array_merge( array( $match['search'] ), array_column( $match['json'], 0 ) ) as $needle ) {
 			if ( false !== ( $match['ci'] ? stripos( $text, $needle ) : strpos( $text, $needle ) ) ) {
 				return true;
 			}

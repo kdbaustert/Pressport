@@ -426,29 +426,35 @@ class MigratePlus_Admin {
 
 	/**
 	 * People who may write posts, for the author picker: those whose login, email,
-	 * nicename or display name contains the search, or everyone.
+	 * nicename or display name contains the search, or everyone. Logins and emails
+	 * are only searched and shown for those allowed to list users; an Editor gets
+	 * the nicename, which author archives already make public.
 	 *
 	 * @param string $search Search, or '' for anyone.
 	 * @param int    $limit  At most this many.
 	 * @return array[] { id, name, login }
 	 */
 	protected static function authors( $search, $limit ) {
-		$query = array(
+		$query          = array(
 			'capability' => array( 'edit_posts' ),
 			'number'     => $limit,
 			'orderby'    => 'display_name',
 			'fields'     => array( 'ID', 'display_name', 'user_login' ),
 		);
+		$may_list_users = current_user_can( 'list_users' );
+		if ( ! $may_list_users ) {
+			$query['fields'] = array( 'ID', 'display_name', 'user_nicename' );
+		}
 		if ( '' !== $search ) {
 			$query['search']         = '*' . $search . '*';
-			$query['search_columns'] = array( 'user_login', 'user_email', 'user_nicename', 'display_name' );
+			$query['search_columns'] = $may_list_users ? array( 'user_login', 'user_email', 'user_nicename', 'display_name' ) : array( 'user_nicename', 'display_name' );
 		}
 		$out = array();
 		foreach ( get_users( $query ) as $u ) {
 			$out[] = array(
 				'id'    => (int) $u->ID,
 				'name'  => $u->display_name,
-				'login' => $u->user_login,
+				'login' => $may_list_users ? $u->user_login : $u->user_nicename,
 			);
 		}
 		return $out;
@@ -1183,6 +1189,10 @@ class MigratePlus_Admin {
 		if ( '' === $key && ( '' === $user || '' === $pass ) ) {
 			self::fail( new WP_Error( 'migrateplus_pull_auth', __( 'Enter a username and an application password from the old site, or its pull key.', 'migrateplus' ) ) );
 		}
+		// An application password opens the whole account, so it isn't sent in the clear.
+		if ( '' === $key && 'https' !== wp_parse_url( $url, PHP_URL_SCHEME ) ) {
+			self::fail( new WP_Error( 'migrateplus_pull_http', __( 'An application password is only sent over https. For an old site on plain http, use its pull key.', 'migrateplus' ) ) );
+		}
 		return array(
 			'url'  => $url,
 			'user' => $user,
@@ -1227,9 +1237,11 @@ class MigratePlus_Admin {
 	 */
 	protected static function pull_request( array $pull, $route, $body = null ) {
 		$args = array(
-			'timeout'    => max( 30, (int) MigratePlus_Settings::get( 'request_timeout' ) ),
-			'headers'    => self::pull_headers( $pull ),
-			'user-agent' => 'MigratePlus/' . MIGRATEPLUS_VERSION . '; ' . home_url(),
+			'timeout'     => max( 30, (int) MigratePlus_Settings::get( 'request_timeout' ) ),
+			'headers'     => self::pull_headers( $pull ),
+			'user-agent'  => 'MigratePlus/' . MIGRATEPLUS_VERSION . '; ' . home_url(),
+			// Followed, a redirect would take the credentials along to wherever it points, and turn a POST into a GET.
+			'redirection' => 0,
 		);
 		if ( null !== $body ) {
 			$args['method']                  = 'POST';
@@ -1237,7 +1249,8 @@ class MigratePlus_Admin {
 			$args['headers']['Content-Type'] = 'application/json';
 		}
 		// Reset in finally: left on after an exception, the next request anything makes would get the local-host allowance.
-		MigratePlus_Util::$in_request = true;
+		// Only for administrators: the answer comes back to the screen, so an Editor could read hosts on the private network.
+		MigratePlus_Util::$in_request = current_user_can( 'manage_options' );
 		try {
 			$response = wp_safe_remote_request( self::pull_url( $pull, $route ), $args );
 		} finally {
@@ -1251,6 +1264,13 @@ class MigratePlus_Admin {
 		$data = json_decode( wp_remote_retrieve_body( $response ), true );
 		if ( $code >= 200 && $code < 300 && is_array( $data ) ) {
 			return $data;
+		}
+		$location = (string) wp_remote_retrieve_header( $response, 'location' );
+		if ( $code >= 300 && $code < 400 && '' !== $location ) {
+			$moved = wp_parse_url( $location );
+			$moved = isset( $moved['scheme'], $moved['host'] ) ? $moved['scheme'] . '://' . $moved['host'] . ( isset( $moved['port'] ) ? ':' . $moved['port'] : '' ) : $location;
+			/* translators: %s: the address the old site redirects to */
+			self::fail( new WP_Error( 'migrateplus_pull_redirect', sprintf( __( 'The old site redirects to %s. Enter that address instead.', 'migrateplus' ), esc_url_raw( $moved ) ) ) );
 		}
 		if ( is_array( $data ) && isset( $data['code'] ) && 'rest_no_route' === $data['code'] ) {
 			self::fail( new WP_Error( 'migrateplus_pull_plugin', __( 'Migrate Plus is not active on the old site, or its version there is too old to pull from.', 'migrateplus' ) ) );

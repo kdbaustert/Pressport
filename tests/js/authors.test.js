@@ -1,6 +1,6 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { boot, job, json, noNativeDialogs } from './helpers.js'
+import { boot, job, json, fail, later, noNativeDialogs } from './helpers.js'
 
 afterEach(noNativeDialogs)
 
@@ -228,6 +228,21 @@ describe('An author for each author on the old site', () => {
     assert.deepEqual(json(env.sent('save')[0], 'options').author_map, { maya: 6 })
   })
 
+  it('drops the error once a reopened list loads', async () => {
+    const env = await exportMappingStep({
+      source_authors: (fields, calls) => (calls ? sourceAuthors : fail('The file could not be read.')),
+    })
+    assert.equal(env.$('#migrateplus-authors-source .notice-error').textContent, 'The file could not be read.')
+
+    const toggle = env.byText('button', 'Choose an author for each author on the old site')
+    env.click(toggle)
+    env.click(toggle)
+    await env.flush()
+    assert.equal(env.sent('source_authors').length, 2)
+    assert.equal(env.$('#migrateplus-authors-source .notice-error'), null)
+    assert.equal(env.$$('#migrateplus-authors-source tbody tr').length, 2)
+  })
+
   it('starts a new file with no old authors mapped, whatever the job options say', async () => {
     const env = boot({
       routes: {
@@ -241,5 +256,50 @@ describe('An author for each author on the old site', () => {
     env.click(env.byText('button', 'Dry run'))
     await env.flush()
     assert.deepEqual(json(env.sent('save')[0], 'options').author_map, {})
+  })
+})
+
+// With the site's first 200 users in D.authors, the picker searches the rest.
+const manyAuthors = Array.from({ length: 200 }, (v, i) => ({ id: i + 1, name: 'User ' + (i + 1), login: 'user' + (i + 1) }))
+
+async function searchStep(users) {
+  const env = boot({
+    data: { authors: manyAuthors },
+    routes: {
+      preview: { job: job({ total: 120 }), records: [{ title: 'Hello world' }], fields: ['title'] },
+      users,
+    },
+  })
+  env.chooseFile(env.$('#migrateplus-import-file'), env.file('posts.json'))
+  await env.flush()
+  return env
+}
+
+const searchBox = env => env.$('.migrateplus-author-search')
+const optionCount = env => env.$('#migrateplus-opt-author').options.length
+
+describe('Searching users for an author', () => {
+  it('ignores the answer to a search the box was cleared after', async () => {
+    const answer = later()
+    const env = await searchStep(() => answer.promise)
+    env.type(searchBox(env), 'ab')
+    env.clock.tick(300)
+    await env.flush()
+    env.type(searchBox(env), '')
+    env.clock.tick(300)
+    await env.flush()
+
+    answer.resolve([{ id: 900, name: 'Abbie', login: 'abbie' }])
+    await env.flush()
+    assert.equal(optionCount(env), 201)
+  })
+
+  it('says why a search failed instead of listing no one', async () => {
+    const env = await searchStep(fail('Sorry, you are not allowed to list users.'))
+    env.type(searchBox(env), 'ab')
+    env.clock.tick(300)
+    await env.flush()
+    assert.equal(env.$('.migrateplus-author .notice-error').textContent, 'Sorry, you are not allowed to list users.')
+    assert.equal(optionCount(env), 201)
   })
 })

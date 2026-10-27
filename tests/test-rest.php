@@ -58,7 +58,7 @@ class Test_Rest extends WP_UnitTestCase {
 	 */
 	protected function store_pull_key( $user ) {
 		$saved                  = (array) get_option( MigratePlus_Settings::OPTION, array() );
-		$saved['pull_key']      = 'a-stored-pull-key';
+		$saved['pull_key']      = MigratePlus_Settings::hash_pull_key( 'a-stored-pull-key' );
 		$saved['pull_key_user'] = $user;
 		update_option( MigratePlus_Settings::OPTION, $saved );
 		MigratePlus_Settings::flush_cache();
@@ -129,6 +129,27 @@ class Test_Rest extends WP_UnitTestCase {
 		$this->assertSame( $admin, get_current_user_id() );
 		$types = wp_list_pluck( $response->get_data()['types'], 'count', 'type' );
 		$this->assertSame( 1, $types['post'] );
+	}
+
+	public function test_a_pull_key_stored_before_keys_were_hashed_still_connects() {
+		$admin                  = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		$saved                  = (array) get_option( MigratePlus_Settings::OPTION, array() );
+		$saved['pull_key']      = 'an-unhashed-pull-key';
+		$saved['pull_key_user'] = $admin;
+		update_option( MigratePlus_Settings::OPTION, $saved );
+		MigratePlus_Settings::flush_cache();
+		wp_set_current_user( 0 );
+
+		$this->assertSame( 200, $this->request( 'GET', 'site', array(), array( 'X-MigratePlus-Key' => 'an-unhashed-pull-key' ) )->get_status() );
+		$this->assertSame( $admin, get_current_user_id() );
+	}
+
+	public function test_the_stored_hash_is_not_a_pull_key() {
+		$this->store_pull_key( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		wp_set_current_user( 0 );
+
+		$response = $this->request( 'GET', 'site', array(), array( 'X-MigratePlus-Key' => MigratePlus_Settings::hash_pull_key( 'a-stored-pull-key' ) ) );
+		$this->assertSame( 401, $response->get_status() );
 	}
 
 	public function test_a_wrong_or_missing_pull_key_is_refused() {

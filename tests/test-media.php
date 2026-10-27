@@ -212,7 +212,7 @@ class Test_Media extends WP_UnitTestCase {
 		);
 		MigratePlus_Blocks::relink( $post, $job );
 		$image = '<!-- wp:image {"id":' . $hero . '} --><figure class="wp-block-image"><img src="' . wp_get_attachment_url( $hero ) . '" class="wp-image-' . $hero . '"/></figure><!-- /wp:image -->';
-		$this->assertSame( $image . '<!-- wp:block {"ref":99} /-->', get_post( $post )->post_content );
+		$this->assertSame( $image . '<!-- wp:block {"ref":-1} /-->', get_post( $post )->post_content );
 
 		// The pattern arrives: the post is relinked from what the import saved, and the image keeps its id.
 		$pattern = self::factory()->post->create( array( 'post_type' => 'wp_block' ) );

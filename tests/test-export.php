@@ -136,6 +136,32 @@ class Test_Export extends WP_UnitTestCase {
 		$this->assertStringStartsWith( 'migrateplus-post-', $state['filename'] );
 	}
 
+	public function test_a_batch_retried_with_an_old_state_does_not_export_posts_twice() {
+		self::factory()->post->create_many( 2 );
+		$state = MigratePlus_Exporter::start( MigratePlus_Exporter::sanitize_args( array( 'post_type' => 'post' ) ) );
+		$stale = $state;
+
+		// While another request holds the export, a batch leaves it alone.
+		add_option( 'migrateplus_lock_export_' . $state['id'], ( time() + 60 ) . ':other', '', false );
+		MigratePlus_Exporter::run_batch( $state, 1 );
+		$this->assertSame( 0, (int) $state['done'] );
+		delete_option( 'migrateplus_lock_export_' . $state['id'] );
+
+		MigratePlus_Exporter::run_batch( $state, 1 );
+		$this->assertSame( 1, (int) $state['done'] );
+		// A retry of the first batch, sent with the state from before it ran.
+		MigratePlus_Exporter::run_batch( $stale, 1 );
+		$this->assertSame( 2, (int) $stale['done'] );
+		while ( empty( $stale['complete'] ) ) {
+			MigratePlus_Exporter::run_batch( $stale );
+		}
+		$doc = json_decode( (string) file_get_contents( $stale['file'] ), true ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		MigratePlus_Exporter::forget( $stale['id'] );
+		$this->assertCount( 2, array_unique( array_column( $doc['items'], 'id' ) ) );
+		$this->assertCount( 2, $doc['items'] );
+		$this->assertFalse( get_option( 'migrateplus_lock_export_' . $stale['id'] ) );
+	}
+
 	/**
 	 * A draft has no GMT date until it is published: it travels with its local date instead.
 	 */

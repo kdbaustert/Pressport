@@ -201,6 +201,23 @@ class Test_Site extends WP_UnitTestCase {
 		$job->delete();
 	}
 
+	public function test_customizer_settings_keep_the_case_of_their_names() {
+		$file = $this->settings_file(
+			array(
+				'sections' => array( 'theme' ),
+				'theme'    => array(
+					'stylesheet' => get_stylesheet(),
+					'mods'       => array( 'MyTheme_Color' => 'teal' ),
+				),
+			)
+		);
+		$job  = $this->import_file( $file );
+		wp_delete_file( $file );
+		$this->assertSame( 'teal', get_theme_mod( 'MyTheme_Color' ) );
+		$this->assertFalse( get_theme_mod( 'mytheme_color', false ) );
+		$job->delete();
+	}
+
 	public function test_site_settings_need_manage_options() {
 		wp_set_current_user( self::factory()->user->create( array( 'role' => 'editor' ) ) );
 		$args = MigratePlus_Exporter::sanitize_args(

@@ -190,6 +190,37 @@ class Test_Redirects extends WP_UnitTestCase {
 		$job->delete();
 	}
 
+	public function test_a_flush_keeps_redirects_another_request_wrote_since_this_one_read_them() {
+		global $wpdb;
+		$job  = MigratePlus_Job::create( 'json', array( 'migrateplus_site' => 'http://old.test' ) );
+		$post = self::factory()->post->create( array( 'post_name' => 'new-name' ) );
+		update_option( MigratePlus_Redirects::OPTION, array( 'first' => array( 1, 'other' ) ), false );
+		// Another import's batch writes behind this request's cached copy.
+		$wpdb->update( // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+			$wpdb->options,
+			array(
+				'option_value' => maybe_serialize(
+					array(
+						'first'  => array( 1, 'other' ),
+						'second' => array( 2, 'other' ),
+					)
+				),
+			),
+			array( 'option_name' => MigratePlus_Redirects::OPTION )
+		);
+		MigratePlus_Redirects::record( $post, 'http://old.test/old-name/', $job );
+		MigratePlus_Redirects::flush();
+		$this->assertSame(
+			array(
+				'old-name' => array( $post, $job->data['id'] ),
+				'first'    => array( 1, 'other' ),
+				'second'   => array( 2, 'other' ),
+			),
+			get_option( MigratePlus_Redirects::OPTION )
+		);
+		$job->delete();
+	}
+
 	public function test_rolling_back_a_later_import_of_the_same_path_keeps_the_earlier_redirect() {
 		$first  = MigratePlus_Job::create( 'json', array( 'migrateplus_site' => 'http://old.test' ) );
 		$second = MigratePlus_Job::create( 'json', array( 'migrateplus_site' => 'http://old.test' ) );

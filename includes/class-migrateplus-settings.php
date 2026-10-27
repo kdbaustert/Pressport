@@ -23,6 +23,18 @@ class MigratePlus_Settings {
 	protected static $cache = null;
 
 	/**
+	 * Hash of the pull key generated in this request. Saving the option the first
+	 * time runs sanitize() twice (add_option() sanitizes again), and the second
+	 * pass has no checkbox in its input, so it keeps this rather than the saved key.
+	 *
+	 * @var string|null
+	 */
+	protected static $issued_pull_key = null;
+
+	// Holds a newly generated pull key until the settings screen has shown it once.
+	const NEW_PULL_KEY_TRANSIENT = 'migrateplus_new_pull_key_';
+
+	/**
 	 * @return array
 	 */
 	public static function defaults() {
@@ -363,10 +375,18 @@ class MigratePlus_Settings {
 	 * @param array $args Field args.
 	 */
 	public static function field_pull_key( $args ) {
-		$key  = (string) self::get( 'pull_key' );
-		$user = get_userdata( (int) self::get( 'pull_key_user' ) );
-		if ( '' !== $key ) {
-			printf( '<input type="text" class="regular-text code" readonly value="%s" onfocus="this.select()" aria-label="%s">', esc_attr( $key ), esc_attr( $args['title'] ) );
+		$stored = (string) self::get( 'pull_key' );
+		$user   = get_userdata( (int) self::get( 'pull_key_user' ) );
+		// Only a hash is stored, so the key itself is shown once, right after it's generated.
+		$new = (string) get_transient( self::NEW_PULL_KEY_TRANSIENT . get_current_user_id() );
+		delete_transient( self::NEW_PULL_KEY_TRANSIENT . get_current_user_id() );
+		if ( '' !== $stored ) {
+			if ( '' !== $new && hash_equals( $stored, self::hash_pull_key( $new ) ) ) {
+				printf( '<input type="text" class="regular-text code" readonly value="%s" onfocus="this.select()" aria-label="%s">', esc_attr( $new ), esc_attr( $args['title'] ) );
+				echo '<p class="migrateplus-field-help"><strong>' . esc_html__( 'Copy this key now. It won\'t be shown again.', 'migrateplus' ) . '</strong></p>';
+			} else {
+				echo '<p>' . esc_html__( 'A pull key is set.', 'migrateplus' ) . '</p>';
+			}
 			if ( $user ) {
 				/* translators: %s: the user the key authenticates as */
 				echo '<p class="migrateplus-field-help">' . esc_html( sprintf( __( 'Pulls with this key run as %s.', 'migrateplus' ), $user->display_name ) ) . '</p>';
@@ -385,6 +405,31 @@ class MigratePlus_Settings {
 			);
 		}
 		echo '<p class="migrateplus-field-help">' . esc_html__( 'Lets another site\'s Migrate Plus pull from this one with just this key, instead of a username and application password. Pulls run as the administrator who generated it. Unlike application passwords, it also works on sites served over plain http.', 'migrateplus' ) . '</p>';
+	}
+
+	/**
+	 * @param string $key A pull key.
+	 * @return string What is stored for it.
+	 */
+	public static function hash_pull_key( $key ) {
+		return hash( 'sha256', (string) $key );
+	}
+
+	/**
+	 * Whether a key sent by another site is this site's pull key. Keys generated
+	 * before they were hashed are still stored as they are, and still work.
+	 *
+	 * @param string $key The key sent.
+	 * @return bool
+	 */
+	public static function pull_key_matches( $key ) {
+		$key    = (string) $key;
+		$stored = (string) self::get( 'pull_key' );
+		if ( '' === $key || '' === $stored ) {
+			return false;
+		}
+		$hashed = 64 === strlen( $stored ) && ctype_xdigit( $stored );
+		return hash_equals( $stored, $hashed ? self::hash_pull_key( $key ) : $key );
 	}
 
 	/**
@@ -464,7 +509,13 @@ class MigratePlus_Settings {
 			$out['pull_key_user'] = 0;
 		}
 		if ( ! empty( $input['pull_key_generate'] ) ) {
-			$out['pull_key']      = wp_generate_password( 40, false );
+			$key                   = wp_generate_password( 40, false );
+			$out['pull_key']       = self::hash_pull_key( $key );
+			$out['pull_key_user']  = get_current_user_id();
+			self::$issued_pull_key = $out['pull_key'];
+			set_transient( self::NEW_PULL_KEY_TRANSIENT . get_current_user_id(), $key, 10 * MINUTE_IN_SECONDS );
+		} elseif ( null !== self::$issued_pull_key && isset( $input['pull_key'] ) && hash_equals( self::$issued_pull_key, (string) $input['pull_key'] ) ) {
+			$out['pull_key']      = self::$issued_pull_key;
 			$out['pull_key_user'] = get_current_user_id();
 		}
 

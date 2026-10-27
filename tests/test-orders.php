@@ -453,4 +453,86 @@ class Test_Orders extends WP_UnitTestCase {
 		$this->assertStringContainsString( 'Customer "cathy@old.test" was not found on this site, so the order is a guest order with the billing and shipping details from the file.', $this->log_of( $job ) );
 		$this->rollback( $job );
 	}
+
+	public function test_the_date_range_matches_the_posts_range() {
+		$late = wc_create_order();
+		$late->set_date_created( '2024-03-04 22:00:00' );
+		$late->save();
+		$future = wc_create_order();
+		$future->set_date_created( '2999-01-01 10:00:00' );
+		$future->save();
+		$count = static function ( array $range ) {
+			$args = array(
+				'post_types'     => array(),
+				'include_orders' => 1,
+			);
+			return MigratePlus_Orders::count( MigratePlus_Exporter::sanitize_args( array_merge( $args, $range ) ) );
+		};
+
+		// The last day is included in full, and a blank end means no end.
+		$this->assertSame(
+			1,
+			$count(
+				array(
+					'after'  => '2024-03-01',
+					'before' => '2024-03-04',
+				)
+			)
+		);
+		$this->assertSame( 1, $count( array( 'before' => '2024-03-04' ) ) );
+		$this->assertSame( 1, $count( array( 'after' => '2024-03-05' ) ) );
+	}
+
+	public function test_an_order_left_half_built_is_built_again_on_resume() {
+		list( , , $order ) = $this->order_with_everything();
+		$file              = $this->json_file( $this->orders_doc() );
+		$order->delete( true );
+		$preview = MigratePlus_Runner::preview( 'json', array( 'file' => $file ), 5 );
+		wp_delete_file( $file );
+		$job = $preview['job'];
+		$this->assertSame( 'skip', $job->data['options']['duplicate'] );
+		$die = static function () {
+			throw new Error( 'Maximum execution time exceeded' );
+		};
+		add_action( 'woocommerce_new_order_item', $die );
+		MigratePlus_Orders::import_batch( $job );
+		remove_action( 'woocommerce_new_order_item', $die );
+		$half = $job->imported_orders();
+		$this->assertCount( 1, $half );
+		$this->assertSame( 'pending', wc_get_order( $half[0] )->get_status() );
+		$this->assertCount( 0, wc_get_order( $half[0] )->get_refunds() );
+
+		// The request died before it saved its place, so the order comes round again.
+		$job->data['stage_pos'] = 0;
+		$result                 = MigratePlus_Orders::import_batch( $job );
+
+		$this->assertSame( 'created', $result['results'][0]['action'] );
+		$this->assertFalse( wc_get_order( $half[0] ) );
+		$built = $job->imported_orders();
+		$this->assertCount( 1, $built );
+		$new = wc_get_order( $built[0] );
+		$this->assertSame( 'completed', $new->get_status() );
+		$this->assertSame( 2, array_values( $new->get_items() )[0]->get_quantity() );
+		$this->assertCount( 1, $new->get_refunds() );
+		$this->assertSame( '', $new->get_meta( MigratePlus_Importer::INCOMPLETE_META ) );
+		$this->rollback( $job );
+	}
+
+	public function test_a_fractional_quantity_is_kept_where_the_shop_allows_one() {
+		list( , , $order )                        = $this->order_with_everything();
+		$doc                                      = $this->orders_doc();
+		$doc['orders'][0]['items'][0]['quantity'] = 1.5;
+		$file                                     = $this->json_file( $doc );
+		$order->delete( true );
+		// What decimal quantity plugins do.
+		remove_filter( 'woocommerce_stock_amount', 'intval' );
+		add_filter( 'woocommerce_stock_amount', 'floatval' );
+		$job = $this->import_file( $file );
+		wp_delete_file( $file );
+		$new = wc_get_order( $job->imported_orders()[0] );
+		$this->assertSame( 1.5, array_values( $new->get_items() )[0]->get_quantity() );
+		remove_filter( 'woocommerce_stock_amount', 'floatval' );
+		add_filter( 'woocommerce_stock_amount', 'intval' );
+		$this->rollback( $job );
+	}
 }

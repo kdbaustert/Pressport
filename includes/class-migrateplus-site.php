@@ -844,7 +844,7 @@ class MigratePlus_Site {
 			$mods       = array();
 		}
 		foreach ( $mods as $key => $value ) {
-			$key = sanitize_key( $key );
+			$key = (string) $key; // Exactly as the theme named it: sanitize_key() would lowercase MyTheme_Color into a mod nothing reads.
 			if ( '' === $key || in_array( $key, self::SKIP_MODS, true ) ) {
 				continue;
 			}

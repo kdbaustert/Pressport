@@ -56,16 +56,16 @@ class MigratePlus_Upgrade {
 		$new_dir = wp_normalize_path( MigratePlus_Util::storage_dir() );
 		self::move_dir( $old_dir, $new_dir );
 		list( $options, $options_ok ) = self::rename_options( $old_dir, $new_dir );
-		$meta                         = self::rename_meta();
+		list( $meta, $meta_ok )       = self::rename_meta();
 		wp_clear_scheduled_hook( self::OLD_CRON_HOOK ); // The new hook is scheduled on init.
 		MigratePlus_Settings::flush_cache();
 		// Meta was renamed in SQL, behind any persistent object cache, which may also hold "no such
-		// option" for the new names. Not on a new install, which has nothing to rename and would
-		// only lose every cached value.
-		if ( $options || false === $meta || $meta > 0 ) {
+		// option" for the new names. Only when something moved: not on a new install, and not on
+		// every load while a write keeps failing, which would lose every cached value each time.
+		if ( $options || $meta ) {
 			wp_cache_flush();
 		}
-		return $options_ok && false !== $meta;
+		return $options_ok && $meta_ok;
 	}
 
 	/**
@@ -115,12 +115,13 @@ class MigratePlus_Upgrade {
 	 *
 	 * @param string $old_dir Old storage folder.
 	 * @param string $new_dir New storage folder.
-	 * @return array { 0: int old options found, 1: bool whether every one was moved }
+	 * @return array { 0: int old options moved, 1: bool whether every one was moved }
 	 */
 	protected static function rename_options( $old_dir, $new_dir ) {
 		global $wpdb;
-		$ok   = true;
-		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT option_name, autoload FROM {$wpdb->options} WHERE option_name LIKE %s", $wpdb->esc_like( self::OLD_OPTION_PREFIX ) . '%' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$ok    = true;
+		$moved = 0;
+		$rows  = $wpdb->get_results( $wpdb->prepare( "SELECT option_name, autoload FROM {$wpdb->options} WHERE option_name LIKE %s", $wpdb->esc_like( self::OLD_OPTION_PREFIX ) . '%' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		foreach ( (array) $rows as $row ) {
 			$new = 'migrateplus_' . substr( $row->option_name, strlen( self::OLD_OPTION_PREFIX ) );
 			$old = get_option( $row->option_name );
@@ -142,9 +143,9 @@ class MigratePlus_Upgrade {
 				$ok = false;
 				continue;
 			}
-			delete_option( $row->option_name );
+			$moved += (int) delete_option( $row->option_name );
 		}
-		return array( count( (array) $rows ), $ok );
+		return array( $moved, $ok );
 	}
 
 	/**
@@ -153,7 +154,7 @@ class MigratePlus_Upgrade {
 	 * and the per-product "_pressport_pending_<hash>" keys alike. A prefix LIKE uses
 	 * the meta_key index, so this stays fast however many rows there are.
 	 *
-	 * @return int|false Rows renamed, or false when an UPDATE failed.
+	 * @return array { 0: int rows renamed, 1: bool whether every UPDATE worked }
 	 */
 	protected static function rename_meta() {
 		global $wpdb;
@@ -161,11 +162,11 @@ class MigratePlus_Upgrade {
 		foreach ( array( $wpdb->postmeta, $wpdb->commentmeta, $wpdb->termmeta ) as $table ) {
 			$done = $wpdb->query( $wpdb->prepare( "UPDATE {$table} SET meta_key = CONCAT( %s, SUBSTRING( meta_key, %d ) ) WHERE meta_key LIKE %s", '_migrateplus_', strlen( self::OLD_META_PREFIX ) + 1, $wpdb->esc_like( self::OLD_META_PREFIX ) . '%' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- core table names.
 			if ( false === $done ) {
-				return false;
+				return array( $rows, false );
 			}
 			$rows += (int) $done;
 		}
-		return $rows;
+		return array( $rows, true );
 	}
 
 	/**

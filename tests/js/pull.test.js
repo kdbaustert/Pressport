@@ -106,6 +106,27 @@ describe('Pull', () => {
     assert.equal(env.modal.title(), 'Import 12 items?')
   })
 
+  it('does not retry the download, which may have made its job before the answer was lost', async () => {
+    const env = boot({
+      routes: {
+        pull_check: oldSite,
+        pull_start: { export: 'exp123', total: 12 },
+        pull_run: { done: 12, total: 12, complete: true, filename: 'pull.json' },
+        pull_fetch: offline,
+      },
+    })
+
+    await connect(env, { url: 'https://old.test', user: 'kenny', pass: 'abcd efgh ijkl' })
+    await env.until(() => env.byText('button', 'Pull 12 items'))
+    env.click(env.byText('button', 'Pull 12 items'))
+    await env.flush()
+    env.clock.tick(20000)
+    await env.flush()
+
+    assert.equal(env.sent('pull_fetch').length, 1)
+    assert.equal(env.modal.title(), 'Could not pull from the old site')
+  })
+
   it('connects with the pull key instead, sending no username or password', async () => {
     const env = boot({ routes: { pull_check: oldSite } })
 

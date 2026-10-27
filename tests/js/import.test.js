@@ -447,6 +447,19 @@ describe('Duplicates', () => {
     assert.deepEqual(opts.update_ids, [41, 43])
   })
 
+  it('gives two records that match the same post one choice, as the server reads it', async () => {
+    const items = dupItems()
+    items.splice(2, 0, { ...items[1], index: 2 })
+    const env = await duplicatesScreen({ duplicates: dups({ count: 5, items }) })
+    env.choose(choice(env, 2), 'copy')
+    assert.equal(choice(env, 1).value, 'copy')
+    assert.deepEqual(chips(env), ['New: 1', 'Will update: 0', 'Skipped: 3', 'Imported as copies: 2', 'Update details: 0', 'Replace file: 0'])
+
+    env.click(dupButton(env, 'Import'))
+    await env.flush()
+    assert.deepEqual(json(env.sent('save')[0], 'options').copy_ids, [42])
+  })
+
   it('counts each choice in the chips and the summary as it changes', async () => {
     const env = await duplicatesScreen()
     assert.deepEqual(chips(env), ['New: 2', 'Will update: 0', 'Skipped: 4', 'Imported as copies: 0', 'Update details: 0', 'Replace file: 0'])

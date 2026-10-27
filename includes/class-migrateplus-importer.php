@@ -223,7 +223,9 @@ class MigratePlus_Importer {
 				return self::result( 'failed', $existing, sprintf( __( 'Not updated: you are not allowed to edit "%1$s" (#%2$d).', 'migrateplus' ), $label, $existing ) );
 			}
 			$status = isset( $postarr['post_status'] ) ? $postarr['post_status'] : '';
-			if ( ! $updating && 'attachment' !== $type && in_array( $status, array( 'publish', 'future' ), true ) && ! current_user_can( $caps->publish_posts ) ) {
+			// Updating, a post that already has the status keeps it: an Editor without publish_posts may still edit a live post.
+			$publishes = in_array( $status, array( 'publish', 'future' ), true ) && ( ! $updating || get_post_status( $existing ) !== $status );
+			if ( $publishes && 'attachment' !== $type && ! current_user_can( $caps->publish_posts ) ) {
 				$postarr['post_status'] = 'pending';
 				$warnings[]             = __( 'You are not allowed to publish, so it was saved as pending review.', 'migrateplus' );
 			}
@@ -1013,7 +1015,8 @@ class MigratePlus_Importer {
 		}
 
 		// User ids and accounts differ from site to site, so the old site's author is only kept as
-		// a note (keep_source_author()): the post gets the author picked here.
+		// a note (keep_source_author()): the post gets the author picked here. With none picked, a
+		// new post gets whoever runs the import (wp_insert_post()'s default) and an update keeps its author.
 		$who    = self::source_author( $record, $mapping );
 		$author = self::author_for( $opts, $index, $who['key'] );
 		if ( $author ) {
@@ -1036,15 +1039,15 @@ class MigratePlus_Importer {
 	}
 
 	/**
-	 * The author a record gets: the one picked for it by its position in the file, else the
-	 * one picked for its author on the old site, else the one picked for all, else whoever
-	 * runs the import. Each pick counts only while it is someone who may write posts (an
-	 * account can be removed while a job waits).
+	 * The author picked for a record: the one picked for it by its position in the file, else
+	 * the one picked for its author on the old site, else the one picked for all. Each pick
+	 * counts only while it is someone who may write posts (an account can be removed while a
+	 * job waits).
 	 *
 	 * @param array    $opts   Job options.
 	 * @param int|null $index  The record's position in the file, or null when unknown.
 	 * @param string   $source The record's author on the old site (source_author()'s key), or ''.
-	 * @return int User id; 0 under WP-CLI without --user, which leaves the author to WordPress.
+	 * @return int User id, or 0 when none is picked.
 	 */
 	public static function author_for( array $opts, $index, $source = '' ) {
 		$authors = isset( $opts['authors'] ) && is_array( $opts['authors'] ) ? $opts['authors'] : array();
@@ -1059,7 +1062,7 @@ class MigratePlus_Importer {
 				return $pick;
 			}
 		}
-		return get_current_user_id();
+		return 0;
 	}
 
 	/**

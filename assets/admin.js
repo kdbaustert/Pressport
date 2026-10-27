@@ -1206,7 +1206,8 @@
 				return poll();
 			}
 			modal.update( { message: __( 'Export done. Downloading the file and reading the first records…', 'migrateplus' ), percent: null } );
-			return apiWithRetry( 'pull_fetch', withCreds( { export: exportId, filename: p.filename || '' } ) ).then( ( data ) => {
+			// Not retried: an answer lost after the download already made a job, and a retry would make a second.
+			return api( 'pull_fetch', withCreds( { export: exportId, filename: p.filename || '' } ) ).then( ( data ) => {
 				if ( cancelled ) {
 					// The file arrived before the cancel reached it: don't leave its job in History.
 					api( 'delete', { job: data.job.id } ).catch( () => {} );
@@ -1436,7 +1437,9 @@
 			d,
 			from,
 			back: state.step,
-			choices: prev ? prev.choices : new Map(), // Record index => choice; unset means the default.
+			// Post id here => choice; unset means the default. By post, as the server reads them: two records
+			// matching the same post share one choice, which the screen shows on both.
+			choices: prev ? prev.choices : new Map(),
 			rest: prev ? prev.rest : 'skip', // What happens to duplicates past the list, when it was cut short.
 			filter: 'all',
 			query: '',
@@ -1454,7 +1457,7 @@
 	}
 
 	function choiceOf( it ) {
-		const v = state.dups.choices.get( it.index );
+		const v = state.dups.choices.get( it.post_id );
 		return v && choicesFor( it ).some( ( c ) => c[ 0 ] === v ) ? v : defaultChoice( it );
 	}
 
@@ -1515,7 +1518,7 @@
 		const { d, rest } = state.dups;
 		const items = d.items || [];
 		const lists = { update: [], replace: [], copy: [], skip: [] };
-		items.forEach( ( it ) => lists[ choiceOf( it ) ].push( it.post_id ) );
+		items.forEach( ( it ) => lists[ choiceOf( it ) ].includes( it.post_id ) || lists[ choiceOf( it ) ].push( it.post_id ) );
 		const natural = { update: 'update', create: 'copy' }[ state.options.duplicate ] || 'skip';
 		const agree = items.every( ( it ) => 'before' !== it.kind || choiceOf( it ) === natural );
 		const out = {
@@ -1606,7 +1609,7 @@
 		const rows = shown.slice( page * DUPLICATES_PAGE, ( page + 1 ) * DUPLICATES_PAGE );
 		const c = duplicateCounts();
 		const set = ( list, v ) => {
-			list.forEach( ( it ) => s.choices.set( it.index, v ) );
+			list.forEach( ( it ) => s.choices.set( it.post_id, v ) );
 			render();
 		};
 		const posts = shown.filter( ( it ) => ! it.media );
@@ -2565,7 +2568,9 @@
 	 */
 	function AuthorPicker( { id, label, hideLabel, emptyLabel, value, onChange, help } ) {
 		const [ found, setFound ] = useImmediateState( null ); // Search results, or null to list D.authors.
+		const [ problem, setProblem ] = useImmediateState( '' );
 		const timer = useRef( null );
+		const asked = useRef( 0 );
 		const picked = Number( value ) > 0 ? String( value ) : '';
 		const list = ( found || D.authors || [] ).slice();
 		if ( picked && seenAuthors.has( picked ) && ! list.some( ( u ) => String( u.id ) === picked ) ) {
@@ -2573,17 +2578,23 @@
 		}
 		const search = ( e ) => {
 			const q = e.target.value.trim();
+			const ticket = ++asked.current; // On input, not in the timer: an answer to what was typed before is stale.
 			clearTimeout( timer.current );
 			timer.current = setTimeout( () => {
 				if ( ! q ) {
+					setProblem( '' );
 					setFound( null );
 					return;
 				}
 				api( 'users', { q } ).then( ( d ) => {
+					if ( ticket !== asked.current ) {
+						return;
+					}
 					const users = Array.isArray( d ) ? d : ( d.authors || [] );
 					users.forEach( ( u ) => seenAuthors.set( String( u.id ), u ) );
+					setProblem( '' );
 					setFound( users );
-				} ).catch( () => setFound( [] ) );
+				} ).catch( ( err ) => ticket === asked.current && setProblem( err.message ) );
 			}, 300 );
 		};
 		return createElement( 'div', { className: 'migrateplus-author' + ( hideLabel ? '' : ' migrateplus-opt' ) },
@@ -2593,6 +2604,7 @@
 				createElement( 'option', { value: '' }, emptyLabel ),
 				/* translators: 1: a user's display name, 2: their login */
 				list.map( ( u ) => createElement( 'option', { key: u.id, value: String( u.id ) }, sprintf( __( '%1$s (%2$s)', 'migrateplus' ), u.name, u.login ) ) ) ),
+			problem ? createElement( 'div', { className: 'notice notice-error inline' }, createElement( 'p', null, problem ) ) : null,
 			help ? createElement( 'span', { className: 'migrateplus-help' }, help ) : null
 		);
 	}
@@ -2638,6 +2650,7 @@
 					.then( ( d ) => {
 						// The pickers must list a matched account even when the site's first 200 users leave it out.
 						( d.authors || [] ).forEach( ( a ) => a.match && seenAuthors.set( String( a.match.id ), a.match ) );
+						setProblem( '' );
 						setFound( d );
 					} )
 					.catch( ( err ) => setProblem( err.message ) );
@@ -3328,8 +3341,8 @@
 		// Not empty until the count says so: a count that fails must not leave Export disabled by an older answer.
 		state.exportCount = Object.assign( {}, state.exportCount, { text: __( 'Counting…', 'migrateplus' ), empty: false } );
 		render();
+		const seq = ++exportCountSeq; // Now, not in the timer: an answer that lands while this one waits is stale.
 		exportCountTimer = setTimeout( () => {
-			const seq = ++exportCountSeq;
 			api( 'export_count', { args: exportArgsToSend() } ).then( ( d ) => {
 				if ( seq !== exportCountSeq ) {
 					return;
@@ -3553,8 +3566,8 @@
 			state.exportPickBusy = true;
 			state.exportPickError = '';
 			render();
+			const seq = ++pickSearchSeq; // Now, not in the timer: an answer that lands while this one waits is stale.
 			pickSearchTimer = setTimeout( () => {
-				const seq = ++pickSearchSeq;
 				api( 'export_posts', { search: term.trim() } ).then( ( d ) => {
 					if ( seq !== pickSearchSeq ) {
 						return;

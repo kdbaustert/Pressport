@@ -165,4 +165,27 @@ class Test_Sources extends WP_UnitTestCase {
 		wp_delete_file( $file );
 		$this->assertSame( 'This file holds more than 10 B of JSON, more than this server can import. Use a smaller export, or raise PHP\'s memory limit.', $out->get_error_message() );
 	}
+
+	public function test_a_batch_that_throws_unlocks_the_job_and_turns_counting_back_on() {
+		add_filter( 'migrateplus_sources', array( $this, 'add_sources' ) );
+		$job                           = MigratePlus_Job::create( 'books', array( 'count' => '2' ) );
+		MigratePlus_Test_Source::$down = true;
+		try {
+			MigratePlus_Runner::run_batch( $job );
+			$this->fail( 'The batch should have thrown.' );
+		} catch ( RuntimeException $e ) {
+			$this->assertSame( 'The feed is down.', $e->getMessage() );
+		} finally {
+			MigratePlus_Test_Source::$down = false;
+		}
+		wp_cache_delete( 'migrateplus_lock_' . $job->data['id'], 'options' );
+		$this->assertFalse( get_option( 'migrateplus_lock_' . $job->data['id'] ) );
+		$this->assertFalse( wp_defer_term_counting() );
+		$this->assertFalse( wp_defer_comment_counting() );
+
+		$result = MigratePlus_Runner::run_batch( $job );
+		remove_filter( 'migrateplus_sources', array( $this, 'add_sources' ) );
+		$this->assertIsArray( $result );
+		$job->delete();
+	}
 }

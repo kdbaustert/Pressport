@@ -72,9 +72,15 @@ class MigratePlus_Redirects {
 		if ( ! self::$buffer ) {
 			return;
 		}
-		$map          = self::$buffer + self::stored();
+		$buffer       = self::$buffer;
 		self::$buffer = array();
-		update_option( self::OPTION, $map, false );
+		// Locked: two imports' batches flushing at once would each drop the other's redirects.
+		MigratePlus_Util::update_option_locked(
+			self::OPTION,
+			function ( $map ) use ( $buffer ) {
+				return $buffer + ( is_array( $map ) ? $map : array() );
+			}
+		);
 	}
 
 	/**
@@ -114,21 +120,24 @@ class MigratePlus_Redirects {
 	 */
 	public static function forget_job( $job_id ) {
 		self::flush();
-		$map     = self::stored();
-		$kept    = array();
 		$removed = 0;
-		foreach ( $map as $path => $entry ) {
-			$left = self::without_job( $entry, (string) $job_id );
-			if ( (string) $entry[1] === (string) $job_id ) {
-				++$removed;
+		MigratePlus_Util::update_option_locked(
+			self::OPTION,
+			function ( $map ) use ( $job_id, &$removed ) {
+				$map  = is_array( $map ) ? $map : array();
+				$kept = array();
+				foreach ( $map as $path => $entry ) {
+					$left = self::without_job( $entry, (string) $job_id );
+					if ( (string) $entry[1] === (string) $job_id ) {
+						++$removed;
+					}
+					if ( null !== $left ) {
+						$kept[ $path ] = $left;
+					}
+				}
+				return $kept !== $map ? $kept : null;
 			}
-			if ( null !== $left ) {
-				$kept[ $path ] = $left;
-			}
-		}
-		if ( $kept !== $map ) {
-			update_option( self::OPTION, $kept, false );
-		}
+		);
 		return $removed;
 	}
 

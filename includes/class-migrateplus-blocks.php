@@ -32,6 +32,13 @@ class MigratePlus_Blocks {
 	const PENDING_META = '_migrateplus_pending_ref';
 
 	/**
+	 * A ref's id while its post is not here: no post has it, so the block shows nothing.
+	 *
+	 * @var int
+	 */
+	const NOWHERE = -1;
+
+	/**
 	 * Post meta keeping a waiting post's markup as the import saved it, with the
 	 * old site's ids: { content, job, media, written }.
 	 *
@@ -62,12 +69,14 @@ class MigratePlus_Blocks {
 	 * An attribute may hold one id or a list (of ids, or of objects with an id).
 	 * A template part's "theme" is a name, and is left alone.
 	 *
-	 * @var array[] block => [ attribute => what it names: post, attachment, link,
-	 *              term:<taxonomy>, or query (a query block's query) ]
+	 * @var array[] block => [ attribute => what it names: post, ref, attachment, link,
+	 *              term:<taxonomy>, or query (a query block's query) ]. A ref is a
+	 *              post that, until it is here, is pointed at NOWHERE: its old id
+	 *              may be another post here, which the block would then show.
 	 */
 	const REFS = array(
-		'core/block'                       => array( 'ref' => 'post' ),
-		'core/navigation'                  => array( 'ref' => 'post' ),
+		'core/block'                       => array( 'ref' => 'ref' ),
+		'core/navigation'                  => array( 'ref' => 'ref' ),
 		'core/navigation-link'             => array( 'id' => 'link' ),
 		'core/navigation-submenu'          => array( 'id' => 'link' ),
 		'core/image'                       => array( 'id' => 'attachment' ),
@@ -277,7 +286,7 @@ class MigratePlus_Blocks {
 
 	/**
 	 * An attribute's id, or list of ids, pointed at this site's content. Ids not
-	 * found stay as they are.
+	 * found stay as they are, but a ref's become NOWHERE.
 	 *
 	 * @param string $kind  What the ids name (see REFS).
 	 * @param mixed  $value Id, list of ids, or list of objects with an id.
@@ -299,6 +308,9 @@ class MigratePlus_Blocks {
 			return $value;
 		}
 		$new = self::resolve( $kind, $value, $ctx['attrs'], $ctx['job'], $ctx['pending'], $ctx['media'] );
+		if ( ! $new && 'ref' === $kind && is_numeric( $value ) ) {
+			return is_string( $value ) ? (string) self::NOWHERE : self::NOWHERE;
+		}
 		if ( ! $new || $new === (int) $value ) {
 			return $value;
 		}
@@ -322,7 +334,7 @@ class MigratePlus_Blocks {
 		$query = clone $query;
 		foreach ( array( 'exclude', 'parents' ) as $key ) {
 			if ( isset( $query->$key ) ) {
-				$query->$key = self::relink_value( 'post', $query->$key, $ctx );
+				$query->$key = self::relink_value( 'ref', $query->$key, $ctx );
 			}
 		}
 		if ( isset( $query->taxQuery ) && $query->taxQuery instanceof stdClass ) { // phpcs:ignore WordPress.NamingConventions.ValidVariableName.UsedPropertyNotSnakeCase -- the block's own name.
@@ -353,7 +365,7 @@ class MigratePlus_Blocks {
 	/**
 	 * This site's id for content the old site named by id.
 	 *
-	 * @param string          $kind    post, attachment, link or term:<taxonomy>.
+	 * @param string          $kind    post, ref, attachment, link or term:<taxonomy>.
 	 * @param mixed           $old     Id on the old site.
 	 * @param array           $attrs   The block's attributes (a link says whether it points at a post or a term).
 	 * @param MigratePlus_Job $job     Job.

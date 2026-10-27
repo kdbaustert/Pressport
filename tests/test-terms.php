@@ -177,11 +177,65 @@ class Test_Terms extends WP_UnitTestCase {
 		$doc['migrateplus']['site'] = 'http://old.test';
 		$file                       = $this->json_file( $doc );
 
-		$job = $this->import_file( $file );
+		$job = $this->import_file( $file, array( 'duplicate' => 'update' ) );
 		$this->assertSame( 'After.', get_term( $term, 'category' )->description );
 		$this->assertSame( 'star', get_term_meta( $term, 'badge', true ) );
 		$job->delete();
 		wp_delete_file( $file );
+	}
+
+	public function test_skip_leaves_a_term_already_here_as_it_is() {
+		$term = self::factory()->category->create(
+			array(
+				'name'        => 'Guides',
+				'description' => 'Before.',
+			)
+		);
+		$doc  = $this->export_doc( array( 'include_term_data' => 1 ) );
+		foreach ( $doc['terms'] as $i => $record ) {
+			if ( 'Guides' === $record['name'] ) {
+				$doc['terms'][ $i ]['description'] = 'After.';
+			}
+		}
+		$doc['migrateplus']['site'] = 'http://old.test';
+		$file                       = $this->json_file( $doc );
+
+		$job = $this->import_file( $file );
+		wp_delete_file( $file );
+		$this->assertSame( 'skip', $job->data['options']['duplicate'] );
+		$this->assertSame( 'Before.', get_term( $term, 'category' )->description );
+		$this->assertContains( 'Already here: term "Guides" (category).', array_column( $job->data['log'], 'm' ) );
+		$job->delete();
+	}
+
+	public function test_a_term_that_only_shares_the_slug_is_left_alone() {
+		$old = self::factory()->category->create(
+			array(
+				'name'        => 'News',
+				'slug'        => 'news',
+				'description' => 'From the old site.',
+			)
+		);
+		$doc = $this->export_doc( array( 'include_term_data' => 1 ) );
+		wp_delete_term( $old, 'category' );
+		$here                       = self::factory()->category->create(
+			array(
+				'name'        => 'Latest',
+				'slug'        => 'news',
+				'description' => 'Ours.',
+			)
+		);
+		$doc['migrateplus']['site'] = 'http://old.test';
+		$file                       = $this->json_file( $doc );
+
+		$job = $this->import_file( $file, array( 'duplicate' => 'update' ) );
+		wp_delete_file( $file );
+		$this->assertSame( 'Latest', get_term( $here, 'category' )->name );
+		$this->assertSame( 'Ours.', get_term( $here, 'category' )->description );
+		$news = get_term_by( 'name', 'News', 'category' );
+		$this->assertInstanceOf( 'WP_Term', $news );
+		$this->assertSame( 'From the old site.', $news->description );
+		$job->delete();
 	}
 
 	public function test_rollback_removes_created_terms_and_keeps_existing_ones() {
@@ -336,7 +390,7 @@ class Test_Terms extends WP_UnitTestCase {
 		$doc['migrateplus']['site'] = 'http://old.test';
 		$file                       = $this->json_file( $doc );
 
-		$job = $this->import_file( $file );
+		$job = $this->import_file( $file, array( 'duplicate' => 'update' ) );
 		wp_delete_file( $file );
 		$this->assertSame( $gear, get_term( $tents, 'category' )->parent );
 		$this->assertStringContainsString( '"Tents" keeps the parent it has here until that parent is imported', implode( "\n", wp_list_pluck( $job->data['log'], 'm' ) ) );

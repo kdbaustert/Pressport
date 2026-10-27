@@ -280,6 +280,31 @@ class Test_Upgrade extends WP_UnitTestCase {
 	}
 
 	/**
+	 * A move that keeps failing runs again on every load, and must not empty the object cache each time.
+	 */
+	public function test_a_run_that_moved_nothing_keeps_the_object_cache() {
+		global $wpdb;
+		delete_option( MigratePlus_Upgrade::FLAG );
+		update_option( 'pressport_kept', 'value', false );
+		add_post_meta( self::factory()->post->create(), '_pressport_job_id', 'abc' );
+		$fail = static function ( $query ) {
+			$query = ltrim( $query );
+			$copy  = 0 === strpos( $query, 'INSERT INTO' ) && false !== strpos( $query, 'migrateplus_kept' );
+			$meta  = 0 === strpos( $query, 'UPDATE' ) && false !== strpos( $query, 'CONCAT' );
+			return $copy || $meta ? 'SELECT broken FROM' : $query;
+		};
+		add_filter( 'query', $fail );
+		$errors = $wpdb->suppress_errors( true );
+		wp_cache_set( 'probe', 'kept', 'migrateplus_test' );
+		MigratePlus_Upgrade::maybe_run();
+		$wpdb->suppress_errors( $errors );
+		remove_filter( 'query', $fail );
+
+		$this->assertFalse( get_option( MigratePlus_Upgrade::FLAG ) );
+		$this->assertSame( 'kept', wp_cache_get( 'probe', 'migrateplus_test' ) );
+	}
+
+	/**
 	 * The old folder's index.php and .htaccess keep guarding a file that could not be moved.
 	 */
 	public function test_guard_files_stay_while_a_file_is_left_in_the_old_folder() {

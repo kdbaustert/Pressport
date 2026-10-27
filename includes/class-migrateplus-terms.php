@@ -348,6 +348,10 @@ class MigratePlus_Terms {
 
 		$uid      = self::uid( $job, $record );
 		$existing = self::find_term( $record, $uid );
+		if ( $existing && 'skip' === $opts['duplicate'] ) {
+			/* translators: 1: term name, 2: taxonomy */
+			return self::result( 'skipped', $existing, sprintf( __( 'Already here: term "%1$s" (%2$s).', 'migrateplus' ), $label, $taxonomy ) );
+		}
 		$parent   = $tax->hierarchical ? self::find_parent( $record, $job ) : 0;
 		$warnings = array();
 		// A parent not here yet may come later in the file: the term waits for it under its uid.
@@ -455,7 +459,8 @@ class MigratePlus_Terms {
 	/**
 	 * The term a record names on this site: by the uid it was imported with, then
 	 * by its exact slug, then by its "Parent > Child" path. Names are compared
-	 * exactly along the path, and the term found must carry the record's name:
+	 * exactly along the path, and the term found by slug or path must carry the
+	 * record's name, so another term that happens to share the slug is left alone:
 	 * term_exists() matches the sanitized name first, so "C", "C#" and "C++"
 	 * (all "c") would otherwise land on one term, renamed by each update.
 	 *
@@ -481,18 +486,28 @@ class MigratePlus_Terms {
 				return (int) $ids[0];
 			}
 		}
+		$name = isset( $record['name'] ) ? html_entity_decode( trim( MigratePlus_Util::stringify( $record['name'] ) ), ENT_QUOTES, 'UTF-8' ) : '';
 		$slug = isset( $record['slug'] ) ? sanitize_title( MigratePlus_Util::stringify( $record['slug'] ) ) : '';
 		$term = '' !== $slug ? get_term_by( 'slug', $slug, $taxonomy ) : false;
-		if ( $term instanceof WP_Term ) {
+		if ( $term instanceof WP_Term && self::is_named( (int) $term->term_id, $taxonomy, $name ) ) {
 			return (int) $term->term_id;
 		}
 		$path = isset( $record['path'] ) ? MigratePlus_Util::stringify( $record['path'] ) : '';
 		$id   = '' !== $path ? self::term_at_path( $taxonomy, $path ) : 0;
-		$name = isset( $record['name'] ) ? html_entity_decode( trim( MigratePlus_Util::stringify( $record['name'] ) ), ENT_QUOTES, 'UTF-8' ) : '';
-		if ( $id && '' !== $name && html_entity_decode( (string) get_term_field( 'name', $id, $taxonomy, 'raw' ), ENT_QUOTES, 'UTF-8' ) !== $name ) {
-			return 0;
-		}
-		return $id;
+		return $id && self::is_named( $id, $taxonomy, $name ) ? $id : 0;
+	}
+
+	/**
+	 * Whether a term carries a name, compared exactly. A record without a name
+	 * (a menu item may give only the slug) matches any.
+	 *
+	 * @param int    $term_id  Term id.
+	 * @param string $taxonomy Taxonomy.
+	 * @param string $name     Name with entities decoded, or ''.
+	 * @return bool
+	 */
+	protected static function is_named( $term_id, $taxonomy, $name ) {
+		return '' === $name || html_entity_decode( (string) get_term_field( 'name', $term_id, $taxonomy, 'raw' ), ENT_QUOTES, 'UTF-8' ) === $name;
 	}
 
 	/**

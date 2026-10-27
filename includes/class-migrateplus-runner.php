@@ -693,7 +693,27 @@ class MigratePlus_Runner {
 		}
 		wp_defer_term_counting( true );
 		wp_defer_comment_counting( true );
+		try {
+			return self::run_stage( $job, $source, $lock );
+		} finally {
+			// Also when the batch threw: counting would stay deferred, and the job locked for LOCK_TTL.
+			wp_defer_term_counting( false );
+			wp_defer_comment_counting( false );
+			if ( $lock ) {
+				self::unlock( $job, $lock );
+			}
+		}
+	}
 
+	/**
+	 * One batch of the stage a locked job is on.
+	 *
+	 * @param MigratePlus_Job    $job    Job.
+	 * @param MigratePlus_Source $source The job's source.
+	 * @param string|false       $lock   Lock token, renewed in place as records finish; false once lost.
+	 * @return array|WP_Error { done: bool, results: array[] }
+	 */
+	protected static function run_stage( MigratePlus_Job $job, MigratePlus_Source $source, &$lock ) {
 		$stage = (string) $job->data['stage'];
 		if ( '' !== $stage && 'records' !== $stage && ! isset( self::side_stages()[ $stage ] ) ) {
 			// Left by an older version on a section it no longer has (users). The sections run again from the
@@ -770,6 +790,8 @@ class MigratePlus_Runner {
 		$job->data['cursor_skip'] = 0;
 		$done                     = null === $batch['next'] || empty( $batch['records'] );
 		if ( $done ) {
+			// Field groups shown on given pages can only point at them now the pages are here.
+			MigratePlus_ACF_Definitions::relink_locations( $job );
 			// Menus and the other side sections that point at the records come after them, in requests of their own.
 			$done = ! self::advance( $job, 'records' );
 		}

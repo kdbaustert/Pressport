@@ -62,7 +62,10 @@ class Test_Settings extends WP_UnitTestCase {
 		$this->assertSame( 0, $out['pull_key_user'] );
 
 		$out = MigratePlus_Settings::sanitize( array( 'pull_key_generate' => '1' ) );
-		$this->assertSame( 40, strlen( $out['pull_key'] ) );
+		$key = get_transient( MigratePlus_Settings::NEW_PULL_KEY_TRANSIENT . get_current_user_id() );
+		$this->assertSame( 40, strlen( $key ) );
+		// Only its hash is stored.
+		$this->assertSame( hash( 'sha256', $key ), $out['pull_key'] );
 		$this->assertSame( get_current_user_id(), $out['pull_key_user'] );
 		update_option( MigratePlus_Settings::OPTION, $out );
 
@@ -74,6 +77,39 @@ class Test_Settings extends WP_UnitTestCase {
 		$revoked = MigratePlus_Settings::sanitize( array( 'pull_key_revoke' => '1' ) );
 		$this->assertSame( '', $revoked['pull_key'] );
 		$this->assertSame( 0, $revoked['pull_key_user'] );
+	}
+
+	public function test_the_first_save_keeps_the_generated_pull_key() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		MigratePlus_Settings::register();
+		delete_option( MigratePlus_Settings::OPTION );
+
+		// The option doesn't exist yet, so add_option() sanitizes a second time.
+		update_option( MigratePlus_Settings::OPTION, array( 'pull_key_generate' => '1' ) );
+
+		$key   = get_transient( MigratePlus_Settings::NEW_PULL_KEY_TRANSIENT . get_current_user_id() );
+		$saved = get_option( MigratePlus_Settings::OPTION );
+		$this->assertSame( hash( 'sha256', $key ), $saved['pull_key'] );
+		$this->assertSame( get_current_user_id(), $saved['pull_key_user'] );
+	}
+
+	public function test_the_pull_key_field_shows_a_new_key_once() {
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		update_option( MigratePlus_Settings::OPTION, MigratePlus_Settings::sanitize( array( 'pull_key_generate' => '1' ) ) );
+		MigratePlus_Settings::flush_cache();
+		$key  = get_transient( MigratePlus_Settings::NEW_PULL_KEY_TRANSIENT . get_current_user_id() );
+		$args = array( 'title' => 'Pull key' );
+
+		ob_start();
+		MigratePlus_Settings::field_pull_key( $args );
+		$first = ob_get_clean();
+		ob_start();
+		MigratePlus_Settings::field_pull_key( $args );
+		$second = ob_get_clean();
+
+		$this->assertStringContainsString( 'value="' . $key . '"', $first );
+		$this->assertStringNotContainsString( $key, $second );
+		$this->assertStringContainsString( 'A pull key is set.', $second );
 	}
 
 	/**
